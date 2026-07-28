@@ -1,0 +1,524 @@
+'use client';
+
+import { useState } from 'react';
+import { useQuery, useMutation } from 'convex/react';
+import { api } from '../../../convex/_generated/api';
+import { Id } from '../../../convex/_generated/dataModel';
+
+interface ContactDetailProps {
+  contactId: string | null;
+  onContactDeleted: () => void;
+  onClose: () => void;
+}
+
+const activityIcons: Record<string, string> = {
+  email_sent: '\u2197',
+  email_received: '\u2199',
+  meeting: '\uD83D\uDCC5',
+  note: '\uD83D\uDCDD',
+  call: '\uD83D\uDCDE',
+};
+
+const activityLabels: Record<string, string> = {
+  email_sent: 'Email Sent',
+  email_received: 'Email Received',
+  meeting: 'Meeting',
+  note: 'Note',
+  call: 'Call',
+};
+
+const tierColors: Record<string, string> = {
+  A: 'bg-accent-green/10 text-accent-green',
+  B: 'bg-accent-blue/10 text-accent-blue',
+  C: 'bg-muted text-muted-foreground',
+};
+
+function getInitials(name: string): string {
+  return name
+    .split(' ')
+    .map((w) => w[0])
+    .filter(Boolean)
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
+}
+
+function getInitialsColor(name: string): string {
+  const colors = [
+    'bg-accent-blue', 'bg-accent-green', 'bg-accent-orange', 'bg-accent-red',
+  ];
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return colors[Math.abs(hash) % colors.length];
+}
+
+function formatTimestamp(ts: number): string {
+  const d = new Date(ts);
+  return d.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
+export default function ContactDetail({
+  contactId,
+  onContactDeleted,
+  onClose,
+}: ContactDetailProps) {
+  const typedId = contactId as Id<"contacts"> | null;
+
+  const contact = useQuery(
+    api.contacts.get,
+    typedId ? { id: typedId } : "skip",
+  );
+  const activities = useQuery(
+    api.contactActivities.listByContact,
+    typedId ? { contactId: typedId } : "skip",
+  ) ?? [];
+
+  const updateContact = useMutation(api.contacts.update);
+  const removeContact = useMutation(api.contacts.remove);
+  const createActivity = useMutation(api.contactActivities.create);
+
+  const [editing, setEditing] = useState(false);
+  const [editForm, setEditForm] = useState<Record<string, string | undefined>>({});
+  const [tagInput, setTagInput] = useState('');
+  const [showActivities, setShowActivities] = useState(true);
+  const [showNotes, setShowNotes] = useState(true);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showAddActivity, setShowAddActivity] = useState(false);
+  const [newActivity, setNewActivity] = useState({
+    activityType: 'note',
+    title: '',
+    content: '',
+  });
+
+  function startEdit() {
+    if (!contact) return;
+    setEditForm({
+      name: contact.name,
+      email: contact.email ?? '',
+      phone: contact.phone ?? '',
+      company: contact.company ?? '',
+      role: contact.role ?? '',
+      linkedin: contact.linkedin ?? '',
+      location: contact.location ?? '',
+      howWeMet: contact.howWeMet ?? '',
+      notes: contact.notes ?? '',
+      tier: contact.tier,
+    });
+    setEditing(true);
+  }
+
+  async function saveEdit() {
+    if (!typedId) return;
+    await updateContact({
+      id: typedId,
+      name: editForm.name || undefined,
+      email: editForm.email || undefined,
+      phone: editForm.phone || undefined,
+      company: editForm.company || undefined,
+      role: editForm.role || undefined,
+      linkedin: editForm.linkedin || undefined,
+      location: editForm.location || undefined,
+      howWeMet: editForm.howWeMet || undefined,
+      notes: editForm.notes || undefined,
+      tier: editForm.tier || undefined,
+    });
+    setEditing(false);
+  }
+
+  async function updateTier(newTier: string) {
+    if (!typedId) return;
+    await updateContact({ id: typedId, tier: newTier });
+  }
+
+  async function addTag(tag: string) {
+    if (!contact || !typedId || !tag.trim()) return;
+    if (contact.tags.includes(tag.trim())) return;
+    const newTags = [...contact.tags, tag.trim()];
+    await updateContact({ id: typedId, tags: newTags });
+    setTagInput('');
+  }
+
+  async function removeTag(tag: string) {
+    if (!contact || !typedId) return;
+    const newTags = contact.tags.filter((t) => t !== tag);
+    await updateContact({ id: typedId, tags: newTags });
+  }
+
+  async function deleteContact() {
+    if (!typedId) return;
+    await removeContact({ id: typedId });
+    onContactDeleted();
+  }
+
+  async function addActivity() {
+    if (!typedId || !newActivity.title.trim()) return;
+    await createActivity({
+      contactId: typedId,
+      activityType: newActivity.activityType,
+      title: newActivity.title,
+      content: newActivity.content || undefined,
+    });
+    setNewActivity({ activityType: 'note', title: '', content: '' });
+    setShowAddActivity(false);
+  }
+
+  if (!contactId) {
+    return (
+      <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
+        Select a contact to view details.
+      </div>
+    );
+  }
+
+  if (!contact) {
+    return (
+      <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
+        Loading...
+      </div>
+    );
+  }
+
+  const tiers = ['A', 'B', 'C'];
+
+  return (
+    <div className="h-full overflow-y-auto">
+      <div className="p-5 space-y-5">
+        {/* Header */}
+        <div className="flex items-start gap-3">
+          <div
+            className={`w-10 h-10 rounded-lg flex items-center justify-center text-white text-sm font-semibold shrink-0 ${getInitialsColor(contact.name)}`}
+          >
+            {getInitials(contact.name)}
+          </div>
+          <div className="flex-1 min-w-0">
+            <h2 className="text-sm font-semibold text-foreground">{contact.name}</h2>
+            {(contact.company || contact.role) && (
+              <p className="text-[11px] text-muted-foreground">
+                {contact.role}{contact.role && contact.company ? ' at ' : ''}{contact.company}
+              </p>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5">
+            {!editing && (
+              <button
+                onClick={startEdit}
+                className="px-2.5 py-1 text-[11px] font-medium text-muted-foreground hover:text-foreground border rounded-md hover:bg-muted transition-colors duration-150"
+              >
+                Edit
+              </button>
+            )}
+            <button
+              onClick={onClose}
+              className="w-6 h-6 flex items-center justify-center text-muted-foreground hover:text-foreground rounded transition-colors duration-150"
+            >
+              &times;
+            </button>
+          </div>
+        </div>
+
+        {/* Quick Info */}
+        {!editing && (
+          <div className="grid grid-cols-2 gap-2 text-[12px]">
+            {contact.email && (
+              <div>
+                <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Email</span>
+                <a
+                  href={`mailto:${contact.email}`}
+                  className="block text-accent-blue hover:underline truncate"
+                >
+                  {contact.email}
+                </a>
+              </div>
+            )}
+            {contact.phone && (
+              <div>
+                <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Phone</span>
+                <p className="text-foreground">{contact.phone}</p>
+              </div>
+            )}
+            {contact.linkedin && (
+              <div>
+                <span className="text-[10px] text-muted-foreground uppercase tracking-wide">LinkedIn</span>
+                <p className="text-foreground truncate">{contact.linkedin}</p>
+              </div>
+            )}
+            {contact.location && (
+              <div>
+                <span className="text-[10px] text-muted-foreground uppercase tracking-wide">Location</span>
+                <p className="text-foreground">{contact.location}</p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Tier */}
+        <div className="flex items-center gap-1.5">
+          <span className="text-[11px] text-muted-foreground mr-1">Tier</span>
+          {tiers.map((t) => (
+            <button
+              key={t}
+              onClick={() => updateTier(t)}
+              className={`px-2 py-0.5 text-[10px] font-semibold rounded transition-all duration-150 ${
+                contact.tier === t
+                  ? tierColors[t]
+                  : 'bg-muted/50 text-muted-foreground hover:bg-muted'
+              }`}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+
+        {/* Tags */}
+        <div className="flex flex-wrap items-center gap-1">
+          {contact.tags.map((tag) => (
+            <span
+              key={tag}
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded bg-muted text-muted-foreground"
+            >
+              {tag}
+              <button
+                onClick={() => removeTag(tag)}
+                className="text-muted-foreground hover:text-foreground ml-0.5"
+              >
+                x
+              </button>
+            </span>
+          ))}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              addTag(tagInput);
+            }}
+            className="inline-flex"
+          >
+            <input
+              type="text"
+              value={tagInput}
+              onChange={(e) => setTagInput(e.target.value)}
+              placeholder="+ tag"
+              className="w-14 px-1 py-0.5 text-[10px] rounded border border-transparent focus:border-border focus:outline-none bg-transparent text-muted-foreground"
+            />
+          </form>
+        </div>
+
+        {/* How We Met */}
+        {!editing && contact.howWeMet && (
+          <div className="text-[12px]">
+            <span className="text-[10px] text-muted-foreground uppercase tracking-wide">How we met</span>
+            <p className="text-foreground mt-0.5">{contact.howWeMet}</p>
+          </div>
+        )}
+
+        {/* Edit Form */}
+        {editing && (
+          <div className="space-y-2.5 p-3 bg-muted/30 rounded-lg border">
+            {([
+              ['name', 'Name'],
+              ['email', 'Email'],
+              ['phone', 'Phone'],
+              ['company', 'Company'],
+              ['role', 'Role'],
+              ['linkedin', 'LinkedIn'],
+              ['location', 'Location'],
+              ['howWeMet', 'How we met'],
+            ] as const).map(([field, label]) => (
+              <div key={field}>
+                <label className="text-[10px] text-muted-foreground">{label}</label>
+                <input
+                  type="text"
+                  value={editForm[field] ?? ''}
+                  onChange={(e) =>
+                    setEditForm((prev) => ({ ...prev, [field]: e.target.value }))
+                  }
+                  className="w-full px-2.5 py-1.5 text-sm rounded-md border bg-card focus:outline-none focus:ring-1 focus:ring-accent-blue/40"
+                />
+              </div>
+            ))}
+            <div>
+              <label className="text-[10px] text-muted-foreground">Notes</label>
+              <textarea
+                value={editForm.notes ?? ''}
+                onChange={(e) => setEditForm((prev) => ({ ...prev, notes: e.target.value }))}
+                rows={3}
+                className="w-full px-2.5 py-1.5 text-sm rounded-md border bg-card focus:outline-none focus:ring-1 focus:ring-accent-blue/40 resize-none"
+              />
+            </div>
+            <div className="flex gap-1.5">
+              <button
+                onClick={saveEdit}
+                className="px-3 py-1.5 text-xs font-medium text-white bg-accent-blue rounded-md hover:opacity-90 transition-opacity duration-150"
+              >
+                Save
+              </button>
+              <button
+                onClick={() => setEditing(false)}
+                className="px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Activity Timeline */}
+        <div className="border rounded-lg">
+          <button
+            onClick={() => setShowActivities(!showActivities)}
+            className="w-full px-3 py-2 flex items-center justify-between text-[11px] font-semibold text-foreground hover:bg-muted/30 rounded-t-lg transition-colors duration-150"
+          >
+            <span>Activity ({activities.length})</span>
+            <span className="text-muted-foreground text-[10px]">{showActivities ? '\u25B2' : '\u25BC'}</span>
+          </button>
+          {showActivities && (
+            <div className="border-t">
+              <div className="px-3 py-2 border-b">
+                {!showAddActivity ? (
+                  <button
+                    onClick={() => setShowAddActivity(true)}
+                    className="text-[11px] text-accent-blue hover:underline"
+                  >
+                    + Add Activity
+                  </button>
+                ) : (
+                  <div className="space-y-1.5">
+                    <select
+                      value={newActivity.activityType}
+                      onChange={(e) =>
+                        setNewActivity((prev) => ({ ...prev, activityType: e.target.value }))
+                      }
+                      className="px-2 py-1 text-xs rounded-md border bg-card"
+                    >
+                      {Object.entries(activityLabels).map(([value, label]) => (
+                        <option key={value} value={value}>{label}</option>
+                      ))}
+                    </select>
+                    <input
+                      type="text"
+                      placeholder="Title"
+                      value={newActivity.title}
+                      onChange={(e) =>
+                        setNewActivity((prev) => ({ ...prev, title: e.target.value }))
+                      }
+                      className="w-full px-2 py-1 text-xs rounded-md border bg-card focus:outline-none focus:ring-1 focus:ring-accent-blue/40"
+                    />
+                    <textarea
+                      placeholder="Content (optional)"
+                      value={newActivity.content}
+                      onChange={(e) =>
+                        setNewActivity((prev) => ({ ...prev, content: e.target.value }))
+                      }
+                      rows={2}
+                      className="w-full px-2 py-1 text-xs rounded-md border bg-card focus:outline-none focus:ring-1 focus:ring-accent-blue/40 resize-none"
+                    />
+                    <div className="flex gap-1.5">
+                      <button
+                        onClick={addActivity}
+                        className="px-2.5 py-1 text-[11px] font-medium text-white bg-accent-blue rounded-md hover:opacity-90 transition-opacity duration-150"
+                      >
+                        Add
+                      </button>
+                      <button
+                        onClick={() => {
+                          setShowAddActivity(false);
+                          setNewActivity({ activityType: 'note', title: '', content: '' });
+                        }}
+                        className="px-2.5 py-1 text-[11px] text-muted-foreground hover:text-foreground"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+              {activities.length === 0 ? (
+                <div className="px-3 py-5 text-center text-[11px] text-muted-foreground">
+                  No activities yet.
+                </div>
+              ) : (
+                <div className="divide-y">
+                  {activities.map((act) => (
+                    <div key={act._id} className="px-3 py-2 flex items-start gap-2">
+                      <span className="text-sm shrink-0 mt-0.5" title={activityLabels[act.activityType] || act.activityType}>
+                        {activityIcons[act.activityType] || '\u2022'}
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[12px] font-medium text-foreground">{act.title}</span>
+                          <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+                            {formatTimestamp(act.createdAt)}
+                          </span>
+                        </div>
+                        {act.content && (
+                          <p className="text-[11px] text-muted-foreground mt-0.5 line-clamp-2">
+                            {act.content}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Notes */}
+        <div className="border rounded-lg">
+          <button
+            onClick={() => setShowNotes(!showNotes)}
+            className="w-full px-3 py-2 flex items-center justify-between text-[11px] font-semibold text-foreground hover:bg-muted/30 rounded-t-lg transition-colors duration-150"
+          >
+            <span>Notes</span>
+            <span className="text-muted-foreground text-[10px]">{showNotes ? '\u25B2' : '\u25BC'}</span>
+          </button>
+          {showNotes && (
+            <div className="border-t px-3 py-2.5">
+              {contact.notes ? (
+                <p className="text-[12px] text-foreground whitespace-pre-wrap">{contact.notes}</p>
+              ) : (
+                <p className="text-[11px] text-muted-foreground">No notes.</p>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Delete */}
+        <div className="pt-2 border-t">
+          {!showDeleteConfirm ? (
+            <button
+              onClick={() => setShowDeleteConfirm(true)}
+              className="text-[11px] text-accent-red hover:underline"
+            >
+              Delete Contact
+            </button>
+          ) : (
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-foreground">Delete this contact?</span>
+              <button
+                onClick={deleteContact}
+                className="px-2.5 py-1 text-[11px] font-medium text-white bg-accent-red rounded-md hover:opacity-90 transition-opacity duration-150"
+              >
+                Yes, Delete
+              </button>
+              <button
+                onClick={() => setShowDeleteConfirm(false)}
+                className="px-2.5 py-1 text-[11px] text-muted-foreground hover:text-foreground"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
