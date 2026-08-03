@@ -1,10 +1,10 @@
 {
   "version": 1,
   "product": "Cove",
-  "source_sha": "3bc6cbfd662b4646ac5b04abb57bfbbd7debb8e1",
+  "source_sha": "7f6e105f33aedec1d508e316cb958e2e40ce7972",
   "source_worktree_dirty": false,
   "allow_dirty": false,
-  "exported_at": "2026-08-03T19:12:42.732Z",
+  "exported_at": "2026-08-03T22:13:14.849Z",
   "file_count": 362,
   "files": [
     {
@@ -64,8 +64,8 @@
     },
     {
       "path": "LICENSE",
-      "bytes": 1022,
-      "sha256": "fc4e3b25fc1ce6a85aa73acfb9516ff32675321f449f7359e84d2b32d7ee879d"
+      "bytes": 1048,
+      "sha256": "5b8d6ac2f3a5ca4db5472fd48fe04807b066b6e791a2b6d937c28ad4a099874b"
     },
     {
       "path": "OPERATIONS.md",
@@ -224,13 +224,13 @@
     },
     {
       "path": "package-lock.json",
-      "bytes": 287420,
-      "sha256": "5afc450a9e39f4939eb98614e99b8b537cb349d22e92ccbfe2731306a86c478c"
+      "bytes": 288894,
+      "sha256": "88ca23387288476f8e3ecc359dee7caf7329805aa7b1d8e28cebd7a95204b1dd"
     },
     {
       "path": "package.json",
       "bytes": 1111,
-      "sha256": "68cdaa81608c6679e64ce2720e9b7c9de67fa7f4f165e6ee22118c9fed346d17"
+      "sha256": "ea08e6c7115cff3e469660ac546d260a1f5522f338de6b94f2700c0e64210446"
     },
     {
       "path": "postcss.config.mjs",
