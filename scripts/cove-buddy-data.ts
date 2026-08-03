@@ -1,18 +1,25 @@
 import path from "node:path";
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { COVE_REST_TABLES } from "../src/lib/data/forge-tables";
 import {
-  runForgeIntake,
-  type ForgeIntakeInput,
+  COVE_CRM_COMPAT_TABLES,
+  COVE_REST_TABLES,
+} from "../src/lib/data/cove-tables";
+import {
+  runCoveIntake,
+  type CoveIntakeInput,
 } from "../src/lib/intake/run";
 import { coveEnv } from "../src/lib/env";
+import { getRuntimeMode } from "../src/lib/runtime/mode";
 
 export const COVE_BUDDY_REPO_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
-export const COVE_BUDDY_TABLES = COVE_REST_TABLES;
+export const COVE_BUDDY_TABLES = [
+  ...COVE_REST_TABLES,
+  ...COVE_CRM_COMPAT_TABLES,
+] as const;
 type Table = typeof COVE_BUDDY_TABLES[number];
 type Action = "query" | "insert" | "update" | "delete";
 
@@ -37,13 +44,23 @@ type SpawnSessionCommand = {
 } & ({ dir: string; project?: never } | { dir?: never; project: string });
 type IntakeCommand = {
   action: "intake";
-  input: ForgeIntakeInput;
+  input: CoveIntakeInput;
+};
+type RecurrenceCommand = {
+  action: "recurrence-confirm";
+  taskId: string;
+  cadence?: string;
+} | {
+  action: "recurrence-update";
+  templateId: string;
+  operation: "pause" | "resume" | "stop";
 };
 export type BuddyDataCommand =
   | TableCommand
   | DayPlanCommand
   | SpawnSessionCommand
-  | IntakeCommand;
+  | IntakeCommand
+  | RecurrenceCommand;
 
 function fail(message: string): never {
   throw new Error(message);
@@ -64,6 +81,28 @@ function option(
 }
 
 export function parseBuddyDataArgs(args: string[]): BuddyDataCommand {
+  if (args[0] === "recurrence") {
+    if (args[1] === "confirm") {
+      const taskId = option(args, "--task-id");
+      if (!taskId) fail("recurrence confirm requires --task-id");
+      const cadence = option(args, "--cadence");
+      return {
+        action: "recurrence-confirm",
+        taskId,
+        ...(cadence ? { cadence } : {}),
+      };
+    }
+    if (args[1] === "pause" || args[1] === "resume" || args[1] === "stop") {
+      const templateId = option(args, "--template-id");
+      if (!templateId) fail(`recurrence ${args[1]} requires --template-id`);
+      return {
+        action: "recurrence-update",
+        templateId,
+        operation: args[1],
+      };
+    }
+    fail("recurrence requires confirm, pause, resume, or stop");
+  }
   if (args[0] === "intake") {
     const text = option(args, "--text", { allowLeadingDash: true });
     if (!text) fail("intake requires --text");
@@ -164,6 +203,46 @@ function labelFor(row: unknown, fallback: string): string {
 async function responseJson(response: Response): Promise<unknown> {
   const text = await response.text();
   if (!response.ok) {
+    if (response.status === 409 && text) {
+      let payload: unknown;
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        payload = undefined;
+      }
+      if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+        const candidates = (payload as Record<string, unknown>).candidates;
+        if (Array.isArray(candidates)) {
+          const labels = candidates
+            .filter(
+              (value): value is Record<string, unknown> =>
+                Boolean(value) &&
+                typeof value === "object" &&
+                !Array.isArray(value),
+            )
+            .map((candidate) => {
+              const name = typeof candidate.name === "string"
+                ? candidate.name
+                : "Unnamed contact";
+              const email = typeof candidate.email === "string" &&
+                  candidate.email
+                ? ` <${candidate.email}>`
+                : "";
+              const id = typeof candidate.id === "string" && candidate.id
+                ? ` (${candidate.id})`
+                : "";
+              return `${name}${email}${id}`;
+            });
+          if (labels.length > 0) {
+            fail(
+              `Contact identity is ambiguous. Possible matches: ${
+                labels.join(", ")
+              }. Ask which person the user means.`,
+            );
+          }
+        }
+      }
+    }
     const limit = response.status === 409 ? 24_000 : 500;
     fail(`HTTP ${response.status}: ${text.slice(0, limit) || response.statusText}`);
   }
@@ -176,14 +255,14 @@ export async function runBuddyDataCommand(
     fetch?: typeof fetch;
     appUrl?: string;
     write?: (line: string) => void;
-    runIntake?: typeof runForgeIntake;
+    runIntake?: typeof runCoveIntake;
   } = {},
 ): Promise<number> {
   const request = options.fetch ?? fetch;
   const write = options.write ?? ((line) => process.stdout.write(`${line}\n`));
   const appUrl = (options.appUrl ?? coveEnv("BUDDY_APP_URL") ?? "http://127.0.0.1:3200").replace(/\/$/, "");
   if (command.action === "intake") {
-    const result = await (options.runIntake ?? runForgeIntake)(command.input, {
+    const result = await (options.runIntake ?? runCoveIntake)(command.input, {
       fetchImpl: request,
       webBaseUrl: appUrl,
       repoDir: COVE_BUDDY_REPO_DIR,
@@ -201,6 +280,12 @@ export async function runBuddyDataCommand(
           ? `Task already captured (${result.taskId})`
           : `Captured task (${result.taskId})`,
       })}`);
+      if (result.proposedRecurrence) {
+        write(`PROPOSED_RECURRENCE ${JSON.stringify({
+          task_id: result.taskId,
+          cadence: result.proposedRecurrence,
+        })}`);
+      }
     } else if (result.spooled) {
       write(`SPOOLED ${JSON.stringify({
         source: result.event.source,
@@ -208,6 +293,74 @@ export async function runBuddyDataCommand(
       })}`);
     }
     return result.exitCode;
+  }
+  if (command.action === "recurrence-confirm") {
+    const state = await responseJson(await request(`${appUrl}/api/day-plan`, {
+      cache: "no-store",
+    }));
+    if (!state || typeof state !== "object" || Array.isArray(state) ||
+      typeof (state as Record<string, unknown>).csrfToken !== "string") {
+      fail("Cove request token is unavailable");
+    }
+    const template = await responseJson(await request(`${appUrl}/api/recurrence`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Cove-CSRF": (state as Record<string, unknown>).csrfToken as string,
+      },
+      body: JSON.stringify({
+        action: "confirm",
+        taskId: command.taskId,
+        ...(command.cadence ? { cadence: command.cadence } : {}),
+      }),
+    }));
+    if (!template || typeof template !== "object" || Array.isArray(template) ||
+      typeof (template as Record<string, unknown>).id !== "string") {
+      fail("recurrence confirmation response is invalid");
+    }
+    write(`RECEIPT ${JSON.stringify({
+      table: "tasks",
+      action: "update",
+      id: command.taskId,
+      summary: `Made task a ${(template as Record<string, unknown>).cadence} rhythm`,
+    })}`);
+    return 0;
+  }
+  if (command.action === "recurrence-update") {
+    const state = await responseJson(await request(`${appUrl}/api/day-plan`, {
+      cache: "no-store",
+    }));
+    if (!state || typeof state !== "object" || Array.isArray(state) ||
+      typeof (state as Record<string, unknown>).csrfToken !== "string") {
+      fail("Cove request token is unavailable");
+    }
+    const template = await responseJson(await request(`${appUrl}/api/recurrence`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Cove-CSRF": (state as Record<string, unknown>).csrfToken as string,
+      },
+      body: JSON.stringify({
+        action: "update",
+        id: command.templateId,
+        ...(command.operation === "pause"
+          ? { pausedUntil: "9999-12-31" }
+          : command.operation === "resume"
+            ? { pausedUntil: null }
+            : { active: false }),
+      }),
+    }));
+    if (!template || typeof template !== "object" || Array.isArray(template) ||
+      typeof (template as Record<string, unknown>).id !== "string") {
+      fail("recurrence update response is invalid");
+    }
+    write(`RECEIPT ${JSON.stringify({
+      table: "recurring_templates",
+      action: "update",
+      id: command.templateId,
+      summary: `${command.operation === "stop" ? "Stopped" : command.operation === "pause" ? "Paused" : "Resumed"} rhythm`,
+    })}`);
+    return 0;
   }
   if (command.action === "spawn-session") {
     const state = await responseJson(await request(`${appUrl}/api/day-plan`, { cache: "no-store" }));
@@ -219,7 +372,7 @@ export async function runBuddyDataCommand(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Forge-CSRF": (state as Record<string, unknown>).csrfToken as string,
+        "X-Cove-CSRF": (state as Record<string, unknown>).csrfToken as string,
       },
       body: JSON.stringify({
         ...(command.dir ? { dir: command.dir } : { project: command.project }),
@@ -273,7 +426,7 @@ export async function runBuddyDataCommand(
     if (typeof stateRecord.csrfToken !== "string") fail("Cove request token is unavailable");
     const applied = await responseJson(await request(`${appUrl}/api/day-plan/assistant-apply`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Forge-CSRF": stateRecord.csrfToken },
+      headers: { "Content-Type": "application/json", "X-Cove-CSRF": stateRecord.csrfToken },
       body: JSON.stringify(command.json),
     }));
     if (!applied || typeof applied !== "object" || Array.isArray(applied)) fail("day plan apply response is invalid");
@@ -283,7 +436,7 @@ export async function runBuddyDataCommand(
     return 0;
   }
   const tableCommand = command as TableCommand;
-  const base = `${appUrl}/api/forge-rest/${tableCommand.table}`;
+  const base = `${appUrl}/api/cove-rest/${tableCommand.table}`;
   if (tableCommand.action === "query") {
     const params = filterParams(tableCommand.filters);
     if (tableCommand.limit) params.set("limit", String(tableCommand.limit));
@@ -292,8 +445,11 @@ export async function runBuddyDataCommand(
     write(JSON.stringify(data));
     return 0;
   }
-  if (tableCommand.action === "delete" && !tableCommand.confirmToken) {
-    fail("Permanent delete requires a confirm token. Emit a pendingDeletes forge-receipts entry and wait for the user to confirm.");
+  const archivesTask = tableCommand.action === "delete" &&
+    tableCommand.table === "tasks" &&
+    getRuntimeMode() === "local";
+  if (tableCommand.action === "delete" && !archivesTask && !tableCommand.confirmToken) {
+    fail("Permanent delete requires a confirm token. Emit a pendingDeletes cove-receipts entry and wait for the user to confirm.");
   }
   const state = await responseJson(await request(`${appUrl}/api/day-plan`, { cache: "no-store" }));
   if (!state || typeof state !== "object" || Array.isArray(state) ||
@@ -306,22 +462,44 @@ export async function runBuddyDataCommand(
     const lookup = await responseJson(await request(`${base}?id=${encodeURIComponent(`eq.${tableCommand.id}`)}&limit=1`));
     if (!Array.isArray(lookup) || lookup.length === 0) fail(`${tableCommand.table} row ${tableCommand.id} was not found`);
     existingRow = lookup[0];
-    await responseJson(await request(`${appUrl}/api/buddy/confirm-delete/consume`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token: tableCommand.confirmToken, table: tableCommand.table, id: tableCommand.id }),
-    }));
+    if (!archivesTask) {
+      await responseJson(await request(`${appUrl}/api/buddy/confirm-delete/consume`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: tableCommand.confirmToken, table: tableCommand.table, id: tableCommand.id }),
+      }));
+    }
   }
   const params = new URLSearchParams();
   if (tableCommand.id) params.set("id", `eq.${tableCommand.id}`);
   const response = await request(`${base}${params.size ? `?${params}` : ""}`, {
-    method: tableCommand.action === "insert" ? "POST" : tableCommand.action === "update" ? "PATCH" : "DELETE",
+    method: tableCommand.action === "insert"
+      ? "POST"
+      : tableCommand.action === "update" || archivesTask
+        ? "PATCH"
+        : "DELETE",
     headers: {
       "Content-Type": "application/json",
-      "X-Forge-CSRF": csrfToken,
+      "X-Cove-CSRF": csrfToken,
       Prefer: "return=representation",
     },
-    ...(tableCommand.json ? { body: JSON.stringify(tableCommand.json) } : {}),
+    ...(archivesTask
+      ? {
+          body: JSON.stringify({
+            status: "archived",
+            archived_at: new Date().toISOString(),
+            archived_from_status:
+              existingRow &&
+                typeof existingRow === "object" &&
+                !Array.isArray(existingRow) &&
+                (existingRow as Record<string, unknown>).status === "done"
+                ? "done"
+                : "open",
+          }),
+        }
+      : tableCommand.json
+        ? { body: JSON.stringify(tableCommand.json) }
+        : {}),
   });
   const data = await responseJson(response);
   if ((tableCommand.action === "insert" || tableCommand.action === "update") &&
@@ -330,16 +508,27 @@ export async function runBuddyDataCommand(
   }
   const row = tableCommand.action === "delete" ? existingRow : Array.isArray(data) ? data[0] : data;
   const id = tableCommand.id ?? (row && typeof row === "object" ? String((row as Record<string, unknown>).id ?? "") : "");
-  const verb = tableCommand.action === "insert" ? "Inserted" : tableCommand.action === "update" ? "Updated" : "Deleted";
+  const verb = archivesTask
+    ? "Archived"
+    : tableCommand.action === "insert"
+      ? "Inserted"
+      : tableCommand.action === "update"
+        ? "Updated"
+        : "Deleted";
   const summary = `${verb} ${labelFor(row, `${tableCommand.table} row ${id}`)}`;
-  write(`RECEIPT ${JSON.stringify({ table: tableCommand.table, action: tableCommand.action, id, summary })}`);
+  write(`RECEIPT ${JSON.stringify({
+    table: tableCommand.table,
+    action: archivesTask ? "update" : tableCommand.action,
+    id,
+    summary,
+  })}`);
   if (tableCommand.action === "delete") {
     try {
       const remaining = await responseJson(await request(
         `${base}?id=${encodeURIComponent(`eq.${tableCommand.id}`)}&limit=1`,
       ));
       if (!Array.isArray(remaining) || remaining.length > 0) {
-        write("WARN: post-delete verification found the row still present");
+        write(`WARN: post-${archivesTask ? "archive" : "delete"} verification found the row still present`);
       }
     } catch {
       write("WARN: post-delete verification read failed");

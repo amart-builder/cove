@@ -10,9 +10,10 @@ import {
   type SuggestionPriority,
   type SuggestionState,
 } from "@/lib/quiet-current/store";
-import { isTrustedForgeRequest } from "@/lib/request-security";
+import { isTrustedCoveRequest } from "@/lib/request-security";
 import { consumeProgressSuggestionRelays } from "@/lib/progress/relay";
 import { coveEnv } from "../../../lib/env";
+import { getRuntimeMode } from "@/lib/runtime/mode";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,6 +22,7 @@ const KINDS = new Set<SuggestionKind>([
   "create_task",
   "returned_work",
   "observed_progress",
+  "stale_task",
 ]);
 const PRIORITIES = new Set<SuggestionPriority>(["low", "medium", "high"]);
 const RESOLUTION_STATES = new Set<SuggestionState>([
@@ -57,17 +59,23 @@ function ingestProgressSuggestionRelays(): void {
 
 export async function GET(request: NextRequest) {
   try {
-    if (!isTrustedForgeRequest(request)) {
+    if (!isTrustedCoveRequest(request)) {
       return NextResponse.json({ error: "Untrusted request host." }, { status: 403 });
     }
     ingestProgressSuggestionRelays();
+    const snapshot = getQuietCurrentSnapshot();
     return NextResponse.json({
-      ...getQuietCurrentSnapshot(),
+      ...snapshot,
+      suggestions: getRuntimeMode() === "local"
+        ? snapshot.suggestions
+        : snapshot.suggestions.filter((suggestion) =>
+            suggestion.kind !== "stale_task"
+          ),
       csrfToken: getQuietCurrentCsrfToken(),
     });
   } catch (error) {
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Quiet Current failed." },
+      { error: error instanceof Error ? error.message : "Today could not load." },
       { status: 500 },
     );
   }
@@ -75,7 +83,7 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    if (!isTrustedForgeRequest(request)) {
+    if (!isTrustedCoveRequest(request)) {
       return NextResponse.json({ error: "Untrusted request host." }, { status: 403 });
     }
     ingestProgressSuggestionRelays();
@@ -83,7 +91,7 @@ export async function POST(request: NextRequest) {
     const action = stringValue(body.action, "action", { required: true, max: 40 });
 
     if (action !== "suggest") {
-      const suppliedToken = request.headers.get("x-forge-csrf");
+      const suppliedToken = request.headers.get("x-cove-csrf");
       if (!suppliedToken || suppliedToken !== getQuietCurrentCsrfToken()) {
         return NextResponse.json({ error: "Cove request token is missing." }, { status: 403 });
       }
@@ -95,6 +103,9 @@ export async function POST(request: NextRequest) {
       const priority = (stringValue(body.priority, "priority", { max: 20 }) ??
         "medium") as SuggestionPriority;
       if (!KINDS.has(kind)) throw new Error("Unknown suggestion kind.");
+      if (kind === "stale_task" && getRuntimeMode() !== "local") {
+        throw new Error("Unknown suggestion kind.");
+      }
       if (!PRIORITIES.has(priority)) throw new Error("Unknown priority.");
 
       const suggestion = createWorkSuggestion({
@@ -181,7 +192,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ error: "Unknown action." }, { status: 400 });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Quiet Current failed.";
+    const message = error instanceof Error ? error.message : "Today could not load.";
     const status = /not found/i.test(message) ? 404 : 400;
     return NextResponse.json({ error: message }, { status });
   }

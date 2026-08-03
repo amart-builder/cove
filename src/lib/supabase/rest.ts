@@ -2,11 +2,12 @@ import { getDayPlanCsrfToken } from "../data/day-plan";
 
 type QueryValue = string | number | boolean | null | undefined;
 
-type ForgeRestOptions = {
+type CoveRestOptions = {
   method?: "GET" | "POST" | "PATCH" | "DELETE";
   query?: Record<string, QueryValue>;
   body?: unknown;
   requireAuth?: boolean;
+  headers?: Record<string, string>;
 };
 
 type SupabaseRefreshResponse = {
@@ -16,11 +17,17 @@ type SupabaseRefreshResponse = {
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-const tablePrefix = process.env.NEXT_PUBLIC_FORGE_TABLE_PREFIX ?? "";
-const accessTokenStorageKey = "forge.supabase.accessToken";
-const refreshTokenStorageKey = "forge.supabase.refreshToken";
+const tablePrefix =
+  process.env.NEXT_PUBLIC_COVE_TABLE_PREFIX ??
+  process.env.NEXT_PUBLIC_FORGE_TABLE_PREFIX ??
+  "";
+const accessTokenStorageKey = "cove.supabase.accessToken";
+const refreshTokenStorageKey = "cove.supabase.refreshToken";
 const useServerRest =
-  process.env.NEXT_PUBLIC_FORGE_SERVER_REST !== "disabled";
+  (
+    process.env.NEXT_PUBLIC_COVE_SERVER_REST ??
+    process.env.NEXT_PUBLIC_FORGE_SERVER_REST
+  ) !== "disabled";
 
 function getStoredToken(key: string): string | null {
   if (typeof window === "undefined") return null;
@@ -104,7 +111,7 @@ function resolveTableName(table: string): string {
     : table;
 }
 
-function buildUrl(table: string, query: ForgeRestOptions["query"]): string {
+function buildUrl(table: string, query: CoveRestOptions["query"]): string {
   if (!supabaseUrl) {
     throw new Error("NEXT_PUBLIC_SUPABASE_URL is not configured.");
   }
@@ -118,10 +125,10 @@ function buildUrl(table: string, query: ForgeRestOptions["query"]): string {
   return url.toString();
 }
 
-function buildServerUrl(table: string, query: ForgeRestOptions["query"]): string {
+function buildServerUrl(table: string, query: CoveRestOptions["query"]): string {
   const url = new URL(
-    `/api/forge-rest/${encodeURIComponent(table)}`,
-    "http://forge.local"
+    `/api/cove-rest/${encodeURIComponent(table)}`,
+    "http://cove.local"
   );
   for (const [key, value] of Object.entries(query ?? {})) {
     if (value !== undefined && value !== null) {
@@ -131,7 +138,7 @@ function buildServerUrl(table: string, query: ForgeRestOptions["query"]): string
   return `${url.pathname}${url.search}`;
 }
 
-async function request(table: string, options: ForgeRestOptions, token: string) {
+async function request(table: string, options: CoveRestOptions, token: string) {
   const method = options.method ?? "GET";
   return fetch(buildUrl(table, options.query), {
     method,
@@ -140,6 +147,7 @@ async function request(table: string, options: ForgeRestOptions, token: string) 
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
       Prefer: "return=representation",
+      ...options.headers,
     },
     body:
       method === "GET" || options.body === undefined
@@ -150,7 +158,7 @@ async function request(table: string, options: ForgeRestOptions, token: string) 
 
 async function serverRequest<T>(
   table: string,
-  options: ForgeRestOptions
+  options: CoveRestOptions
 ): Promise<T> {
   const method = options.method ?? "GET";
   const controller = new AbortController();
@@ -160,7 +168,8 @@ async function serverRequest<T>(
     method,
     headers: {
       "Content-Type": "application/json",
-      ...(csrfToken ? { "X-Forge-CSRF": csrfToken } : {}),
+      ...(csrfToken ? { "X-Cove-CSRF": csrfToken } : {}),
+      ...options.headers,
     },
     signal: controller.signal,
     body:
@@ -181,9 +190,9 @@ async function serverRequest<T>(
   return (await response.json()) as T;
 }
 
-export async function forgeRest<T>(
+export async function coveRest<T>(
   table: string,
-  options: ForgeRestOptions = {}
+  options: CoveRestOptions = {}
 ): Promise<T> {
   if (useServerRest && typeof window !== "undefined") {
     return serverRequest<T>(table, options);

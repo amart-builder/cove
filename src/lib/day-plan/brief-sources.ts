@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import {
   groundworkCheckinDue,
-  readForgeAutonomySettings,
+  readCoveAutonomySettings,
   recordGroundworkCheckinPresentation,
 } from "../autonomy/settings";
 import type { Commitment, CommitmentKind } from "../data/types";
@@ -22,10 +22,29 @@ import {
   type OperatorProfile,
 } from "../operator";
 import type { DayPlanStore, SessionDigest } from "./store";
-import { localDateInTimezone, type BriefSourceInput } from "./brief";
+import type { DayDump } from "./types";
+import {
+  localDateInTimezone,
+  morningBriefFromArtifact,
+  type BriefSourceInput,
+} from "./brief";
 import { buildSettlementSummary, readDumpRelay, readSettlementRelay } from "./brief-relay";
 import { contentQuotaGap, followUpsDue, staleOpenItems } from "./gap-detectors";
+import { localDateFor } from "./candidates";
 import { coveEnv } from "../env";
+import {
+  normalizeMachineIdentity,
+  resolveMachineIdentity,
+} from "../machine-identity.mjs";
+import { recurringRhythmSnapshot } from "../tasks/recurrence";
+import { detectStaleTasks } from "../tasks/stale";
+import { getRuntimeMode } from "../runtime/mode";
+import { buildReceiptDigest } from "../reliability/receipts";
+import {
+  createGoogleWorkspaceGateway,
+  workspaceConfigPath,
+  type WorkspaceGateway,
+} from "../workspace";
 
 const EXTERNAL_FETCH_TIMEOUT_MS = 10_000;
 // The operator's own zone, not a fixed one: this is the fallback used when
@@ -33,7 +52,6 @@ const EXTERNAL_FETCH_TIMEOUT_MS = 10_000;
 // targets the wrong calendar day. Read per call, because the profile that
 // supplies it is written during setup, after this module first loads.
 const defaultBriefTimezone = () => operatorTimezone();
-const COMPOSIO_MCP_URL = "https://connect.composio.dev/mcp";
 const ATTIO_PEOPLE_QUERY_URL = "https://api.attio.com/v2/objects/people/records/query";
 
 export type BriefFileSourcePolicyEntry = {
@@ -153,6 +171,8 @@ export type CollectedBriefSources = {
   // Open task ids seen in the snapshot; generation-time validation drops brief
   // candidates that reference anything else.
   knownTaskIds: Set<string>;
+  taskUpdatedAtById?: Map<string, string>;
+  recurringTaskIds?: Set<string>;
 };
 
 export type MorningBriefSourceOptions = {
@@ -167,13 +187,18 @@ export type MorningBriefSourceOptions = {
   targetTimezone?: string;
   now?: Date;
   // Loopback base URL of the Cove web app; the task snapshot goes through the
-  // same forge-rest surface the UI uses, so local and Supabase runtimes both work.
+  // same cove-rest surface the UI uses, so local and Supabase runtimes both work.
   webBaseUrl?: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
-  // Overrides the relay data directory (defaults to the forge.db directory).
+  // Overrides the relay data directory (defaults to the cove.db directory).
   // Tests point this at a temp dir to exercise the settlement relay fallback.
   dataDir?: string;
+  machineIdentity?: {
+    id: string;
+    hostname: string;
+  };
+  workspaceGateway?: Pick<WorkspaceGateway, "calendar">;
 };
 
 function readKeyFile(filePath: string): string | null {
@@ -225,6 +250,7 @@ type TaskRow = {
   updated_at?: string;
   position?: number;
   tags?: unknown;
+  recurring_template_id?: string | null;
 };
 
 function taskTags(value: unknown): string[] {
@@ -378,6 +404,39 @@ function compactLine(value: string | undefined, maximum: number): string {
   return (value ?? "").replace(/\s+/g, " ").trim().slice(0, maximum);
 }
 
+const GOALS_TRIM_MARKER = "[... middle trimmed by Cove ...]";
+
+export function preserveGoalsNeverSections(
+  content: string,
+  maxChars: number,
+): string {
+  if (content.length <= maxChars) return content;
+  if (!Number.isInteger(maxChars) || maxChars <= 0) {
+    throw new Error("goals_max_chars_invalid");
+  }
+
+  const headings = [...content.matchAll(/^## [^\r\n]*\r?$/gm)];
+  const neverSections = headings.flatMap((heading, index) => {
+    if (!heading[0].startsWith("## Never ")) return [];
+    const start = heading.index ?? 0;
+    const end = headings[index + 1]?.index ?? content.length;
+    return [{ start, text: content.slice(start, end) }];
+  });
+  const preservedTail = neverSections.map((section) => section.text).join("");
+  const suffix = preservedTail
+    ? `\n${GOALS_TRIM_MARKER}\n${preservedTail}`
+    : `\n${GOALS_TRIM_MARKER}`;
+  if (suffix.length > maxChars) {
+    throw new Error("goals_never_sections_exceed_cap");
+  }
+
+  // Stopping before the first preserved section avoids duplicating it when an
+  // unusually early Never heading falls inside the available head budget.
+  const headBoundary = neverSections[0]?.start ?? content.length;
+  const head = content.slice(0, Math.min(headBoundary, maxChars - suffix.length));
+  return `${head}${suffix}`;
+}
+
 export async function fetchRows(
   fetchImpl: typeof fetch,
   baseUrl: string,
@@ -386,12 +445,12 @@ export async function fetchRows(
   query = "select=*&order=position.asc",
 ): Promise<unknown[]> {
   const response = await fetchImpl(
-    `${baseUrl}/api/forge-rest/${table}?${query}`,
+    `${baseUrl}/api/cove-rest/${table}?${query}`,
     { signal: AbortSignal.timeout(timeoutMs), cache: "no-store" },
   );
-  if (!response.ok) throw new Error(`forge-rest ${table} ${response.status}`);
+  if (!response.ok) throw new Error(`cove-rest ${table} ${response.status}`);
   const rows = (await response.json()) as unknown;
-  if (!Array.isArray(rows)) throw new Error(`forge-rest ${table} shape`);
+  if (!Array.isArray(rows)) throw new Error(`cove-rest ${table} shape`);
   return rows;
 }
 
@@ -424,10 +483,114 @@ function inboundVerbatim(value: unknown): string {
   return JSON.stringify(value.slice(0, 120));
 }
 
+function backgroundLaneInstalled(
+  dataDir: string | undefined,
+  lane: "meeting_watch" | "progress_reconcile",
+  machineIdentity: { id: string; hostname: string },
+): boolean {
+  const markerPath = path.join(
+    coveDataDir(dataDir),
+    "intake",
+    "installed-lanes.json",
+  );
+  try {
+    const parsed = JSON.parse(readFileSync(markerPath, "utf8")) as unknown;
+    const machines = asRecord(asRecord(parsed)?.machines);
+    const machine = asRecord(machines?.[machineIdentity.id]);
+    return Boolean(asRecord(machine?.[lane])?.installed_at);
+  } catch {
+    return false;
+  }
+}
+
+type BackgroundLaneOwner = {
+  id: string;
+  hostnameAtClaim: string;
+};
+
+function backgroundLaneOwner(
+  dataDir: string | undefined,
+  lane: "meeting_watch" | "progress",
+): BackgroundLaneOwner | undefined {
+  try {
+    const ownerPath = path.join(coveDataDir(dataDir), "cove-lane-owners.json");
+    const parsed = JSON.parse(readFileSync(ownerPath, "utf8")) as unknown;
+    const entry = asRecord(asRecord(asRecord(parsed)?.lanes)?.[lane]);
+    if (
+      typeof entry?.id !== "string" ||
+      typeof entry?.hostname_at_claim !== "string"
+    ) {
+      return undefined;
+    }
+    const normalized = normalizeMachineIdentity({
+      id: entry.id,
+      hostname: entry.hostname_at_claim,
+    });
+    return {
+      id: normalized.id,
+      hostnameAtClaim: normalized.hostname,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function machineHeartbeat(
+  parsed: unknown,
+  machineId: string,
+  lane: "meeting_watch" | "progress_reconcile",
+): UnknownRecord | undefined {
+  const machines = asRecord(asRecord(parsed)?.machines);
+  return asRecord(asRecord(machines?.[machineId])?.[lane]);
+}
+
+function localStandDownSuffix(
+  localHeartbeat: UnknownRecord | undefined,
+  owner: BackgroundLaneOwner | undefined,
+  machineIdentity: { id: string; hostname: string },
+): string {
+  if (
+    !owner ||
+    owner.id === machineIdentity.id ||
+    localHeartbeat?.standing_down !== true ||
+    localHeartbeat?.owner_id !== owner.id
+  ) {
+    return "";
+  }
+  return ` Local Mac standing down: ${owner.hostnameAtClaim} owns this lane.`;
+}
+
+function briefMachineIdentity(
+  dataDir: string | undefined,
+  homeDir: string | undefined,
+  supplied: { id: string; hostname: string } | undefined,
+): { id: string; hostname: string } | undefined {
+  if (supplied) return normalizeMachineIdentity(supplied);
+  const resolvedDataDir = coveDataDir(dataDir);
+  const hasBackgroundState = [
+    path.join(resolvedDataDir, "cove-lane-owners.json"),
+    path.join(resolvedDataDir, "intake", "installed-lanes.json"),
+    path.join(resolvedDataDir, "intake", "heartbeats.json"),
+  ].some((file) => existsSync(file));
+  return hasBackgroundState
+    ? resolveMachineIdentity({ homeDir })
+    : undefined;
+}
+
 function meetingWatchHeartbeat(
   dataDir: string | undefined,
   now: Date,
+  machineIdentity: { id: string; hostname: string } | undefined,
 ): { line: string; warning?: string } {
+  if (!machineIdentity) {
+    return { line: "Meeting watcher is not installed on this Mac." };
+  }
+  const installed = backgroundLaneInstalled(
+    dataDir,
+    "meeting_watch",
+    machineIdentity,
+  );
+  const owner = backgroundLaneOwner(dataDir, "meeting_watch");
   const heartbeatPath = path.join(
     coveDataDir(dataDir),
     "intake",
@@ -435,11 +598,27 @@ function meetingWatchHeartbeat(
   );
   try {
     const parsed = JSON.parse(readFileSync(heartbeatPath, "utf8")) as unknown;
-    const root = asRecord(parsed);
-    const heartbeat = asRecord(root?.meeting_watch);
+    const heartbeat = machineHeartbeat(
+      parsed,
+      owner?.id ?? machineIdentity.id,
+      "meeting_watch",
+    );
+    const localHeartbeat = machineHeartbeat(
+      parsed,
+      machineIdentity.id,
+      "meeting_watch",
+    );
+    const standDown = localStandDownSuffix(
+      localHeartbeat,
+      owner,
+      machineIdentity,
+    );
+    if (!heartbeat && !installed && !owner) {
+      return { line: "Meeting watcher is not installed on this Mac." };
+    }
     if (heartbeat?.disabled === true) {
       return {
-        line: "WARNING: meeting watcher DISABLED.",
+        line: `WARNING: meeting watcher DISABLED.${standDown}`,
         warning: "meeting_watch_disabled",
       };
     }
@@ -451,7 +630,7 @@ function meetingWatchHeartbeat(
       : Number.NaN;
     if (!Number.isFinite(lastRun)) {
       return {
-        line: "WARNING: meeting watcher heartbeat is missing.",
+        line: `WARNING: meeting watcher heartbeat is missing.${standDown}`,
         warning: "meeting_watch_heartbeat_missing",
       };
     }
@@ -467,26 +646,29 @@ function meetingWatchHeartbeat(
     const deadLetterCount = Number(heartbeat?.dead_letters);
     if (Number.isFinite(deadLetterCount) && deadLetterCount > 0) {
       return {
-        line: `WARNING: meeting watcher has ${deadLetterCount} dead letter${deadLetterCount === 1 ? "" : "s"} (age=${inboundAge(lastRunAt, now)} ${counts}).`,
+        line: `WARNING: meeting watcher has ${deadLetterCount} dead letter${deadLetterCount === 1 ? "" : "s"} (age=${inboundAge(lastRunAt, now)} ${counts}).${standDown}`,
         warning: "meeting_watch_dead_letters",
       };
     }
     if (elapsedMs > 60 * 60_000) {
       return {
-        line: `WARNING: meeting watcher heartbeat is stale (age=${inboundAge(lastRunAt, now)} ${counts}).`,
+        line: `WARNING: meeting watcher heartbeat is stale (age=${inboundAge(lastRunAt, now)} ${counts}).${standDown}`,
         warning: "meeting_watch_heartbeat_stale",
       };
     }
     if (Number.isFinite(errorCount) && errorCount > 0) {
       return {
-        line: `WARNING: meeting watcher last run reported errors (age=${inboundAge(lastRunAt, now)} ${counts}).`,
+        line: `WARNING: meeting watcher last run reported errors (age=${inboundAge(lastRunAt, now)} ${counts}).${standDown}`,
         warning: "meeting_watch_errors",
       };
     }
     return {
-      line: `Meeting watcher heartbeat: age=${inboundAge(lastRunAt, now)} ${counts}.`,
+      line: `Meeting watcher heartbeat: age=${inboundAge(lastRunAt, now)} ${counts}.${standDown}`,
     };
   } catch (error) {
+    if (!installed && !owner && !existsSync(heartbeatPath)) {
+      return { line: "Meeting watcher is not installed on this Mac." };
+    }
     const warning = existsSync(heartbeatPath)
       ? errorNote(error, "meeting_watch_heartbeat_invalid").replace(/^error:/, "")
       : "meeting_watch_heartbeat_missing";
@@ -497,10 +679,45 @@ function meetingWatchHeartbeat(
   }
 }
 
+function meetingWatchOperatorSetupLine(
+  dataDir: string | undefined,
+  machineIdentity: { id: string; hostname: string } | undefined,
+): string | undefined {
+  if (!machineIdentity) return undefined;
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(
+      coveDataDir(dataDir),
+      "intake",
+      "heartbeats.json",
+    ), "utf8")) as unknown;
+    const owner = backgroundLaneOwner(dataDir, "meeting_watch");
+    const heartbeat = machineHeartbeat(
+      parsed,
+      owner?.id ?? machineIdentity.id,
+      "meeting_watch",
+    );
+    return heartbeat?.operator_unconfigured === true
+      ? "Set your name in Setup so meeting follow-ups route to you."
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function progressReconcileHeartbeat(
   dataDir: string | undefined,
   now: Date,
+  machineIdentity: { id: string; hostname: string } | undefined,
 ): { line: string; warning?: string } {
+  if (!machineIdentity) {
+    return { line: "Progress reconciler is not installed on this Mac." };
+  }
+  const installed = backgroundLaneInstalled(
+    dataDir,
+    "progress_reconcile",
+    machineIdentity,
+  );
+  const owner = backgroundLaneOwner(dataDir, "progress");
   const heartbeatPath = path.join(
     coveDataDir(dataDir),
     "intake",
@@ -508,14 +725,31 @@ function progressReconcileHeartbeat(
   );
   try {
     const parsed = JSON.parse(readFileSync(heartbeatPath, "utf8")) as unknown;
-    const heartbeat = asRecord(asRecord(parsed)?.progress_reconcile);
+    const heartbeat = machineHeartbeat(
+      parsed,
+      owner?.id ?? machineIdentity.id,
+      "progress_reconcile",
+    );
+    const localHeartbeat = machineHeartbeat(
+      parsed,
+      machineIdentity.id,
+      "progress_reconcile",
+    );
+    const standDown = localStandDownSuffix(
+      localHeartbeat,
+      owner,
+      machineIdentity,
+    );
+    if (!heartbeat && !installed && !owner) {
+      return { line: "Progress reconciler is not installed on this Mac." };
+    }
     const lastRunAt = typeof heartbeat?.last_run_at === "string"
       ? heartbeat.last_run_at
       : undefined;
     const lastRun = lastRunAt ? Date.parse(lastRunAt) : Number.NaN;
     if (!Number.isFinite(lastRun)) {
       return {
-        line: "WARNING: progress reconciler heartbeat is missing.",
+        line: `WARNING: progress reconciler heartbeat is missing.${standDown}`,
         warning: "progress_reconcile_heartbeat_missing",
       };
     }
@@ -530,18 +764,23 @@ function progressReconcileHeartbeat(
     const age = inboundAge(lastRunAt, now);
     if (Math.max(0, now.getTime() - lastRun) > 2 * 60 * 60_000) {
       return {
-        line: `WARNING: progress reconciler heartbeat is stale (age=${age} ${counts}).`,
+        line: `WARNING: progress reconciler heartbeat is stale (age=${age} ${counts}).${standDown}`,
         warning: "progress_reconcile_heartbeat_stale",
       };
     }
     if (Number(heartbeat?.errors) > 0) {
       return {
-        line: `WARNING: progress reconciler last run reported errors (age=${age} ${counts}).`,
+        line: `WARNING: progress reconciler last run reported errors (age=${age} ${counts}).${standDown}`,
         warning: "progress_reconcile_errors",
       };
     }
-    return { line: `Progress reconciler heartbeat: age=${age} ${counts}.` };
+    return {
+      line: `Progress reconciler heartbeat: age=${age} ${counts}.${standDown}`,
+    };
   } catch (error) {
+    if (!installed && !owner && !existsSync(heartbeatPath)) {
+      return { line: "Progress reconciler is not installed on this Mac." };
+    }
     const warning = existsSync(heartbeatPath)
       ? errorNote(error, "progress_reconcile_heartbeat_invalid").replace(/^error:/, "")
       : "progress_reconcile_heartbeat_missing";
@@ -558,6 +797,7 @@ async function inboundSource(input: {
   timeoutMs: number;
   dataDir?: string;
   now: Date;
+  machineIdentity?: { id: string; hostname: string };
 }): Promise<BriefSourceInput> {
   const source = {
     id: "untriaged_inbound",
@@ -607,8 +847,17 @@ async function inboundSource(input: {
   } else {
     lines.push(`Spool lines waiting: ${spoolCount ?? 0}.`);
   }
-  const heartbeat = meetingWatchHeartbeat(input.dataDir, input.now);
+  const heartbeat = meetingWatchHeartbeat(
+    input.dataDir,
+    input.now,
+    input.machineIdentity,
+  );
   lines.push(heartbeat.line);
+  const operatorSetupLine = meetingWatchOperatorSetupLine(
+    input.dataDir,
+    input.machineIdentity,
+  );
+  if (operatorSetupLine) lines.push(operatorSetupLine);
   return {
     ...source,
     content: lines.join("\n"),
@@ -623,12 +872,109 @@ async function inboundSource(input: {
   };
 }
 
+function recurringRhythmSource(input: {
+  dataDir?: string;
+  targetLocalDate: string;
+  targetTimezone: string;
+  now: Date;
+}): BriefSourceInput {
+  const base = {
+    id: "recurring_rhythm",
+    label: "RECURRING_RHYTHM",
+    required: false,
+    maxChars: 5000,
+    priority: 5,
+  } as const;
+  try {
+    const rhythms = recurringRhythmSnapshot({
+      dbPath: path.join(coveDataDir(input.dataDir), "cove.db"),
+      now: input.now,
+      timezone: input.targetTimezone,
+      localDate: input.targetLocalDate,
+    });
+    return {
+      ...base,
+      content: rhythms.length > 0
+        ? rhythms.map((rhythm) =>
+            `- ${compactLine(rhythm.title, 160)}` +
+            ` | cadence=${rhythm.cadence}` +
+            ` | current_streak=${rhythm.currentStreak}` +
+            ` | recent_misses=${rhythm.recentMisses.length > 0
+              ? rhythm.recentMisses.join(",")
+              : "none"}`
+          ).join("\n")
+        : "No active recurring rhythms.",
+      asOf: input.now.toISOString(),
+    };
+  } catch (error) {
+    return { ...base, note: errorNote(error, "recurring_rhythm_failed") };
+  }
+}
+
+function recentActivitySource(input: {
+  dataDir?: string;
+  now: Date;
+}): BriefSourceInput {
+  const base = {
+    id: "recent_activity",
+    label: "RECENT_ACTIVITY",
+    required: false,
+    maxChars: 500,
+    priority: 4,
+  } as const;
+  try {
+    const digest = buildReceiptDigest({
+      dbPath: path.join(coveDataDir(input.dataDir), "cove.db"),
+    });
+    return {
+      ...base,
+      content: digest.content,
+      asOf: input.now.toISOString(),
+    };
+  } catch (error) {
+    return { ...base, note: errorNote(error, "recent_activity_failed") };
+  }
+}
+
+function staleTasksSource(input: {
+  dataDir?: string;
+  now: Date;
+}): BriefSourceInput {
+  const base = {
+    id: "stale_tasks",
+    label: "STALE_TASKS",
+    required: false,
+    maxChars: 5000,
+    priority: 5,
+  } as const;
+  try {
+    const tasks = detectStaleTasks({
+      dbPath: path.join(coveDataDir(input.dataDir), "cove.db"),
+      dataDir: input.dataDir,
+      now: input.now,
+    });
+    return {
+      ...base,
+      content: tasks.length > 0
+        ? tasks.map((task) =>
+            `- id=${task.id} age_days=${task.ageDays}` +
+            ` column=${task.column} "${compactLine(task.title, 160)}"`
+          ).join("\n")
+        : "No stale tasks.",
+      asOf: input.now.toISOString(),
+    };
+  } catch (error) {
+    return { ...base, note: errorNote(error, "stale_tasks_failed") };
+  }
+}
+
 function projectProgressSource(input: {
   store: DayPlanStore;
   dataDir?: string;
   targetLocalDate: string;
   targetTimezone: string;
   now: Date;
+  machineIdentity?: { id: string; hostname: string };
 }): BriefSourceInput {
   const source = {
     id: "project_progress",
@@ -637,7 +983,11 @@ function projectProgressSource(input: {
     maxChars: 18_000,
     priority: 1,
   } as const;
-  const heartbeat = progressReconcileHeartbeat(input.dataDir, input.now);
+  const heartbeat = progressReconcileHeartbeat(
+    input.dataDir,
+    input.now,
+    input.machineIdentity,
+  );
   const previousDate = addCalendarDays(input.targetLocalDate, -1);
   const since = calendarDayBounds(previousDate, input.targetTimezone).timeMin;
   const until = calendarDayBounds(
@@ -744,7 +1094,7 @@ export function autonomyCheckinSource(input: {
     priority: 1,
   } as const;
   try {
-    const settings = readForgeAutonomySettings({
+    const settings = readCoveAutonomySettings({
       dataDir: input.dataDir,
       createIfMissing: false,
     });
@@ -760,10 +1110,10 @@ export function autonomyCheckinSource(input: {
     return {
       ...source,
       content: `WARNING: Cove autonomy setting is unreadable (${
-        errorNote(error, "forge_autonomy_invalid").replace(/^error:/, "")
+        errorNote(error, "cove_autonomy_invalid").replace(/^error:/, "")
       }).`,
       asOf: input.now.toISOString(),
-      note: "error:forge_autonomy_invalid",
+      note: "error:cove_autonomy_invalid",
     };
   }
 }
@@ -1020,7 +1370,7 @@ async function commitmentsSource(input: {
       "",
       "OVERNIGHT REQUESTS",
       ...(overnight.length > 0
-        ? overnight.map((item) => `- ${compactLine(item.title, 120)} | recorded — overnight execution not yet live`)
+        ? overnight.map((item) => `- ${compactLine(item.title, 120)} | recorded; overnight execution not yet live`)
         : ["None recorded. Overnight execution is not yet live."]),
     ].join("\n");
     const newestUpdate = commitments.reduce(
@@ -1043,6 +1393,156 @@ async function commitmentsSource(input: {
     };
   } catch (error) {
     return { ...base, note: errorNote(error, "commitments_failed") };
+  }
+}
+
+type EmailQueueItem = {
+  id: string;
+  threadId?: string;
+  classification?: string;
+  status: string;
+  senderName?: string;
+  senderEmail?: string;
+  subject?: string;
+  summary?: string;
+  recommendedAction?: string;
+  priority?: number;
+  receivedAt?: string;
+};
+
+type EmailQueueDraft = {
+  id: string;
+  emailItemId?: string;
+  status: "needs_review" | "approved" | "edited";
+};
+
+function emailQueueItem(value: unknown): EmailQueueItem | undefined {
+  const row = asRecord(value);
+  if (!row || typeof row.id !== "string" || typeof row.status !== "string") {
+    return undefined;
+  }
+  const priority = Number(row.priority);
+  return {
+    id: row.id,
+    threadId: typeof row.thread_id === "string" ? row.thread_id : undefined,
+    classification: typeof row.classification === "string" ? row.classification : undefined,
+    status: row.status,
+    senderName: typeof row.sender_name === "string" ? row.sender_name : undefined,
+    senderEmail: typeof row.sender_email === "string" ? row.sender_email : undefined,
+    subject: typeof row.subject === "string" ? row.subject : undefined,
+    summary: typeof row.summary === "string" ? row.summary : undefined,
+    recommendedAction:
+      typeof row.recommended_action === "string" ? row.recommended_action : undefined,
+    priority: Number.isFinite(priority) ? priority : undefined,
+    receivedAt: typeof row.received_at === "string" ? row.received_at : undefined,
+  };
+}
+
+function emailQueueDraft(value: unknown): EmailQueueDraft | undefined {
+  const row = asRecord(value);
+  if (
+    !row ||
+    typeof row.id !== "string" ||
+    (row.status !== "needs_review" && row.status !== "approved" && row.status !== "edited")
+  ) {
+    return undefined;
+  }
+  return {
+    id: row.id,
+    emailItemId: typeof row.email_item_id === "string" ? row.email_item_id : undefined,
+    status: row.status,
+  };
+}
+
+export async function emailQueueSource(input: {
+  fetchImpl: typeof fetch;
+  baseUrl: string;
+  timeoutMs: number;
+  now: Date;
+}): Promise<BriefSourceInput> {
+  const base: BriefSourceInput = {
+    id: "email_queue",
+    label: "EMAIL_DECISION_QUEUE",
+    required: false,
+    maxChars: 12_000,
+    priority: 7,
+    freshness: "current",
+  };
+  try {
+    // These tables have no position column. Explicit queries keep cove-rest
+    // from applying its default position ordering to columns that do not exist.
+    const [itemRows, draftRows] = await Promise.all([
+      fetchRows(
+        input.fetchImpl,
+        input.baseUrl,
+        "email_items",
+        input.timeoutMs,
+        "select=id,thread_id,classification,status,sender_name,sender_email,subject,summary,recommended_action,priority,received_at&status=in.(pending,reviewed)&order=received_at.desc",
+      ),
+      fetchRows(
+        input.fetchImpl,
+        input.baseUrl,
+        "drafts",
+        input.timeoutMs,
+        "select=id,email_item_id,status&status=in.(needs_review,approved,edited)&order=updated_at.desc",
+      ),
+    ]);
+    const items = itemRows
+      .map(emailQueueItem)
+      .filter((item): item is EmailQueueItem => Boolean(item))
+      .sort((left, right) => {
+        const classification =
+          Number(right.classification === "action_item") -
+          Number(left.classification === "action_item");
+        if (classification !== 0) return classification;
+        const priority = (left.priority ?? Number.MAX_SAFE_INTEGER) -
+          (right.priority ?? Number.MAX_SAFE_INTEGER);
+        if (priority !== 0) return priority;
+        const leftReceived = left.receivedAt ? Date.parse(left.receivedAt) : 0;
+        const rightReceived = right.receivedAt ? Date.parse(right.receivedAt) : 0;
+        return rightReceived - leftReceived || left.id.localeCompare(right.id);
+      });
+    if (items.length === 0) {
+      return { ...base, content: "No open email items." };
+    }
+
+    // Draft rows arrive newest first. Keep the first state for each item and
+    // ignore orphan rows because email_item_id has no enforced foreign key.
+    const itemIds = new Set(items.map((item) => item.id));
+    const draftByItemId = new Map<string, EmailQueueDraft["status"]>();
+    for (const draft of draftRows
+      .map(emailQueueDraft)
+      .filter((entry): entry is EmailQueueDraft => Boolean(entry))) {
+      if (
+        draft.emailItemId &&
+        itemIds.has(draft.emailItemId) &&
+        !draftByItemId.has(draft.emailItemId)
+      ) {
+        draftByItemId.set(draft.emailItemId, draft.status);
+      }
+    }
+
+    const waitingCount = items.filter((item) => draftByItemId.has(item.id)).length;
+    const displayedItems = items.slice(0, 25);
+    const content = [
+      `showing ${displayedItems.length} of ${items.length} open items (${waitingCount} with a draft waiting).`,
+      ...displayedItems.map((item) => {
+        const sender = compactLine(item.senderName || item.senderEmail, 80) || "Unknown sender";
+        const subject = JSON.stringify(compactLine(item.subject, 120) || "(no subject)");
+        const ask = compactLine(item.recommendedAction || item.summary, 140) || "none stated";
+        return `- [${compactLine(item.status, 30)}] p${item.priority ?? "?"} ${JSON.stringify(sender)} ${subject}` +
+          ` | ask: ${JSON.stringify(ask)}` +
+          ` | draft: ${draftByItemId.get(item.id) ?? "none"}` +
+          ` | age: ${inboundAge(item.receivedAt, input.now)}`;
+      }),
+    ].join("\n");
+    const newestReceivedAt = items.reduce(
+      (newest, item) => item.receivedAt && item.receivedAt > newest ? item.receivedAt : newest,
+      "",
+    );
+    return { ...base, content, asOf: newestReceivedAt || undefined };
+  } catch (error) {
+    return { ...base, note: errorNote(error, "email_queue_failed") };
   }
 }
 
@@ -1108,6 +1608,259 @@ function calendarDayBounds(localDate: string, timezone: string): { timeMin: stri
   };
 }
 
+// How many prior weekdays of closeouts and briefs the morning brief looks back
+// over. Five covers a full working week without letting a quiet Friday fall out
+// of view on Monday.
+export const BRIEF_LOOKBACK_WEEKDAYS = 5;
+
+// The operator does not do structured work on weekends, so a Monday brief that
+// counted back five calendar days would spend two of its five slots on days that
+// were never going to have a closeout in them. Counts strictly backwards from the
+// day before the target and keeps only Monday through Friday, newest first.
+export function previousWeekdays(
+  targetLocalDate: string,
+  count = BRIEF_LOOKBACK_WEEKDAYS,
+): string[] {
+  const dates: string[] = [];
+  // Three calendar days per weekday needed is slack enough for any weekend run.
+  for (let back = 1; dates.length < count && back <= count * 3; back += 1) {
+    const date = addCalendarDays(targetLocalDate, -back);
+    const weekday = new Date(`${date}T12:00:00.000Z`).getUTCDay();
+    if (weekday !== 0 && weekday !== 6) dates.push(date);
+  }
+  return dates;
+}
+
+// Working days sitting between the day a closeout covers and the day the brief
+// is for. This, not elapsed hours, is what says whether a closeout is the
+// current one: Friday's closeout read on Monday morning is ~60 hours old and is
+// still the most recent one possible, while a Thursday closeout read the
+// following Wednesday has three working days of silence behind it. An
+// hours-based rule gets Mondays wrong every single week.
+//
+// Returns undefined when the date is unusable or in the future, and 0 when the
+// closeout covers the immediately preceding working day.
+export function closeoutGapWeekdays(
+  closeoutLocalDate: string | undefined,
+  targetLocalDate: string,
+): number | undefined {
+  if (!closeoutLocalDate || closeoutLocalDate >= targetLocalDate) return undefined;
+  // Two working weeks is far enough back to be worth reporting exactly; past
+  // that the precise number stops changing anyone's reading of it.
+  const window = previousWeekdays(targetLocalDate, 10);
+  const index = window.indexOf(closeoutLocalDate);
+  return index >= 0 ? index : undefined;
+}
+
+// The provenance line Cove prepends to the closeout. Facts only: when it was
+// written, which day it covers, and how many working days have gone by without
+// another one. No verdict and no prohibition. The model has the target date and
+// this line, so it can judge for itself which parts of a closeout still hold,
+// which is the right call to leave with the writer rather than hard-code here.
+export function closeoutTimestampHeader(input: {
+  asOf: string | undefined;
+  closeoutLocalDate: string | undefined;
+  targetLocalDate: string;
+  targetTimezone: string;
+}): string {
+  const parts = [
+    `CLOSEOUT PROVENANCE (added by Cove, not written by the operator).`,
+    input.asOf ? `Saved: ${input.asOf}.` : `Saved: time unknown.`,
+    input.closeoutLocalDate
+      ? `Covers the working day ${weekdayLabel(input.closeoutLocalDate, input.targetTimezone)}.`
+      : `The day it covers was not recorded.`,
+    `This brief is for ${weekdayLabel(input.targetLocalDate, input.targetTimezone)}.`,
+  ];
+  const gap = closeoutGapWeekdays(input.closeoutLocalDate, input.targetLocalDate);
+  if (gap === 0) {
+    parts.push("It covers the working day immediately before this one, so it is the operator's most recent word.");
+  } else if (gap !== undefined && gap > 0) {
+    const skipped = previousWeekdays(input.targetLocalDate, gap)
+      .slice()
+      .reverse()
+      .map((date) => weekdayLabel(date, input.targetTimezone));
+    parts.push(
+      `${gap} working day${gap === 1 ? "" : "s"} (${skipped.join(", ")}) went by without a closeout, so anything time-bound in it may have moved since.`,
+    );
+  }
+  return parts.join(" ");
+}
+
+function weekdayLabel(localDate: string, timezone: string): string {
+  try {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone,
+      weekday: "long",
+      month: "short",
+      day: "numeric",
+    }).format(new Date(`${localDate}T12:00:00.000Z`));
+  } catch {
+    return localDate;
+  }
+}
+
+// The previous weekdays' closeouts, under the newest one. The dump the operator
+// wrote last night says what he decided; the four before it say what he has been
+// circling for a week, which is how a brief notices that a task has been carried
+// three nights running rather than treating every morning as day one.
+function recentDumpsSource(input: {
+  dumps: readonly DayDump[];
+  newestId: string | undefined;
+  targetLocalDate: string;
+  now: Date;
+}): BriefSourceInput {
+  const base = {
+    id: "recent_dumps",
+    label: "RECENT_CLOSEOUT_NOTES",
+    required: false,
+    maxChars: 14_000,
+    priority: 2,
+  } as const;
+  try {
+    const window = new Set(previousWeekdays(input.targetLocalDate));
+    const history = input.dumps
+      .filter((dump) => dump.id !== input.newestId && window.has(dump.targetLocalDate))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+    if (history.length === 0) {
+      return { ...base, note: "recent_dumps_unavailable" };
+    }
+    return {
+      ...base,
+      content: history
+        .map((dump) =>
+          `--- closeout for ${dump.targetLocalDate} (written ${dump.createdAt}) ---\n` +
+          dump.rawText.trim(),
+        )
+        .join("\n\n"),
+      asOf: history[0].createdAt,
+    };
+  } catch (error) {
+    // A malformed historical row must not suppress every other brief source.
+    return { ...base, note: errorNote(error, "recent_dumps_failed") };
+  }
+}
+
+// What Cove already told him on the previous weekdays. This is here so the brief
+// can see its own repetition: a headline it has now written three mornings
+// running is either the most important thing he owns or something it keeps
+// pushing that he has not chosen, and both of those are worth saying out loud.
+// Deliberately NOT evidence: prior briefs are Cove's own words, and treating
+// them as fact is how a wrong call from Monday survives all week.
+function briefCandidateReceipt(input: {
+  taskId: string;
+  plan: NonNullable<ReturnType<DayPlanStore["getPlanForDate"]>>;
+  snapshot: ReturnType<DayPlanStore["getSnapshot"]>;
+}): string {
+  const item = input.plan.items.find((candidate) => candidate.taskId === input.taskId);
+  if (!item) return `taskId=${input.taskId} dropped_before_arrival`;
+  const title = compactLine(item.title, 80) || "Untitled task";
+  const decision = item.decision === "accepted" || item.decision === "completed"
+    ? "accepted"
+    : item.decision === "pending" || item.decision === "preselected"
+      ? "not_decided"
+      : item.decision === "later"
+        ? "set_aside"
+        : item.decision === "dismissed"
+          ? "dismissed"
+          : "unknown_decision";
+  let settled = "not_settled";
+  if (input.snapshot?.body.completedHumanTaskIds.includes(input.taskId)) {
+    settled = "done";
+  } else {
+    settled = input.snapshot?.body.unresolvedItems.find(
+      (candidate) => candidate.taskId === input.taskId,
+    )?.disposition ?? "not_settled";
+  }
+  return `'${title.replace(/'/g, "\\'")}' ${decision} then ${settled}`;
+}
+
+export function recentBriefsSource(input: {
+  store: DayPlanStore;
+  targetLocalDate: string;
+  now: Date;
+}): BriefSourceInput {
+  const base = {
+    id: "recent_briefs",
+    label: "YOUR_RECENT_BRIEFS",
+    required: false,
+    maxChars: 8000,
+    priority: 3,
+  } as const;
+  try {
+    const lines: string[] = [];
+    let newestAsOf: string | undefined;
+    for (const date of previousWeekdays(input.targetLocalDate)) {
+      const artifacts = input.store.listMorningBriefs(date);
+      const plan = input.store.getPlanForDate?.(date);
+      // A plan freezes the brief the operator actually saw when that artifact is
+      // available and parseable. Otherwise preserve the date with a labelled fallback.
+      const attachedArtifact = plan?.briefId
+        ? artifacts.find((artifact) => artifact.id === plan.briefId)
+        : undefined;
+      const attachedBrief = attachedArtifact
+        ? morningBriefFromArtifact(attachedArtifact)
+        : undefined;
+      let selected = attachedArtifact && attachedBrief
+        ? { artifact: attachedArtifact, brief: attachedBrief, fallback: false }
+        : undefined;
+      selected ??= [...artifacts]
+        .reverse()
+        .flatMap((artifact) => {
+          const brief = morningBriefFromArtifact(artifact);
+          return brief ? [{ artifact, brief, fallback: true }] : [];
+        })[0];
+      if (!selected?.brief) continue;
+      const { artifact, brief } = selected;
+      const headline = compactLine(brief.headline, 240) ||
+        compactLine(
+          /^.*?[.!?](?:\s|$)/.exec(compactLine(brief.lensNarrative, 10_000))?.[0] ??
+            brief.lensNarrative,
+          240,
+        );
+      if (!headline) continue;
+      const finished = artifact.finishedAt;
+      if (!newestAsOf && finished) newestAsOf = finished;
+      lines.push(
+        `- ${date}: ${headline}` +
+          (selected.fallback ? " (not the brief attached to the plan)" : ""),
+      );
+
+      if (
+        brief.existingTaskCandidates.length === 0 ||
+        !plan?.briefId ||
+        plan.briefId !== artifact.id
+      ) {
+        continue;
+      }
+      const snapshot = input.store.getSnapshot?.(plan.id);
+      const seenTaskIds = new Set<string>();
+      const receipts = brief.existingTaskCandidates.flatMap((candidate) => {
+        if (seenTaskIds.has(candidate.taskId)) return [];
+        seenTaskIds.add(candidate.taskId);
+        return [briefCandidateReceipt({ taskId: candidate.taskId, plan, snapshot })];
+      });
+      lines.push(`  candidates: ${receipts.join("; ")}`);
+    }
+    if (lines.length === 0) {
+      return { ...base, note: "recent_briefs_unavailable" };
+    }
+    return {
+      ...base,
+      content: [
+        "Headlines Cove gave the operator on the previous weekdays, newest first.",
+        "These are Cove's own past words, not evidence.",
+        "Receipts distinguish accepted work, dismissed work, work set aside, and work never decided.",
+        "Use them only to notice repetition and what happened next, never as proof the recommendation was right.",
+        "",
+        ...lines,
+      ].join("\n"),
+      asOf: newestAsOf,
+    };
+  } catch (error) {
+    return { ...base, note: errorNote(error, "recent_briefs_failed") };
+  }
+}
+
 type CalendarEvent = {
   summary?: string;
   start?: { date?: string; dateTime?: string };
@@ -1130,7 +1883,47 @@ function calendarTime(value: string, timezone: string): string {
     .toLowerCase();
 }
 
-function formatCalendarEvents(events: readonly CalendarEvent[], timezone: string): string {
+function calendarEventLocalDate(
+  event: CalendarEvent,
+  timezone: string,
+  fallback: string,
+): string {
+  if (event.start?.date && !event.start.dateTime) return event.start.date;
+  const timestamp = event.start?.dateTime ? Date.parse(event.start.dateTime) : NaN;
+  return Number.isFinite(timestamp)
+    ? localDateInTimezone(new Date(timestamp), timezone)
+    : fallback;
+}
+
+function formatCalendarEvent(event: CalendarEvent, timezone: string): string {
+  const summary = compactLine(event.summary, 240) || "Untitled event";
+  if (event.start?.date && !event.start.dateTime) return `all day: ${summary}`;
+  const start = event.start?.dateTime;
+  const end = event.end?.dateTime;
+  const startTime = start ? calendarTime(start, timezone) : "time unknown";
+  const endTime = end ? calendarTime(end, timezone) : undefined;
+  const range = startTime === "time unknown"
+    ? startTime
+    : `${startTime}${endTime && endTime !== "time unknown" ? `-${endTime}` : ""}`;
+  const otherAttendees = (event.attendees ?? [])
+    .filter((attendee) => !attendee.self && attendee.email)
+    .slice(0, 3)
+    .map((attendee) => attendee.email as string);
+  const people = otherAttendees.length > 0 ? ` (with ${otherAttendees.join(", ")})` : "";
+  const meeting = event.hangoutLink || event.conferenceData ? " [Meet]" : "";
+  return `${range}: ${summary}${people}${meeting}`;
+}
+
+function formatCalendarEvents(
+  events: readonly CalendarEvent[],
+  timezone: string,
+  targetLocalDate: string,
+): string {
+  const windowDates = Array.from(
+    { length: 7 },
+    (_, index) => addCalendarDays(targetLocalDate, index),
+  );
+  const windowSet = new Set(windowDates);
   const visible = events
     .filter(
       (event) =>
@@ -1138,139 +1931,95 @@ function formatCalendarEvents(events: readonly CalendarEvent[], timezone: string
           (attendee) => attendee.self === true && attendee.responseStatus === "declined",
         ),
     )
+    .map((event) => ({
+      event,
+      localDate: calendarEventLocalDate(event, timezone, targetLocalDate),
+    }))
+    .filter((entry) => windowSet.has(entry.localDate))
     .sort((left, right) => {
-      const leftStart = left.start?.dateTime ?? left.start?.date ?? "";
-      const rightStart = right.start?.dateTime ?? right.start?.date ?? "";
+      const dateOrder = left.localDate.localeCompare(right.localDate);
+      if (dateOrder !== 0) return dateOrder;
+      const leftStart = left.event.start?.dateTime ?? left.event.start?.date ?? "";
+      const rightStart = right.event.start?.dateTime ?? right.event.start?.date ?? "";
       return leftStart.localeCompare(rightStart);
     });
-  if (visible.length === 0) return "No calendar events today.";
-  return visible
-    .map((event) => {
-      const summary = compactLine(event.summary, 240) || "Untitled event";
-      if (event.start?.date && !event.start.dateTime) return `all day — ${summary}`;
-      const start = event.start?.dateTime;
-      const end = event.end?.dateTime;
-      const startTime = start ? calendarTime(start, timezone) : "time unknown";
-      const endTime = end ? calendarTime(end, timezone) : undefined;
-      const range = startTime === "time unknown"
-        ? startTime
-        : `${startTime}${endTime && endTime !== "time unknown" ? `-${endTime}` : ""}`;
-      const otherAttendees = (event.attendees ?? [])
-        .filter((attendee) => !attendee.self && attendee.email)
-        .slice(0, 3)
-        .map((attendee) => attendee.email as string);
-      const people = otherAttendees.length > 0 ? ` (with ${otherAttendees.join(", ")})` : "";
-      const meeting = event.hangoutLink || event.conferenceData ? " [Meet]" : "";
-      return `${range} — ${summary}${people}${meeting}`;
-    })
-    .join("\n");
-}
-
-function parseCalendarItems(sse: string): CalendarEvent[] {
-  const dataLines = sse
-    .split(/\r?\n/)
-    .map((line) => /^data:\s?(.*)$/.exec(line)?.[1])
-    .filter((line): line is string => line !== undefined);
-  if (dataLines.length === 0) throw new Error("calendar MCP response missing data");
-  const frames = dataLines.map((line) => {
-    try {
-      return asRecord(JSON.parse(line));
-    } catch {
-      return undefined;
-    }
-  });
-  const rpc = [...frames]
-    .reverse()
-    .find((frame) => frame?.id === 2 || (frame && "result" in frame)) ?? frames.at(-1);
-  if (!rpc) throw new Error("calendar MCP response invalid");
-  const result = asRecord(rpc?.result);
-  const content = Array.isArray(result?.content) ? result.content : [];
-  const text = asRecord(content[0])?.text;
-  if (typeof text !== "string") throw new Error("calendar MCP response missing text");
-  const toolPayload = asRecord(JSON.parse(text));
-  const data = asRecord(toolPayload?.data);
-  const results = Array.isArray(data?.results) ? data.results : [];
-  const response = asRecord(asRecord(results[0])?.response);
-  const responseData = asRecord(response?.data);
-  if (!Array.isArray(responseData?.items)) throw new Error("calendar MCP items missing");
-  return responseData.items as CalendarEvent[];
+  const health =
+    `Window: ${targetLocalDate} to ${windowDates[6]} (7 days). ${visible.length} events.`;
+  if (visible.length === 0) {
+    return `${health}\nNo events in the 7-day window.`;
+  }
+  const grouped = new Map<string, CalendarEvent[]>();
+  for (const entry of visible) {
+    const group = grouped.get(entry.localDate) ?? [];
+    group.push(entry.event);
+    grouped.set(entry.localDate, group);
+  }
+  return [
+    health,
+    ...windowDates.flatMap((localDate) => {
+      const dayEvents = grouped.get(localDate);
+      if (!dayEvents) return [];
+      return [
+        "",
+        weekdayLabel(localDate, timezone),
+        ...dayEvents.map((event) => formatCalendarEvent(event, timezone)),
+      ];
+    }),
+  ].join("\n");
 }
 
 async function calendarSource(
-  fetchImpl: typeof fetch,
+  _fetchImpl: typeof fetch,
   targetLocalDate: string,
   targetTimezone: string,
   now: Date,
+  dataDir?: string,
+  injectedGateway?: Pick<WorkspaceGateway, "calendar">,
 ): Promise<BriefSourceInput> {
   const source = {
     id: "calendar",
-    label: "CALENDAR_TODAY",
+    label: "CALENDAR",
     required: false,
-    maxChars: 3000,
+    maxChars: 5000,
     priority: 7,
   } as const;
-  const rawKey = coveEnv("BRIEF_COMPOSIO_KEY")?.trim();
-  const keyPath = coveEnv("BRIEF_COMPOSIO_KEY_PATH")?.trim()
-    || path.join(homedir(), ".config", "edge-ai", "composio.key");
-  const key = rawKey || readKeyFile(keyPath);
-  if (!key) return { ...source, note: "not_configured" };
+  const resolvedDataDir = coveDataDir(dataDir);
+  if (!injectedGateway && !existsSync(workspaceConfigPath(resolvedDataDir))) {
+    return { ...source, note: "not_configured" };
+  }
   try {
-    const baseHeaders = {
-      "content-type": "application/json",
-      accept: "application/json, text/event-stream",
-      "x-consumer-api-key": key,
-    };
-    const initialized = await fetchImpl(COMPOSIO_MCP_URL, {
-      method: "POST",
-      headers: baseHeaders,
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          protocolVersion: "2025-03-26",
-          capabilities: {},
-          clientInfo: { name: "forge-brief", version: "1.0" },
-        },
-      }),
-      signal: AbortSignal.timeout(EXTERNAL_FETCH_TIMEOUT_MS),
+    const startBounds = calendarDayBounds(targetLocalDate, targetTimezone);
+    const endBounds = calendarDayBounds(
+      addCalendarDays(targetLocalDate, 7),
+      targetTimezone,
+    );
+    const calendar = injectedGateway?.calendar ??
+      createGoogleWorkspaceGateway({ dataDir: resolvedDataDir }).calendar;
+    if (!calendar) return { ...source, note: "not_configured" };
+    const events = await calendar.listEvents({
+      timeMin: startBounds.timeMin,
+      timeMax: endBounds.timeMin,
+      timeZone: targetTimezone,
+      maxResults: 250,
     });
-    const sessionId = initialized.headers.get("mcp-session-id");
-    await initialized.text();
-    if (!initialized.ok) throw new Error(`calendar initialize ${initialized.status}`);
-    if (!sessionId) throw new Error("calendar MCP session missing");
-    const bounds = calendarDayBounds(targetLocalDate, targetTimezone);
-    const called = await fetchImpl(COMPOSIO_MCP_URL, {
-      method: "POST",
-      headers: { ...baseHeaders, "mcp-session-id": sessionId },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 2,
-        method: "tools/call",
-        params: {
-          name: "COMPOSIO_MULTI_EXECUTE_TOOL",
-          arguments: {
-            tools: [
-              {
-                tool_slug: "GOOGLECALENDAR_EVENTS_LIST",
-                arguments: {
-                  calendarId: "primary",
-                  timeMin: bounds.timeMin,
-                  timeMax: bounds.timeMax,
-                  singleEvents: true,
-                  orderBy: "startTime",
-                },
-              },
-            ],
-          },
-        },
-      }),
-      signal: AbortSignal.timeout(EXTERNAL_FETCH_TIMEOUT_MS),
-    });
-    if (!called.ok) throw new Error(`calendar tools call ${called.status}`);
+    const formatted: CalendarEvent[] = events.map((event) => ({
+      summary: event.summary,
+      start: /^\d{4}-\d{2}-\d{2}$/.test(event.start)
+        ? { date: event.start }
+        : { dateTime: event.start },
+      end: /^\d{4}-\d{2}-\d{2}$/.test(event.end)
+        ? { date: event.end }
+        : { dateTime: event.end },
+      attendees: event.attendees.map((attendee) => ({
+        email: attendee.email,
+        self: attendee.self,
+        responseStatus: attendee.responseStatus,
+      })),
+      hangoutLink: event.meetingUrl || undefined,
+    }));
     return {
       ...source,
-      content: formatCalendarEvents(parseCalendarItems(await called.text()), targetTimezone),
+      content: formatCalendarEvents(formatted, targetTimezone, targetLocalDate),
       asOf: now.toISOString(),
     };
   } catch (error) {
@@ -1388,7 +2137,7 @@ function formatCrmLastTouches(
     .slice(0, 12)
     .map(
       (person) =>
-        `${person.name} — last touch ${person.ageDays}d ago (` +
+        `${person.name}: last touch ${person.ageDays}d ago (` +
         `${person.date}${person.interactionType ? `, ${person.interactionType}` : ""})`,
     );
   const quiet = people
@@ -1585,6 +2334,11 @@ export async function collectMorningBriefSources(
   const baseUrl = (options.webBaseUrl ?? defaultBriefWebBase()).replace(/\/$/, "");
   const timeoutMs = options.timeoutMs ?? 8000;
   const now = options.now ?? new Date();
+  const machineIdentity = briefMachineIdentity(
+    options.dataDir,
+    options.homeDir,
+    options.machineIdentity,
+  );
   const targetTimezone = options.targetTimezone ?? coveEnv("BRIEF_TIMEZONE") ?? defaultBriefTimezone();
   let targetLocalDate = options.targetLocalDate;
   if (!targetLocalDate) {
@@ -1624,7 +2378,14 @@ export async function collectMorningBriefSources(
 
   // Start independent external reads together. Each helper catches its own
   // failures so an optional integration can never reject the full collection.
-  const calendarPromise = calendarSource(fetchImpl, targetLocalDate, targetTimezone, now);
+  const calendarPromise = calendarSource(
+    fetchImpl,
+    targetLocalDate,
+    targetTimezone,
+    now,
+    options.dataDir,
+    options.workspaceGateway,
+  );
   const crmPromise = crmSource(fetchImpl, now, targetTimezone);
   const memoryPromise = memoryDecisionsSource(fetchImpl, memoryPath, now);
   const commitmentsPromise = commitmentsSource({
@@ -1634,12 +2395,19 @@ export async function collectMorningBriefSources(
     targetLocalDate,
     now,
   });
+  const emailQueuePromise = emailQueueSource({
+    fetchImpl,
+    baseUrl,
+    timeoutMs,
+    now,
+  });
   const inboundPromise = inboundSource({
     fetchImpl,
     baseUrl,
     timeoutMs,
     dataDir: options.dataDir,
     now,
+    machineIdentity,
   });
 
   // Last night's brain dump, in the operator's own words, and the first thing the brief
@@ -1650,20 +2418,27 @@ export async function collectMorningBriefSources(
   // dumps are typed on the MBP and the 7:30 brief runs on the Mini. Extraction
   // already reached the commitment ledger; what this adds is the reasoning
   // around it, which no extraction preserves.
-  let dumpContent: string | undefined;
-  let dumpAsOf: string | undefined;
+  //
+  // Status is deliberately NOT filtered. The raw text is his, and it exists from
+  // the moment he saves; extraction only adds structure on top of it. Requiring
+  // status === "succeeded" made the brief blind to the dump he had just written
+  // whenever settlement triggered generation inside the extraction window, and it
+  // fell back to the previous dump without saying so. On 2026-07-29 a closeout
+  // moving a client install to Monday was saved 2s before collection and finished
+  // 60s after it, so the brief planned the whole day off a five-day-old dump.
+  let localDumps: DayDump[] = [];
   try {
-    const succeeded = options.store
+    localDumps = options.store
       .listDayDumps()
-      .filter((dump) => dump.status === "succeeded" && dump.rawText.trim());
-    const newest = succeeded[succeeded.length - 1];
-    if (newest) {
-      dumpContent = newest.rawText.trim();
-      dumpAsOf = newest.createdAt;
-    }
+      .filter((dump) => dump.rawText.trim());
   } catch {
     // Fall through to the relay.
   }
+  // listDayDumps orders by created_at ascending, so the newest is last.
+  const newestLocalDump = localDumps[localDumps.length - 1];
+  let dumpContent = newestLocalDump?.rawText.trim();
+  let dumpAsOf = newestLocalDump?.createdAt;
+  let dumpLocalDate = newestLocalDump?.targetLocalDate;
   const relayDump = readDumpRelay({ dataDir: options.dataDir, now });
   if (relayDump) {
     const relayMs = Date.parse(relayDump.asOf);
@@ -1671,13 +2446,28 @@ export async function collectMorningBriefSources(
     if (!dumpContent || !Number.isFinite(localMs) || relayMs > localMs) {
       dumpContent = relayDump.content;
       dumpAsOf = relayDump.asOf;
+      dumpLocalDate = relayDump.targetLocalDate;
     }
   }
+  const closeoutGap = closeoutGapWeekdays(dumpLocalDate, targetLocalDate);
+  // Current means "no working day has gone by without one". A closeout dated on
+  // or after the target day is same-day or later, which is fresher still. An
+  // unrecorded date cannot be judged either way, and the header says so.
+  const closeoutIsCurrent = closeoutGap === 0 ||
+    dumpLocalDate === undefined ||
+    dumpLocalDate >= targetLocalDate;
+  const closeoutHeader = closeoutTimestampHeader({
+    asOf: dumpAsOf,
+    closeoutLocalDate: dumpLocalDate,
+    targetLocalDate,
+    targetTimezone,
+  });
   const autonomyCheckin = autonomyCheckinSource({
     dataDir: options.dataDir,
     now,
   });
 
+  const localMode = getRuntimeMode() === "local";
   const sources: BriefSourceInput[] = [
     dumpContent
       ? {
@@ -1686,11 +2476,15 @@ export async function collectMorningBriefSources(
           required: false,
           maxChars: 12_000,
           priority: 0,
-          content: dumpContent,
+          // Provenance leads so it survives the character cap: trimming takes
+          // from the end, and a timestamp trimmed off is a timestamp unread.
+          content: `${closeoutHeader}\n\n${dumpContent}`,
           asOf: dumpAsOf,
-          // A dump two nights old is still the freshest statement of direction
-          // he has made; older than that and it describes a finished week.
-          freshnessThresholdHours: staleThresholdHours("day_dump", 60),
+          // Freshness is the working-day gap, never elapsed hours. Friday's
+          // closeout read on Monday is ~60 hours old and is still the most
+          // recent one that exists, so an hours threshold would mark the normal
+          // Monday case stale every week.
+          freshness: closeoutIsCurrent ? "current" : "stale",
         }
       : {
           id: "day_dump",
@@ -1700,6 +2494,17 @@ export async function collectMorningBriefSources(
           priority: 0,
           note: "day_dump_unavailable",
         },
+    recentDumpsSource({
+      dumps: localDumps,
+      newestId: newestLocalDump?.id,
+      targetLocalDate,
+      now,
+    }),
+    recentBriefsSource({
+      store: options.store,
+      targetLocalDate,
+      now,
+    }),
     await inboundPromise,
     projectProgressSource({
       store: options.store,
@@ -1707,15 +2512,37 @@ export async function collectMorningBriefSources(
       targetLocalDate,
       targetTimezone,
       now,
+      machineIdentity,
     }),
+    ...(localMode
+      ? [
+          recentActivitySource({
+            dataDir: options.dataDir,
+            now,
+          }),
+          recurringRhythmSource({
+            dataDir: options.dataDir,
+            targetLocalDate,
+            targetTimezone,
+            now,
+          }),
+          staleTasksSource({
+            dataDir: options.dataDir,
+            now,
+          }),
+        ]
+      : []),
     ...(autonomyCheckin ? [autonomyCheckin] : []),
-    fileSource("goals", "GOALS", filePolicy.goals.path, {
-      required: filePolicy.goals.required,
-      maxChars: 9000,
-      priority: 1,
-      // Goals change rarely; a month untouched is worth flagging.
-      freshnessThresholdHours: staleThresholdHours("goals", 24 * 30),
-    }),
+    {
+      ...fileSource("goals", "GOALS", filePolicy.goals.path, {
+        required: filePolicy.goals.required,
+        maxChars: 20_000,
+        priority: 1,
+        // Goals change rarely; a month untouched is worth flagging.
+        freshnessThresholdHours: staleThresholdHours("goals", 24 * 30),
+      }),
+      contentTrimmer: preserveGoalsNeverSections,
+    },
     operatorProfileSource,
     fileSource(
       "leadup",
@@ -1742,6 +2569,8 @@ export async function collectMorningBriefSources(
   ];
 
   const knownTaskIds = new Set<string>();
+  const taskUpdatedAtById = new Map<string, string>();
+  const recurringTaskIds = new Set<string>();
   let emailBrief: BriefSourceInput = {
     id: "email_brief",
     label: "EMAIL_BRIEF",
@@ -1752,6 +2581,7 @@ export async function collectMorningBriefSources(
     freshnessThresholdHours: staleThresholdHours("email_brief", 24),
   };
   sources.push(await commitmentsPromise);
+  sources.push(await emailQueuePromise);
   try {
     const [taskRows, columnRows] = await Promise.all([
       fetchRows(fetchImpl, baseUrl, "tasks", timeoutMs),
@@ -1760,23 +2590,74 @@ export async function collectMorningBriefSources(
     const columns = new Map(
       (columnRows as ColumnRow[]).map((column) => [column.id, column.name]),
     );
+    const completedCutoff = now.getTime() - 48 * 60 * 60 * 1000;
+    const completed = (taskRows as TaskRow[])
+      .flatMap((row) => {
+        if (row.status !== "done" || !row.updated_at) return [];
+        const updatedMs = Date.parse(row.updated_at);
+        if (
+          !Number.isFinite(updatedMs) ||
+          updatedMs < completedCutoff ||
+          updatedMs > now.getTime()
+        ) {
+          return [];
+        }
+        return [{ row, updatedMs }];
+      })
+      .sort((left, right) => right.updatedMs - left.updatedMs);
+    const completedLines = completed.slice(0, 15).map(({ row }) =>
+      `- "${compactLine(row.title, 96) || "Untitled task"}"` +
+      ` project=${compactLine(row.project, 48) || "Atlas"}` +
+      ` updated=${row.updated_at}`
+    );
+    if (completed.length > completedLines.length) {
+      completedLines.push(`+${completed.length - completedLines.length} more`);
+    }
+    sources.push({
+      id: "completed_recently",
+      label: "COMPLETED_RECENTLY",
+      required: false,
+      maxChars: 3000,
+      priority: 6,
+      content: completedLines.length > 0
+        ? completedLines.join("\n")
+        : "Nothing marked done in the last two days.",
+      asOf: completed[0]?.row.updated_at,
+    });
     const lines: string[] = [];
     let newestUpdate = "";
-    for (const row of taskRows as TaskRow[]) {
+    const priorityRank = new Map([["high", 0], ["medium", 1], ["low", 2]]);
+    const orderedOpenRows = (taskRows as TaskRow[])
+      .filter((row) => row.id && row.status === "open" && columnBucket(columns.get(row.column_id ?? undefined)))
+      .sort((left, right) => {
+        const leftDate = left.due_at ? localDateFor(left.due_at, targetTimezone) : undefined;
+        const rightDate = right.due_at ? localDateFor(right.due_at, targetTimezone) : undefined;
+        const leftDueNow = leftDate && leftDate <= targetLocalDate ? 0 : 1;
+        const rightDueNow = rightDate && rightDate <= targetLocalDate ? 0 : 1;
+        return leftDueNow - rightDueNow ||
+          (leftDueNow === 0 && rightDueNow === 0
+            ? (leftDate ?? "").localeCompare(rightDate ?? "")
+            : 0) ||
+          (priorityRank.get(left.priority ?? "medium") ?? 1) -
+            (priorityRank.get(right.priority ?? "medium") ?? 1) ||
+          (right.updated_at ?? "").localeCompare(left.updated_at ?? "");
+      });
+    for (const row of orderedOpenRows) {
       if (!row.id || row.status !== "open") continue;
       const bucket = columnBucket(columns.get(row.column_id ?? undefined));
       if (!bucket) continue;
       const title = compactLine(row.title, 160);
       const tags = taskTags(row.tags).map((tag) => tag.trim().toLowerCase());
-      // Candidate eligibility mirrors the arrival pool exactly (Today and
-      // In-Flight commitments, excluding Jarvis-held work and the running email
-      // digest card). Everything else is context the model can see but must not
-      // rank, so a valid brief candidate always rehydrates at ensure time.
+      const recurringInstance = tags.includes("recurring") || Boolean(row.recurring_template_id);
+      if (recurringInstance) recurringTaskIds.add(row.id);
       const candidateEligible =
-        (bucket === "today" || bucket === "in_flight") &&
         !tags.includes("jarvis-held") &&
-        !title.startsWith("Emails:");
-      if (candidateEligible) knownTaskIds.add(row.id);
+        (!localMode || !recurringInstance) &&
+        !tags.includes("email-current");
+      if (candidateEligible) {
+        knownTaskIds.add(row.id);
+        taskUpdatedAtById.set(row.id, row.updated_at ?? "");
+      }
       if (row.updated_at && row.updated_at > newestUpdate) newestUpdate = row.updated_at;
       lines.push(
         `- [${bucket}] id=${row.id} "${title}"` +
@@ -1787,7 +2668,7 @@ export async function collectMorningBriefSources(
           (row.updated_at ? ` updated=${row.updated_at}` : "") +
           (row.description ? ` :: ${compactLine(row.description, 240)}` : ""),
       );
-      if (title.startsWith("Emails:")) {
+      if (tags.includes("email-current")) {
         emailBrief = {
           ...emailBrief,
           content: `${title}\n${compactLine(row.description, 2400)}`,
@@ -1807,6 +2688,14 @@ export async function collectMorningBriefSources(
       freshnessThresholdHours: staleThresholdHours("task_snapshot", 72),
     });
   } catch (error) {
+    sources.push({
+      id: "completed_recently",
+      label: "COMPLETED_RECENTLY",
+      required: false,
+      maxChars: 3000,
+      priority: 6,
+      note: error instanceof Error ? error.message.slice(0, 200) : "completed_recently_failed",
+    });
     sources.push({
       id: "task_snapshot",
       label: "OPEN_TASKS",
@@ -1874,5 +2763,5 @@ export async function collectMorningBriefSources(
   sources.push(await crmPromise);
   sources.push(await memoryPromise);
 
-  return { sources, knownTaskIds };
+  return { sources, knownTaskIds, taskUpdatedAtById, recurringTaskIds };
 }

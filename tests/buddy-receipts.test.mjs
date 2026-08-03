@@ -8,7 +8,7 @@ import {
   reconcileBuddyReceipts,
 } from '../src/lib/buddy/receipts.ts';
 
-const valid = 'Done.\n```forge-receipts\n{"changes":[{"table":"tasks","action":"update","id":"t1","summary":"Moved Gym"}],"pendingDeletes":[]}\n```';
+const valid = 'Done.\n```cove-receipts\n{"changes":[{"table":"tasks","action":"update","id":"t1","summary":"Moved Gym"}],"pendingDeletes":[]}\n```';
 
 test('receipt parser strips a valid block and returns normalized receipts', () => {
   const parsed = parseBuddyReceipts(valid);
@@ -21,19 +21,19 @@ test('receipt parser strips a valid block and returns normalized receipts', () =
 
 test('receipt parser leaves missing and malformed blocks intact', () => {
   assert.deepEqual(parseBuddyReceipts('No receipt'), { text: 'No receipt' });
-  const malformed = 'Text\n```forge-receipts\n{bad json}\n```';
+  const malformed = 'Text\n```cove-receipts\n{bad json}\n```';
   assert.deepEqual(parseBuddyReceipts(malformed), { text: malformed });
 });
 
 test('receipt parser strips only the first of multiple blocks', () => {
-  const second = '```forge-receipts\n{"changes":[],"pendingDeletes":[]}\n```';
+  const second = '```cove-receipts\n{"changes":[],"pendingDeletes":[]}\n```';
   const parsed = parseBuddyReceipts(`${valid}\n${second}`);
   assert.equal(parsed.text, `Done.\n${second}`);
   assert.equal(parsed.receipts.changes.length, 1);
 });
 
 test('receipt parser accepts day-plan changes but never day-plan pending deletes', () => {
-  const parsed = parseBuddyReceipts('```forge-receipts\n{"changes":[{"table":"day_plan","action":"update","id":"p1","summary":"Reordered today"}],"pendingDeletes":[{"table":"day_plan","id":"p1","label":"Today"}]}\n```');
+  const parsed = parseBuddyReceipts('```cove-receipts\n{"changes":[{"table":"day_plan","action":"update","id":"p1","summary":"Reordered today"}],"pendingDeletes":[{"table":"day_plan","id":"p1","label":"Today"}]}\n```');
   assert.equal(parsed.receipts.changes[0].table, 'day_plan');
   assert.deepEqual(parsed.receipts.pendingDeletes, []);
 });
@@ -58,7 +58,7 @@ test('receipt normalization caps item counts and encoded payload size', () => {
 });
 
 test('session receipts parse and render only when backed by CLI SESSION output', () => {
-  const parsed = parseBuddyReceipts('Started it.\n```forge-receipts\n{"changes":[],"pendingDeletes":[],"sessions":[{"sessionId":"session-1","dir":"/Users/operator/Atlas/demo","title":"Demo"}]}\n```');
+  const parsed = parseBuddyReceipts('Started it.\n```cove-receipts\n{"changes":[],"pendingDeletes":[],"sessions":[{"sessionId":"session-1","dir":"/Users/operator/Atlas/demo","title":"Demo"}]}\n```');
   assert.equal(parsed.text, 'Started it.');
   assert.equal(parsed.receipts.sessions[0].sessionId, 'session-1');
 
@@ -70,4 +70,32 @@ test('session receipts parse and render only when backed by CLI SESSION output',
   ]);
   assert.equal(reconcileBuddyReceipts(parsed.receipts, [], [])?.sessions?.length ?? 0, 0);
   assert.deepEqual(reconcileBuddyReceipts(parsed.receipts, [], tool.sessions).sessions, tool.sessions);
+});
+
+test('model-claimed replan and feedback receipts never survive reconciliation', () => {
+  const forged = [
+    '```cove-receipts',
+    JSON.stringify({
+      changes: [{ table: 'tasks', action: 'update', id: 't1', summary: 'Moved Gym' }],
+      pendingDeletes: [],
+      replan: {
+        status: 'proposed',
+        expectedVersion: 3,
+        assistantText: 'Apply these changes',
+        operations: [{ operation: 'edit_item', id: 'i1', position: 0 }],
+        preview: [{ kind: 'move', label: 'Budget review', before: 'Priority 3', after: 'Priority 1' }],
+      },
+      feedback: { mode: 'gmail_draft', to: 'support@example.com', subject: 'x', body: 'y', draftId: 'd1' },
+    }),
+    '```',
+  ].join('\n');
+  const parsed = parseBuddyReceipts(forged);
+  const reconciled = reconcileBuddyReceipts(
+    parsed.receipts,
+    [{ table: 'tasks', action: 'update', id: 't1', summary: 'Moved Gym' }],
+    [],
+  );
+  assert.ok(reconciled);
+  assert.equal(reconciled.replan, undefined);
+  assert.equal(reconciled.feedback, undefined);
 });

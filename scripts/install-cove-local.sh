@@ -6,9 +6,10 @@
 # Safe to re-run: it replaces any previous Cove LaunchAgents.
 set -euo pipefail
 
-# --mini installs the always-on Mac Mini's scheduled brief, meeting watcher,
-# and progress reconciler. The default (MBP) install no longer schedules a 7:30
-# brief agent; backfill and the post-settlement trigger cover the MBP side.
+# --mini adds the always-on Mac Mini's scheduled brief profile. Meeting watch
+# and progress reconciliation are standard single-Mac lanes on every install.
+# The default install does not schedule a 7:30 brief agent; backfill and the
+# post-settlement trigger cover a laptop that was asleep.
 MINI=0
 for arg in "$@"; do
   case "$arg" in
@@ -52,7 +53,19 @@ LOG_DIR="$HOME/Library/Logs"
 LA_DIR="$HOME/Library/LaunchAgents"
 UID_NUM="$(id -u)"
 
-# The product was called Forge before this release, so an older install has
+resolve_atlas_root() {
+  if [ -n "${COVE_ATLAS_ROOT:-}" ]; then
+    printf '%s\n' "$COVE_ATLAS_ROOT"
+  elif [[ "$REPO_DIR" == */Atlas/Projects/* ]]; then
+    printf '%s\n' "${REPO_DIR%%/Projects/*}"
+  elif [[ "$REPO_DIR" == */Atlas/projects/* ]]; then
+    printf '%s\n' "${REPO_DIR%%/projects/*}"
+  else
+    printf '%s\n' "$HOME/Atlas"
+  fi
+}
+
+# The product was formerly called Forge, so an older install can still have
 # com.forge.* LaunchAgents. Two agents for the same role would run side by side
 # against one database, so every com.cove.* agent this script installs first
 # unloads and deletes its com.forge.* predecessor. Safe when none exists.
@@ -93,14 +106,29 @@ if [ -z "$CLAUDE_BIN" ] || [ ! -x "$CLAUDE_BIN" ]; then
 fi
 
 mkdir -p "$LOG_DIR" "$LA_DIR"
+if [ ! -e "$REPO_DIR/.env.local" ]; then
+  install -m 600 /dev/null "$REPO_DIR/.env.local"
+  echo "Created a private empty .env.local. Add optional Cove settings there when needed."
+fi
+LANE_DATA_DIR="${COVE_DATA_DIR:-$REPO_DIR/data}"
+LANE_OWNERSHIP_SCRIPT="$REPO_DIR/scripts/lib/cove-lane-ownership.mjs"
+LANE_PLIST_RENDERER="$REPO_DIR/scripts/lib/render-lane-plist.mjs"
+claim_lane() {
+  "$NODE_REAL" "$LANE_OWNERSHIP_SCRIPT" claim \
+    "$LANE_DATA_DIR" "$1" "$2" "$HOME"
+}
+mark_lane_installed() {
+  "$NODE_REAL" "$LANE_OWNERSHIP_SCRIPT" mark-installed \
+    "$LANE_DATA_DIR" "$1" "$HOME" >/dev/null
+}
 
-# --- Mini-only: install scheduled brief, meeting, and progress agents -------
-# The Mini already runs its own web + worker via com.atlas.forge-web. These
-# agents add the scheduled producers whose immutable relay files the MBP reads.
+# --- Optional Mini profile: scheduled brief plus the same standard lanes ----
+# The Mini already runs its own web + worker via com.atlas.cove-web. This
+# profile adds the scheduled brief and installs the same meeting/progress lanes.
 # Logs go to ~/Library/Logs (TCC blocks launchd writes under ~/Desktop).
 if [ "$MINI" = "1" ]; then
   # SAFETY GATE: the Mini agent is a second live SQLite writer on a tree that
-  # Syncthing used to sync wholesale. Bootstrapping it before forge.db is
+  # Syncthing used to sync wholesale. Bootstrapping it before cove.db is
   # excluded from sync ON BOTH machines is a documented corruption vector, so
   # this refuses to proceed until the operator confirms. Confirm with
   # COVE_MINI_CONFIRM_STIGNORE=1 or interactively below.
@@ -113,16 +141,16 @@ and the Cove web + worker processes on both machines must have been STOPPED
 when the block was applied:
 
 // --- Cove machine-private runtime state (brief-relay change) ---
-// Each machine keeps its OWN forge.db now; a live SQLite file must never sync
+// Each machine keeps its OWN cove.db now; a live SQLite file must never sync
 // (torn-write corruption). -wal/-shm are already covered by the global rules
 // above. The relay dirs (brief-relay/, settlement-relay/, progress-relay/) and
 // source-checkpoint.json are the transport and MUST keep syncing — not listed.
-projects/astack/forge/data/forge.db
-projects/astack/forge/data/claude-runs
-projects/astack/forge/data/claude-runs/**
-projects/astack/forge/data/claude-worker.heartbeat
-projects/astack/forge/data/backups
-projects/astack/forge/data/backups/**
+projects/astack/cove/data/cove.db
+projects/astack/cove/data/claude-runs
+projects/astack/cove/data/claude-runs/**
+projects/astack/cove/data/claude-worker.heartbeat
+projects/astack/cove/data/backups
+projects/astack/cove/data/backups/**
 ================================================================================
 STIGNORE_BLOCK
   if [ "${COVE_MINI_CONFIRM_STIGNORE:-0}" != "1" ]; then
@@ -141,11 +169,13 @@ STIGNORE_BLOCK
       exit 1
     fi
   fi
-  # The Atlas root is three levels up from the repo (<atlas>/projects/astack/forge).
-  ATLAS_ROOT="$(cd "$REPO_DIR/../../.." && pwd)"
+  # Support both direct Atlas/Projects/Cove installs and older nested layouts.
+  ATLAS_ROOT="$(resolve_atlas_root)"
   MINI_BRIEF_PLIST="$LA_DIR/com.cove.morning-brief.plist"
   MINI_MEETING_PLIST="$LA_DIR/com.cove.meeting-watch.plist"
   MINI_PROGRESS_PLIST="$LA_DIR/com.cove.progress.plist"
+  claim_lane meeting_watch mini >/dev/null
+  claim_lane progress mini >/dev/null
   cat > "$MINI_BRIEF_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -206,50 +236,22 @@ $SUPERNOVA_PLIST_ENTRY
 </dict>
 </plist>
 EOF
-  "$NODE_REAL" - \
+  "$NODE_REAL" "$LANE_PLIST_RENDERER" \
     "$REPO_DIR/scripts/launchd/com.cove.meeting-watch.plist" \
     "$MINI_MEETING_PLIST" \
     "$REPO_DIR" \
     "$HOME" \
-    "$ATLAS_ROOT" <<'NODE'
-const fs = require("node:fs");
-const path = require("node:path");
-const [source, destination, repoDir, homeDir, atlasRoot] = process.argv.slice(2);
-const template = fs.readFileSync(source, "utf8");
-const templateRepo = template.match(
-  /<string>([^<]*\/Atlas\/Projects\/astack\/forge)(?:\/[^<]*)?<\/string>/,
-)?.[1];
-if (!templateRepo) throw new Error(`Could not locate the repo path in ${source}`);
-const templateAtlas = path.resolve(templateRepo, "../../..");
-const templateHome = path.dirname(templateAtlas);
-const rendered = template
-  .replaceAll(templateRepo, repoDir)
-  .replaceAll(templateAtlas, atlasRoot)
-  .replaceAll(templateHome, homeDir);
-fs.writeFileSync(destination, rendered, { mode: 0o600 });
-NODE
-  "$NODE_REAL" - \
+    "$ATLAS_ROOT" \
+    "$LANE_DATA_DIR" \
+    "$NODE_REAL"
+  "$NODE_REAL" "$LANE_PLIST_RENDERER" \
     "$REPO_DIR/scripts/launchd/com.cove.progress.plist" \
     "$MINI_PROGRESS_PLIST" \
     "$REPO_DIR" \
     "$HOME" \
-    "$ATLAS_ROOT" <<'NODE'
-const fs = require("node:fs");
-const path = require("node:path");
-const [source, destination, repoDir, homeDir, atlasRoot] = process.argv.slice(2);
-const template = fs.readFileSync(source, "utf8");
-const templateRepo = template.match(
-  /<string>([^<]*\/Atlas\/Projects\/astack\/forge)(?:\/[^<]*)?<\/string>/,
-)?.[1];
-if (!templateRepo) throw new Error(`Could not locate the repo path in ${source}`);
-const templateAtlas = path.resolve(templateRepo, "../../..");
-const templateHome = path.dirname(templateAtlas);
-const rendered = template
-  .replaceAll(templateRepo, repoDir)
-  .replaceAll(templateAtlas, atlasRoot)
-  .replaceAll(templateHome, homeDir);
-fs.writeFileSync(destination, rendered, { mode: 0o600 });
-NODE
+    "$ATLAS_ROOT" \
+    "$LANE_DATA_DIR" \
+    "$NODE_REAL"
   retire_legacy_agent morning-brief
   retire_legacy_agent meeting-watch
   retire_legacy_agent progress
@@ -259,6 +261,8 @@ NODE
   launchctl bootstrap "gui/$UID_NUM" "$MINI_BRIEF_PLIST"
   launchctl bootstrap "gui/$UID_NUM" "$MINI_MEETING_PLIST"
   launchctl bootstrap "gui/$UID_NUM" "$MINI_PROGRESS_PLIST"
+  mark_lane_installed meeting_watch
+  mark_lane_installed progress_reconcile
   echo "Installed the Mini morning-brief agent (7:30 local): $MINI_BRIEF_PLIST"
   echo "Installed the Mini meeting watcher (every 5 minutes): $MINI_MEETING_PLIST"
   echo "Installed the Mini progress reconciler (every 30 minutes): $MINI_PROGRESS_PLIST"
@@ -339,6 +343,47 @@ if [ "$MINI" = "1" ]; then
   exit 0
 fi
 
+# --- Single-Mac background lanes: meeting watch + progress reconciliation ---
+# StartInterval jobs catch up when the Mac wakes. The same templates also serve
+# the optional Mini profile above; neither feature depends on owning a Mini.
+ATLAS_ROOT="$(resolve_atlas_root)"
+MEETING_PLIST="$LA_DIR/com.cove.meeting-watch.plist"
+PROGRESS_PLIST="$LA_DIR/com.cove.progress.plist"
+INSTALL_MEETING_LANE=0
+INSTALL_PROGRESS_LANE=0
+MEETING_CLAIM="$(claim_lane meeting_watch plain)"
+case "$MEETING_CLAIM" in
+  claimed:*) INSTALL_MEETING_LANE=1 ;;
+  skipped:*)
+    MEETING_OWNER="${MEETING_CLAIM#skipped:}"
+    echo "Skipping meeting watcher: $MEETING_OWNER owns this lane."
+    rm -f "$MEETING_PLIST"
+    ;;
+esac
+PROGRESS_CLAIM="$(claim_lane progress plain)"
+case "$PROGRESS_CLAIM" in
+  claimed:*) INSTALL_PROGRESS_LANE=1 ;;
+  skipped:*)
+    PROGRESS_OWNER="${PROGRESS_CLAIM#skipped:}"
+    echo "Skipping progress reconciler: $PROGRESS_OWNER owns this lane."
+    rm -f "$PROGRESS_PLIST"
+    ;;
+esac
+render_lane_plist() {
+  "$NODE_REAL" "$LANE_PLIST_RENDERER" \
+    "$1" "$2" "$REPO_DIR" "$HOME" "$ATLAS_ROOT" "$LANE_DATA_DIR" "$NODE_REAL"
+}
+if [ "$INSTALL_MEETING_LANE" = "1" ]; then
+  render_lane_plist \
+    "$REPO_DIR/scripts/launchd/com.cove.meeting-watch.plist" \
+    "$MEETING_PLIST"
+fi
+if [ "$INSTALL_PROGRESS_LANE" = "1" ]; then
+  render_lane_plist \
+    "$REPO_DIR/scripts/launchd/com.cove.progress.plist" \
+    "$PROGRESS_PLIST"
+fi
+
 # --- Install Cove's skills for Claude and Codex ---
 # The cove-* skills are refreshed every run in both supported agent homes. The
 # bundled humanizer skill is installed only when absent, so unrelated personal
@@ -365,6 +410,7 @@ fi
 
 SERVER_PLIST="$LA_DIR/com.cove.local.plist"
 BACKUP_PLIST="$LA_DIR/com.cove.local.backup.plist"
+JOBS_PLIST="$LA_DIR/com.cove.jobs.plist"
 REMINDERS_PLIST="$LA_DIR/com.cove.reminders.plist"
 TRIAGE_PLIST="$LA_DIR/com.cove.email-triage.plist"
 WORKER_PLIST="$LA_DIR/com.cove.claude-worker.plist"
@@ -487,6 +533,8 @@ cat > "$BACKUP_PLIST" <<EOF
 <dict>
   <key>Label</key>
   <string>com.cove.local.backup</string>
+  <key>WorkingDirectory</key>
+  <string>$REPO_DIR</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
@@ -501,6 +549,46 @@ cat > "$BACKUP_PLIST" <<EOF
   <string>$LOG_DIR/cove-backup.log</string>
   <key>StandardErrorPath</key>
   <string>$LOG_DIR/cove-backup.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>COVE_NODE_PATH</key>
+    <string>$NODE_REAL</string>
+  </dict>
+</dict>
+</plist>
+EOF
+
+# --- Reliability jobs: one bounded scheduler tick every five minutes ---
+cat > "$JOBS_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cove.jobs</string>
+  <key>WorkingDirectory</key>
+  <string>$REPO_DIR</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$NODE_REAL</string>
+    <string>--import</string>
+    <string>$REPO_DIR/node_modules/tsx/dist/loader.mjs</string>
+    <string>$REPO_DIR/scripts/cove-jobs.ts</string>
+    <string>run</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>StandardOutPath</key>
+  <string>$LOG_DIR/cove-jobs.log</string>
+  <key>StandardErrorPath</key>
+  <string>$LOG_DIR/cove-jobs.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>$NODE_BIN:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+  </dict>
 </dict>
 </plist>
 EOF
@@ -537,17 +625,13 @@ cat > "$REMINDERS_PLIST" <<EOF
 </plist>
 EOF
 
-# --- Email triage: run the cove-email skill at the user's chosen times ---
-# Only scheduled once email is set up (the Email step writes data/cove-email.json
+# --- Email triage: run the deterministic runner at the user's chosen times ---
+# Only scheduled once Google is connected (the Email step writes data/cove-workspace.json
 # with triage_times + timezone). launchd fires at LOCAL time on the Mac.
 # triage_times may hold any number of "HH:MM" entries; we emit one calendar dict
 # per entry. No Weekday keys go in the plist: the runner's weekday guard (driven
 # by the config's weekdays_only flag) owns weekend skipping.
-# An install made before the Cove rename still has data/forge-email.json.
-EMAIL_CONFIG="$REPO_DIR/data/cove-email.json"
-if [ ! -f "$EMAIL_CONFIG" ] && [ -f "$REPO_DIR/data/forge-email.json" ]; then
-  EMAIL_CONFIG="$REPO_DIR/data/forge-email.json"
-fi
+EMAIL_CONFIG="$REPO_DIR/data/cove-workspace.json"
 if [ -f "$EMAIL_CONFIG" ]; then
   TRIAGE_CAL_XML="$(node -e '
     const fs = require("fs");
@@ -598,7 +682,7 @@ $TRIAGE_CAL_XML
 </dict>
 </plist>
 EOF
-  echo "Scheduled email triage (times from data/cove-email.json; default 9:00 and 15:00)."
+  echo "Scheduled email triage (times from data/cove-workspace.json; default 9:00 and 15:00)."
 else
   rm -f "$TRIAGE_PLIST"
 fi
@@ -606,9 +690,12 @@ fi
 # (Re)load all agents with the modern launchctl API (idempotent).
 retire_legacy_agent local
 retire_legacy_agent local.backup
+retire_legacy_agent jobs
 retire_legacy_agent reminders
 retire_legacy_agent email-triage
 retire_legacy_agent claude-worker
+retire_legacy_agent meeting-watch
+retire_legacy_agent progress
 # com.forge.web is the pre-rename web server on this same port. Leaving it
 # loaded means com.cove.local crash-loops on EADDRINUSE while the readiness
 # probe below happily answers off the old server, so the install looks fine and
@@ -616,20 +703,65 @@ retire_legacy_agent claude-worker
 retire_legacy_agent web
 launchctl bootout "gui/$UID_NUM/com.cove.local" 2>/dev/null || true
 launchctl bootout "gui/$UID_NUM/com.cove.local.backup" 2>/dev/null || true
+launchctl bootout "gui/$UID_NUM/com.cove.jobs" 2>/dev/null || true
 launchctl bootout "gui/$UID_NUM/com.cove.reminders" 2>/dev/null || true
 launchctl bootout "gui/$UID_NUM/com.cove.email-triage" 2>/dev/null || true
 launchctl bootout "gui/$UID_NUM/com.cove.claude-worker" 2>/dev/null || true
+launchctl bootout "gui/$UID_NUM/com.cove.meeting-watch" 2>/dev/null || true
+launchctl bootout "gui/$UID_NUM/com.cove.progress" 2>/dev/null || true
 # Decommission the retired MBP 7:30 brief agent entirely (bootout + plist
 # removal): the Mini owns scheduled generation now.
 launchctl bootout "gui/$UID_NUM/com.cove.morning-brief" 2>/dev/null || true
 rm -f "$LA_DIR/com.cove.morning-brief.plist"
+
+# Move machine-private pre-Cove data only after every writer is stopped.
+# Never overwrite a canonical file: two copies means the operator must decide
+# which one is authoritative instead of the installer guessing.
+for suffix in "" "-wal" "-shm"; do
+  legacy_db="$REPO_DIR/data/forge.db$suffix"
+  cove_db="$REPO_DIR/data/cove.db$suffix"
+  if [ -e "$legacy_db" ] && [ -e "$cove_db" ]; then
+    echo "Both $legacy_db and $cove_db exist. Refusing to choose between them." >&2
+    exit 1
+  fi
+  if [ -e "$legacy_db" ]; then
+    mv "$legacy_db" "$cove_db"
+  fi
+done
+for legacy_config in "$REPO_DIR"/data/forge-*.json; do
+  [ -e "$legacy_config" ] || continue
+  cove_config="$REPO_DIR/data/cove-${legacy_config##*forge-}"
+  if [ -e "$cove_config" ]; then
+    echo "Keeping canonical config and leaving legacy file untouched: $legacy_config"
+    continue
+  fi
+  mv "$legacy_config" "$cove_config"
+done
+
 launchctl bootstrap "gui/$UID_NUM" "$SERVER_PLIST"
 launchctl bootstrap "gui/$UID_NUM" "$BACKUP_PLIST"
+launchctl bootstrap "gui/$UID_NUM" "$JOBS_PLIST"
 launchctl bootstrap "gui/$UID_NUM" "$REMINDERS_PLIST"
+WORKER_START_EPOCH="$(date +%s)"
 launchctl bootstrap "gui/$UID_NUM" "$WORKER_PLIST"
+if [ "$INSTALL_MEETING_LANE" = "1" ]; then
+  launchctl bootstrap "gui/$UID_NUM" "$MEETING_PLIST"
+  mark_lane_installed meeting_watch
+fi
+if [ "$INSTALL_PROGRESS_LANE" = "1" ]; then
+  launchctl bootstrap "gui/$UID_NUM" "$PROGRESS_PLIST"
+  mark_lane_installed progress_reconcile
+fi
 if [ -f "$TRIAGE_PLIST" ]; then launchctl bootstrap "gui/$UID_NUM" "$TRIAGE_PLIST"; fi
 launchctl enable "gui/$UID_NUM/com.cove.local" 2>/dev/null || true
 launchctl enable "gui/$UID_NUM/com.cove.claude-worker" 2>/dev/null || true
+launchctl enable "gui/$UID_NUM/com.cove.jobs" 2>/dev/null || true
+if [ "$INSTALL_MEETING_LANE" = "1" ]; then
+  launchctl enable "gui/$UID_NUM/com.cove.meeting-watch" 2>/dev/null || true
+fi
+if [ "$INSTALL_PROGRESS_LANE" = "1" ]; then
+  launchctl enable "gui/$UID_NUM/com.cove.progress" 2>/dev/null || true
+fi
 
 # Confirm the server actually came up. This catches the most common failure:
 # launchd not being able to find/run Node on the client's machine.
@@ -645,24 +777,45 @@ done
 
 if [ -n "$UP" ]; then
   WORKER_UP=""
-  for _ in $(seq 1 10); do
-    if [ -f "$REPO_DIR/data/claude-worker.heartbeat" ]; then
+  for _ in $(seq 1 30); do
+    WORKER_HEARTBEAT="$REPO_DIR/data/claude-worker.heartbeat"
+    WORKER_HEARTBEAT_EPOCH="$(stat -f '%m' "$WORKER_HEARTBEAT" 2>/dev/null || printf '0')"
+    if [ "$WORKER_HEARTBEAT_EPOCH" -ge "$WORKER_START_EPOCH" ]; then
       WORKER_UP="yes"
       break
     fi
     sleep 1
   done
   if [ -z "$WORKER_UP" ]; then
-    echo "Cove web started, but the Claude worker did not become healthy." >&2
+    echo "Warning: Cove web started, but the Claude worker has not written a fresh heartbeat yet." >&2
     echo "See: $LOG_DIR/cove-claude-worker.error.log" >&2
-    exit 1
+    echo "Retry the worker: launchctl kickstart -k gui/$UID_NUM/com.cove.claude-worker" >&2
   fi
+  echo "Creating the first Cove database backup..."
+  "$TSX_BIN" "$REPO_DIR/scripts/cove-jobs.ts" enqueue-backup --run
   echo "Cove is running at http://localhost:3200 and will start automatically on login."
   echo "Server logs: $LOG_DIR/cove.log"
   echo "Daily database backups: $REPO_DIR/data/backups"
+  echo "Reliability jobs: bounded scheduler supervised by com.cove.jobs"
   echo "Claude worker: supervised by com.cove.claude-worker"
-  echo "Morning Brief: generated on the Mac Mini (install there with --mini) + MBP backfill/post-settlement"
-  echo "Autonomous execution remains off until COVE_CLAUDE_EXECUTION_ENABLED=1 and an allowlisted workspace config are explicitly added."
+  if [ -n "$WORKER_UP" ]; then
+    echo "Claude worker status: ok"
+  else
+    echo "Claude worker status: not started"
+  fi
+  if [ "$INSTALL_MEETING_LANE" = "1" ]; then
+    echo "Meeting watcher: every 5 minutes while this Mac is awake, with catch-up on wake"
+  else
+    echo "Meeting watcher: skipped because $MEETING_OWNER owns this lane"
+  fi
+  if [ "$INSTALL_PROGRESS_LANE" = "1" ]; then
+    echo "Progress reconciler: every 30 minutes while this Mac is awake, with catch-up on wake"
+  else
+    echo "Progress reconciler: skipped because $PROGRESS_OWNER owns this lane"
+  fi
+  echo "Morning Brief: on-open backfill/post-settlement; --mini optionally adds a 7:30 always-on lane"
+  echo "Day-plan batch execution remains off until COVE_CLAUDE_EXECUTION_ENABLED=1 and an allowlisted workspace config are explicitly added."
+  echo "Task owner chips open Claude sessions: Claude works the task with automatic file edits; Together opens a planning session. Neither can send, publish, or purchase."
 else
   echo "Cove did not respond on http://localhost:3200 within 20 seconds." >&2
   echo "See the log for why: $LOG_DIR/cove.error.log" >&2

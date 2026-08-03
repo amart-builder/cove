@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * Gemini meeting-note watcher.
+ * Meeting-note Gmail watcher.
  *
- * Matcher settings live in data/cove-meetings.json:
+ * Matcher settings live in the operator's data/cove-meetings.json (falling
+ * back to data/forge-meetings.json on pre-rename installs):
  * {
  *   "enabled": true,
  *   "query": "from:(gemini-noreply@google.com) OR subject:(\"Notes:\" OR \"Meeting notes\")",
@@ -10,13 +11,11 @@
  *   "processed_label": "Cove/Meeting-Processed"
  * }
  *
- * Edit that file if Google's sender or subject wording changes. The matcher is
- * intentionally configuration, not code. `--once --dry-run` reads Gmail and
+ * Known tool patterns and custom overrides feed one shared detector.
+ * `--once --dry-run` reads Gmail and
  * parses matches but writes no labels, intake rows, commitments, state, or
  * heartbeat.
  */
-import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -28,28 +27,50 @@ import {
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import {
   extractMeetingFollowUps,
-  inboundAckState,
   isOperatorConfigured,
   isOperatorOwned,
-  meetingFollowUpText,
 } from "../src/lib/intake/meeting-followups.mjs";
-import { coveConfigPath, coveEnv } from "../src/lib/env-runtime.mjs";
+import {
+  coveConfigPath,
+  coveEnv,
+  coveEnvTrimmed,
+} from "../src/lib/env-runtime.mjs";
+import {
+  checkLaneOwnership,
+  laneOwnerLabel,
+} from "./lib/cove-lane-ownership.mjs";
+import { loadLocalEnv } from "./lib/load-local-env.mjs";
+import { normalizeMachineIdentity } from "../src/lib/machine-identity.mjs";
 
+const repoDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+loadLocalEnv(repoDir);
 const require = createRequire(import.meta.url);
 require("tsx/cjs");
-const { recordEvent, resolveEvent } = require("../src/lib/intake/inbox.ts");
-const { runForgeIntake } = require("../src/lib/intake/run.ts");
+const {
+  detectMeetingNotes,
+  loadMeetingDetectionConfig,
+} = require("../src/lib/intake/meeting-detection.ts");
+const {
+  processMeetingNotesEmail,
+  writeWaitingCommitment,
+} = require("../src/lib/intake/meeting-pipeline.ts");
+const {
+  recordFailure,
+} = require("../src/lib/reliability/failures.ts");
+const {
+  recordReceipt,
+} = require("../src/lib/reliability/receipts.ts");
+const {
+  createGoogleWorkspaceGateway,
+} = require("../src/lib/workspace/google/gateway.ts");
 
-const execFileAsync = promisify(execFile);
-const repoDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultDataDir = coveEnv("DATA_DIR")?.trim() ||
   path.join(repoDir, "data");
 const DEFAULT_CONFIG_PATH = coveConfigPath(defaultDataDir, "meetings.json");
-const DEFAULT_EMAIL_CONFIG_PATH = coveConfigPath(defaultDataDir, "email.json");
-const DEFAULT_STATE_PATH = path.join(defaultDataDir, "forge-meeting-state.json");
+const DEFAULT_EMAIL_CONFIG_PATH = path.join(defaultDataDir, "cove-workspace.json");
+const DEFAULT_STATE_PATH = path.join(defaultDataDir, "cove-meeting-state.json");
 const DEFAULT_HEARTBEAT_PATH = path.join(defaultDataDir, "intake", "heartbeats.json");
 const MAX_PROCESSED_IDS = 500;
 const MAX_FAILURES = 500;
@@ -89,37 +110,23 @@ function atomicJsonWrite(file, value) {
 }
 
 export function loadMeetingConfig(file = DEFAULT_CONFIG_PATH) {
-  const parsed = objectValue(readJson(file));
-  if (
-    typeof parsed?.enabled !== "boolean" ||
-    typeof parsed.query !== "string" ||
-    !parsed.query.trim() ||
-    typeof parsed.window !== "string" ||
-    !parsed.window.trim() ||
-    typeof parsed.processed_label !== "string" ||
-    !parsed.processed_label.trim()
-  ) {
-    throw new Error("cove-meetings.json is missing enabled, query, window, or processed_label.");
-  }
-  return {
-    enabled: parsed.enabled,
-    query: parsed.query.trim(),
-    window: parsed.window.trim(),
-    processedLabel: parsed.processed_label.trim(),
-  };
+  return loadMeetingDetectionConfig(file);
 }
 
 function loadEmailConfig(file = DEFAULT_EMAIL_CONFIG_PATH) {
   const parsed = objectValue(readJson(file));
-  if (typeof parsed?.account_email !== "string" || !parsed.account_email.trim()) {
-    throw new Error("cove-email.json is missing account_email.");
+  if (
+    parsed?.provider !== "google-api" ||
+    typeof parsed?.account_email !== "string" ||
+    !parsed.account_email.trim()
+  ) {
+    throw new Error("cove-workspace.json is missing a connected Google account.");
   }
   return {
     accountEmail: parsed.account_email.trim(),
-    forgeUrl: typeof parsed.forge_url === "string" && parsed.forge_url.trim()
-      ? parsed.forge_url.trim().replace(/\/$/, "")
+    coveUrl: typeof parsed.cove_url === "string" && parsed.cove_url.trim()
+      ? parsed.cove_url.trim().replace(/\/$/, "")
       : "http://127.0.0.1:3200",
-    labels: objectValue(parsed.labels) ?? {},
   };
 }
 
@@ -168,64 +175,19 @@ export function writeMeetingState(file, state) {
   });
 }
 
-export function writeMeetingHeartbeat(file, heartbeat) {
+export function writeMeetingHeartbeat(file, heartbeat, identity) {
+  const machineIdentity = normalizeMachineIdentity(identity);
   const current = objectValue(readJson(file, {})) ?? {};
+  const machines = { ...(objectValue(current.machines) ?? {}) };
+  const machine = { ...(objectValue(machines[machineIdentity.id]) ?? {}) };
+  machine.hostname = machineIdentity.hostname;
+  machine.meeting_watch = heartbeat;
+  machines[machineIdentity.id] = machine;
   atomicJsonWrite(file, {
     ...current,
-    meeting_watch: heartbeat,
+    version: 2,
+    machines,
   });
-}
-
-export function createComposioExecutor(options = {}) {
-  const execImpl = options.execFileImpl
-    ? promisify(options.execFileImpl)
-    : execFileAsync;
-  const executionDir = options.cwd ?? repoDir;
-  return async (tool, params) => {
-    try {
-      const result = await execImpl(
-        options.composioPath ?? "composio",
-        ["execute", tool, "-d", JSON.stringify(params)],
-        {
-          cwd: executionDir,
-          env: options.env ?? process.env,
-          maxBuffer: 12 * 1024 * 1024,
-          timeout: options.timeoutMs ?? 60_000,
-        },
-      );
-      const stdout = typeof result === "string" ? result : result.stdout;
-      let parsed = JSON.parse(stdout);
-      const assertSuccessful = (value) => {
-        if (value?.successful === false || value?.success === false) {
-          throw new Error(
-            `Composio ${tool} failed: ${JSON.stringify(value.error ?? value).slice(0, 500)}`,
-          );
-        }
-      };
-      assertSuccessful(parsed);
-      if (parsed?.storedInFile) {
-        if (
-          typeof parsed.outputFilePath !== "string" ||
-          !parsed.outputFilePath.trim()
-        ) {
-          throw new Error("Composio stored response omitted outputFilePath.");
-        }
-        const outputPath = path.isAbsolute(parsed.outputFilePath)
-          ? parsed.outputFilePath
-          : path.resolve(executionDir, parsed.outputFilePath);
-        if (!existsSync(outputPath)) {
-          throw new Error(`Composio output file does not exist: ${outputPath}`);
-        }
-        parsed = JSON.parse(readFileSync(outputPath, "utf8"));
-        assertSuccessful(parsed);
-      }
-      return parsed?.data ?? parsed;
-    } catch (error) {
-      const wrapped = new Error(`Composio ${tool}: ${boundedError(error)}`);
-      wrapped.composio = true;
-      throw wrapped;
-    }
-  };
 }
 
 function arrayAt(value, keys) {
@@ -242,28 +204,6 @@ function messageRows(payload) {
     arrayAt(payload, ["data", "messages"]) ??
     arrayAt(payload, ["data", "items"]) ??
     [];
-}
-
-function nextPageToken(payload) {
-  const row = objectValue(payload);
-  const nested = objectValue(row?.data);
-  const token = row?.nextPageToken ?? row?.next_page_token ??
-    nested?.nextPageToken ?? nested?.next_page_token;
-  return typeof token === "string" && token ? token : undefined;
-}
-
-function gmailMessage(value) {
-  const row = objectValue(value);
-  if (!row) return undefined;
-  const id = row.id ?? row.message_id ?? row.messageId;
-  const threadId = row.thread_id ?? row.threadId;
-  if (typeof id !== "string" || !id) return undefined;
-  return {
-    id,
-    threadId: typeof threadId === "string" && threadId ? threadId : id,
-    subject: typeof row.subject === "string" ? row.subject : "",
-    raw: row,
-  };
 }
 
 function decodeBase64Url(value) {
@@ -330,6 +270,8 @@ function bodyFromThread(payload) {
 
 function titleFromThread(message, payload) {
   if (message.subject.trim()) return message.subject.trim();
+  const nested = nestedHeader(payload, ["subject"]);
+  if (nested) return nested;
   const rows = messageRows(payload);
   for (const candidate of rows) {
     const row = objectValue(candidate);
@@ -337,24 +279,94 @@ function titleFromThread(message, payload) {
       return row.subject.trim();
     }
   }
-  return "Gemini meeting notes";
+  return "Meeting notes";
 }
 
-async function fetchMatchingMessages(composio, accountEmail, query) {
+function senderFromThread(message, payload) {
+  if (typeof message.sender === "string" && message.sender.trim()) {
+    return message.sender.trim();
+  }
+  const nested = nestedHeader(
+    payload,
+    ["sender", "from", "sender_email", "senderEmail"],
+  );
+  if (nested) return nested;
+  const rows = messageRows(payload);
+  for (const candidate of rows) {
+    const row = objectValue(candidate);
+    for (const key of ["sender", "from", "sender_email", "senderEmail"]) {
+      if (typeof row?.[key] === "string" && row[key].trim()) {
+        return row[key].trim();
+      }
+    }
+  }
+  return "";
+}
+
+function nestedHeader(value, keys, seen = new Set()) {
+  if (!value || typeof value !== "object" || seen.has(value)) return "";
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const header = objectValue(item);
+      const name = typeof header?.name === "string"
+        ? header.name.trim().toLowerCase()
+        : "";
+      if (
+        (name === "from" || name === "subject") &&
+        typeof header?.value === "string" &&
+        keys.some((key) => key.toLowerCase() === name)
+      ) {
+        return header.value.trim();
+      }
+      const found = nestedHeader(item, keys, seen);
+      if (found) return found;
+    }
+    return "";
+  }
+  const row = objectValue(value);
+  for (const key of keys) {
+    if (typeof row?.[key] === "string" && row[key].trim()) {
+      return row[key].trim();
+    }
+  }
+  for (const key of ["data", "email", "message", "payload", "preview", "headers"]) {
+    const found = nestedHeader(row?.[key], keys, seen);
+    if (found) return found;
+  }
+  return "";
+}
+
+function mailHeader(message, name) {
+  return message.headers?.find(
+    (entry) => entry.name?.toLowerCase() === name.toLowerCase(),
+  )?.value ?? "";
+}
+
+async function fetchMatchingMessages(mail, _accountEmail, query) {
   const messages = [];
   const seenTokens = new Set();
   let pageToken;
   for (let page = 0; page < MAX_GMAIL_PAGES; page += 1) {
-    const payload = await composio("GMAIL_FETCH_EMAILS", {
-      user_id: accountEmail,
+    const payload = await mail.listMessages({
       query,
-      verbose: true,
-      include_payload: false,
-      max_results: 100,
-      ...(pageToken ? { page_token: pageToken } : {}),
+      maxResults: 100,
+      ...(pageToken ? { pageToken } : {}),
     });
-    messages.push(...messageRows(payload).map(gmailMessage).filter(Boolean));
-    const nextToken = nextPageToken(payload);
+    for (const listed of payload.messages) {
+      const message = await mail.getMessage({
+        messageId: listed.id,
+        format: "metadata",
+      });
+      messages.push({
+        id: message.id,
+        threadId: message.threadId,
+        sender: mailHeader(message, "From"),
+        subject: mailHeader(message, "Subject"),
+        raw: message,
+      });
+    }
+    const nextToken = payload.nextPageToken;
     if (!nextToken) {
       pageToken = undefined;
       break;
@@ -373,165 +385,33 @@ async function fetchMatchingMessages(composio, accountEmail, query) {
   return [...unique.values()];
 }
 
-async function fetchMessageBody(composio, accountEmail, messageId) {
-  return composio("GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID", {
-    user_id: accountEmail,
-    message_id: messageId,
+async function fetchMessageBody(mail, _accountEmail, messageId) {
+  const message = await mail.getMessage({
+    messageId,
     format: "full",
   });
+  return {
+    id: message.id,
+    threadId: message.threadId,
+    body: message.text,
+    headers: message.headers,
+    sender: mailHeader(message, "From"),
+    subject: mailHeader(message, "Subject"),
+  };
 }
 
-async function processedLabelId(composio, emailConfig, labelName) {
-  const cached = emailConfig.labels[labelName];
-  if (typeof cached === "string" && cached) return cached;
-  const listed = await composio("GMAIL_LIST_LABELS", {
-    user_id: emailConfig.accountEmail,
-  });
-  const labels = arrayAt(listed, ["labels"]) ??
-    arrayAt(listed, ["data", "labels"]) ??
-    (Array.isArray(listed) ? listed : []);
-  const existing = labels.find((value) => objectValue(value)?.name === labelName);
-  const existingId = objectValue(existing)?.id;
-  if (typeof existingId === "string" && existingId) return existingId;
-  const created = await composio("GMAIL_CREATE_LABEL", {
-    user_id: emailConfig.accountEmail,
-    label_name: labelName,
-  });
-  const createdRow = objectValue(created);
-  const id = createdRow?.id ?? objectValue(createdRow?.label)?.id ??
-    objectValue(createdRow?.data)?.id;
-  if (typeof id !== "string" || !id) {
-    throw new Error(`Could not resolve Gmail label id for ${labelName}.`);
-  }
-  return id;
+async function processedLabelId(mail, _emailConfig, labelName) {
+  return (await mail.ensureCoveLabel({ name: labelName })).name;
 }
 
-async function applyProcessedLabel(composio, accountEmail, threadId, labelId) {
-  await composio("GMAIL_MODIFY_THREAD_LABELS", {
-    user_id: accountEmail,
-    thread_id: threadId,
-    add_label_ids: [labelId],
-    remove_label_ids: [],
+async function applyProcessedLabel(mail, _accountEmail, threadId, labelName) {
+  await mail.modifyThreadLabels({
+    threadId,
+    addNames: [labelName],
   });
 }
 
-function deterministicUuid(value) {
-  const hex = createHash("sha256").update(value).digest("hex").slice(0, 32);
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${
-    ((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16)
-  }${hex.slice(17, 20)}-${hex.slice(20)}`;
-}
-
-async function csrfToken(fetchImpl, baseUrl, timeoutMs) {
-  const response = await fetchImpl(`${baseUrl}/api/day-plan`, {
-    signal: AbortSignal.timeout(timeoutMs),
-    cache: "no-store",
-  });
-  if (!response.ok) throw new Error(`day_plan_token_${response.status}`);
-  const payload = await response.json();
-  if (typeof payload?.csrfToken !== "string" || !payload.csrfToken) {
-    throw new Error("day_plan_token_missing");
-  }
-  return payload.csrfToken;
-}
-
-export async function writeWaitingCommitment(item, context, options = {}) {
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const timeoutMs = options.fetchTimeoutMs ?? 10_000;
-  const id = deterministicUuid(`meeting-waiting:${context.sourceId}`);
-  const lookup = await fetchImpl(
-    `${context.baseUrl}/api/forge-rest/commitments?select=id&id=eq.${encodeURIComponent(id)}&limit=1`,
-    { signal: AbortSignal.timeout(timeoutMs), cache: "no-store" },
-  );
-  if (!lookup.ok) throw new Error(`forge-rest commitments lookup ${lookup.status}`);
-  const rows = await lookup.json();
-  if (Array.isArray(rows) && rows.length > 0) return id;
-  const token = await csrfToken(fetchImpl, context.baseUrl, timeoutMs);
-  const response = await fetchImpl(`${context.baseUrl}/api/forge-rest/commitments`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Forge-CSRF": token,
-    },
-    body: JSON.stringify({
-      id,
-      kind: "waiting_on",
-      title: item.title,
-      details: [
-        item.detail,
-        context.meetingTitle ? `Meeting: ${context.meetingTitle}` : "",
-      ].filter(Boolean).join("\n") || null,
-      counterparty: item.owner,
-      contact_id: null,
-      source_kind: "detector",
-      source_quote: null,
-      source_ref: `gmail:${context.sourceId}`,
-      due_at: null,
-      review_at: null,
-      confidence: "high",
-      confirmed: false,
-      status: "open",
-      evidence: null,
-    }),
-    signal: AbortSignal.timeout(timeoutMs),
-    cache: "no-store",
-  });
-  if (!response.ok) {
-    const body = await response.text();
-    const retry = await fetchImpl(
-      `${context.baseUrl}/api/forge-rest/commitments?select=id&id=eq.${encodeURIComponent(id)}&limit=1`,
-      { signal: AbortSignal.timeout(timeoutMs), cache: "no-store" },
-    );
-    if (retry.ok && (await retry.json()).length > 0) return id;
-    throw new Error(`forge-rest commitments ${response.status}: ${body.slice(0, 300)}`);
-  }
-  return id;
-}
-
-export async function acknowledgeMeetingItem(item, context, options) {
-  const text = meetingFollowUpText(item, context.meetingTitle);
-  if (isOperatorOwned(item.owner)) {
-    const result = await options.runIntakeImpl(
-      {
-        text,
-        source: "meeting",
-        sourceId: context.sourceId,
-      },
-      {
-        repoDir: options.repoDir,
-        dataDir: options.dataDir,
-        fetchImpl: options.fetchImpl,
-        webBaseUrl: context.baseUrl,
-      },
-    );
-    const state = inboundAckState(result);
-    if (result.exitCode !== 0 || state === "failed") {
-      throw new Error(result.error ?? "Meeting intake did not acknowledge the event.");
-    }
-    return { kind: "task", ack: state };
-  }
-  const receipt = await options.recordEventImpl(
-    {
-      source: "meeting",
-      sourceId: context.sourceId,
-      rawText: text,
-      machine: options.machine,
-    },
-    { dataDir: options.dataDir },
-  );
-  const state = inboundAckState(receipt);
-  if (state === "failed") {
-    throw new Error("Meeting intake could not write the database or spool.");
-  }
-  await options.writeCommitmentImpl(item, context, {
-    fetchImpl: options.fetchImpl,
-    fetchTimeoutMs: options.fetchTimeoutMs,
-  });
-  if (state === "db") {
-    await options.resolveEventImpl(receipt.event.id, { state: "triaged" });
-  }
-  return { kind: "waiting_on", ack: state };
-}
+export { writeWaitingCommitment };
 
 export async function runMeetingWatch(options = {}) {
   const now = options.now ?? (() => new Date());
@@ -539,16 +419,22 @@ export async function runMeetingWatch(options = {}) {
   const emailConfigPath = options.emailConfigPath ?? DEFAULT_EMAIL_CONFIG_PATH;
   const statePath = options.statePath ?? DEFAULT_STATE_PATH;
   const heartbeatPath = options.heartbeatPath ?? DEFAULT_HEARTBEAT_PATH;
+  const runtimeDataDir = options.dataDir ?? path.dirname(configPath);
+  const dbPath = options.dbPath ||
+    coveEnvTrimmed("DB_PATH") ||
+    path.join(runtimeDataDir, "cove.db");
   const dryRun = options.dryRun === true;
   let disabled = false;
-  const composio = options.composio ?? createComposioExecutor({
-    cwd: options.repoDir ?? repoDir,
-  });
+  let machineIdentity = options.machineIdentity
+    ? normalizeMachineIdentity(options.machineIdentity)
+    : undefined;
   const summary = {
     dry_run: dryRun,
     examined: 0,
     matched: 0,
     processed: 0,
+    processed_message_ids: [],
+    quiet_lines: [],
     parsed_items: 0,
     // With no operator name configured, ownership routing cannot distinguish
     // own items from waiting-on ones, so everything lands in the task lane.
@@ -557,29 +443,67 @@ export async function runMeetingWatch(options = {}) {
     operator_owned: 0,
     waiting_on: 0,
     zero_item_messages: 0,
+    detection_gaps: 0,
     dead_letters: 0,
     errors: 0,
     error_messages: [],
+    standing_down: false,
+    standing_down_owner: null,
   };
   const heartbeat = () => ({
     last_run_at: now().toISOString(),
     examined: summary.examined,
     matched: summary.matched,
     processed: summary.processed,
+    detection_gaps: summary.detection_gaps,
     errors: summary.errors,
     dead_letters: summary.dead_letters,
     disabled,
+    ...(summary.standing_down
+      ? {
+          standing_down: true,
+          standing_down_owner: summary.standing_down_owner,
+        }
+      : {}),
   });
 
   try {
-    const config = loadMeetingConfig(configPath);
-    const state = readMeetingState(statePath);
-    summary.dead_letters = state.dead_letters.length;
-    if (!config.enabled) {
-      disabled = true;
-      if (!dryRun) writeMeetingHeartbeat(heartbeatPath, heartbeat());
+    const ownership = checkLaneOwnership({
+      dataDir: runtimeDataDir,
+      lane: "meeting_watch",
+      identity: machineIdentity,
+      homeDir: options.homeDir,
+    });
+    machineIdentity = ownership.identity;
+    if (!ownership.shouldRun) {
+      const ownerLabel = laneOwnerLabel(ownership.owner);
+      summary.standing_down = true;
+      summary.standing_down_owner = ownerLabel;
+      if (!dryRun) {
+        writeMeetingHeartbeat(heartbeatPath, {
+          standing_down: true,
+          owner_id: ownership.owner.id,
+          owner_hostname_at_claim: ownership.owner.hostnameAtClaim,
+          observed_at: now().toISOString(),
+        }, machineIdentity);
+      }
       return { exitCode: 0, summary };
     }
+    const state = readMeetingState(statePath);
+    summary.dead_letters = state.dead_letters.length;
+    if (!existsSync(configPath)) {
+      disabled = true;
+      if (!dryRun) writeMeetingHeartbeat(heartbeatPath, heartbeat(), machineIdentity);
+      return { exitCode: 0, summary };
+    }
+    const config = loadMeetingConfig(configPath);
+    if (!config.enabled) {
+      disabled = true;
+      if (!dryRun) writeMeetingHeartbeat(heartbeatPath, heartbeat(), machineIdentity);
+      return { exitCode: 0, summary };
+    }
+    const mail = options.gateway ??
+      createGoogleWorkspaceGateway({ dataDir: runtimeDataDir }).mail;
     const emailConfig = loadEmailConfig(emailConfigPath);
     const processed = new Set(state.processed_ids);
     const failures = { ...state.failures };
@@ -597,7 +521,7 @@ export async function runMeetingWatch(options = {}) {
     const query =
       `(${config.query}) ${config.window} -label:"${processedLabelQuery}"`;
     const messages = await fetchMatchingMessages(
-      composio,
+      mail,
       emailConfig.accountEmail,
       query,
     );
@@ -617,6 +541,7 @@ export async function runMeetingWatch(options = {}) {
           ? failure.thread_id
           : messageId,
         subject: typeof failure?.subject === "string" ? failure.subject : "",
+        sender: typeof failure?.sender === "string" ? failure.sender : "",
         raw: {},
       });
     }
@@ -624,75 +549,143 @@ export async function runMeetingWatch(options = {}) {
     const candidates = messages.filter((message) =>
       !processed.has(message.id) && !deadLetterIds.has(message.id)
     );
-    summary.matched = candidates.length;
     let labelId;
-    let composioFailed = false;
+    let workspaceFailed = false;
 
     for (const message of candidates) {
       let zeroItems = false;
+      let observedSender = message.sender ?? "";
+      let observedSubject = message.subject ?? "";
       try {
         const priorFailure = objectValue(failures[message.id]);
-        let meetingTitle = message.subject || "Gemini meeting notes";
-        let items;
-        if (priorFailure?.zero_items === true) {
-          items = [];
-        } else {
-          const fetchedMessage = await fetchMessageBody(
-            composio,
-            emailConfig.accountEmail,
-            message.id,
-          );
-          const body = bodyFromThread(fetchedMessage);
-          meetingTitle = titleFromThread(message, fetchedMessage);
-          items = await (options.extractFollowUps ?? extractMeetingFollowUps)(
-            body,
-            {
-              repoDir: options.repoDir ?? repoDir,
-              fallback: options.fallback,
-            },
-          );
+        const fetchedMessage = await fetchMessageBody(
+          mail,
+          emailConfig.accountEmail,
+          message.id,
+        );
+        const body = bodyFromThread(fetchedMessage);
+        const meetingTitle = titleFromThread(message, fetchedMessage);
+        observedSubject = meetingTitle;
+        const sender = senderFromThread(message, fetchedMessage);
+        observedSender = sender;
+        const detection = detectMeetingNotes(
+          { sender, subject: meetingTitle },
+          config,
+        );
+        if (!detection.matched || !detection.tool) {
+          summary.detection_gaps += 1;
+          if (!dryRun) {
+            recordFailure({
+              dbPath,
+              source: "detection-gap",
+              sourceId: message.id,
+              message: `Meeting query matched but the detector did not: ${meetingTitle}.`,
+              details: {
+                messageId: message.id,
+                threadId: message.threadId,
+                sender,
+                subject: meetingTitle,
+              },
+              occurredAt: now().toISOString(),
+            });
+            processed.add(message.id);
+            delete failures[message.id];
+            persistState();
+          }
+          continue;
         }
-        if (!Array.isArray(items)) {
-          throw new Error("Meeting parser returned an invalid result.");
-        }
-        summary.parsed_items += items.length;
-        zeroItems = items.length === 0;
-        if (zeroItems) summary.zero_item_messages += 1;
-        summary.operator_owned += items.filter((item) => isOperatorOwned(item.owner)).length;
-        summary.waiting_on += items.filter((item) => !isOperatorOwned(item.owner)).length;
+        summary.matched += 1;
 
-        if (dryRun) continue;
-        for (let index = 0; index < items.length; index += 1) {
-          const sourceId = `${message.id}:${index}`;
-          await acknowledgeMeetingItem(
-            items[index],
-            {
-              sourceId,
-              meetingTitle,
-              gmailMessageId: message.id,
-              baseUrl: emailConfig.forgeUrl,
-            },
-            {
-              repoDir: options.repoDir ?? repoDir,
-              dataDir: options.dataDir ?? defaultDataDir,
-              fetchImpl: options.fetchImpl ?? fetch,
-              fetchTimeoutMs: options.fetchTimeoutMs ?? 10_000,
-              recordEventImpl: options.recordEventImpl ?? recordEvent,
-              resolveEventImpl: options.resolveEventImpl ?? resolveEvent,
-              runIntakeImpl: options.runIntakeImpl ?? runForgeIntake,
-              writeCommitmentImpl: options.writeCommitmentImpl ?? writeWaitingCommitment,
-              machine: options.machine,
-            },
-          );
+        if (dryRun) {
+          const items = priorFailure?.zero_items === true
+            ? []
+            : await (options.extractFollowUps ?? extractMeetingFollowUps)(
+              body,
+              {
+                repoDir: options.repoDir ?? repoDir,
+                fallback: options.fallback,
+              },
+            );
+          if (!Array.isArray(items)) {
+            throw new Error("Meeting parser returned an invalid result.");
+          }
+          summary.parsed_items += items.length;
+          zeroItems = items.length === 0;
+          if (zeroItems) summary.zero_item_messages += 1;
+          summary.operator_owned += items.filter((item) =>
+            isOperatorOwned(item.owner)
+          ).length;
+          summary.waiting_on += items.filter((item) =>
+            !isOperatorOwned(item.owner)
+          ).length;
+          continue;
+        }
+
+        const pipeline = await (options.processMeetingEmail ??
+          processMeetingNotesEmail)(
+          {
+            messageId: message.id,
+            threadId: message.threadId,
+            sender,
+            subject: meetingTitle,
+            body,
+            detectedTool: detection.tool,
+          },
+          {
+            sourceDoor: options.sourceDoor ??
+              (coveEnv("MEETING_SOURCE_DOOR") === "triage"
+                ? "triage"
+                : "watcher"),
+            dbPath,
+            repoDir: options.repoDir ?? repoDir,
+            dataDir: runtimeDataDir,
+            baseUrl: emailConfig.coveUrl,
+            now,
+            fetchImpl: options.fetchImpl ?? fetch,
+            fetchTimeoutMs: options.fetchTimeoutMs ?? 10_000,
+            extractFollowUps: priorFailure?.zero_items === true
+              ? async () => []
+              : options.extractFollowUps
+                ? (text, extractionOptions) =>
+                  options.extractFollowUps(text, {
+                    ...extractionOptions,
+                    fallback: options.fallback,
+                  })
+                : undefined,
+            runIntakeImpl: options.runIntakeImpl,
+            recordEventImpl: options.recordEventImpl,
+            resolveEventImpl: options.resolveEventImpl,
+            writeCommitmentImpl: options.writeCommitmentImpl,
+            crmBackend: options.crmBackend,
+            machine: options.machine,
+          },
+        );
+        summary.parsed_items += pipeline.summary.parsedItems;
+        summary.operator_owned += pipeline.summary.tasks;
+        summary.waiting_on += pipeline.summary.waitingOn;
+        if (
+          pipeline.status === "skipped" &&
+          pipeline.reason === "lease-active"
+        ) {
+          continue;
+        }
+        if (pipeline.status === "processed") {
+          zeroItems = pipeline.summary.parsedItems === 0;
+          if (zeroItems) {
+            summary.zero_item_messages += 1;
+          }
+          if (pipeline.quietLine) {
+            summary.quiet_lines.push(pipeline.quietLine);
+          }
         }
 
         labelId ??= await processedLabelId(
-          composio,
+          mail,
           emailConfig,
           config.processedLabel,
         );
         await (options.applyLabel ?? applyProcessedLabel)(
-          composio,
+          mail,
           emailConfig.accountEmail,
           message.threadId,
           labelId,
@@ -701,6 +694,7 @@ export async function runMeetingWatch(options = {}) {
         delete failures[message.id];
         persistState();
         summary.processed += 1;
+        summary.processed_message_ids.push(message.id);
       } catch (error) {
         summary.errors += 1;
         summary.error_messages.push({
@@ -721,7 +715,8 @@ export async function runMeetingWatch(options = {}) {
               {
                 message_id: message.id,
                 thread_id: message.threadId,
-                subject: message.subject,
+                subject: observedSubject,
+                sender: observedSender,
                 failed_runs: failedRuns,
                 last_error: boundedError(error),
                 dead_lettered_at: now().toISOString(),
@@ -735,15 +730,16 @@ export async function runMeetingWatch(options = {}) {
               last_error: boundedError(error),
               last_failed_at: now().toISOString(),
               thread_id: message.threadId,
-              subject: message.subject,
+              subject: observedSubject,
+              sender: observedSender,
               zero_items: zeroItems,
             };
           }
           summary.dead_letters = deadLetters.length;
           persistState();
         }
-        if (error?.composio === true) {
-          composioFailed = true;
+        if (error?.name === "WorkspaceGatewayError") {
+          workspaceFailed = true;
           break;
         }
       }
@@ -751,15 +747,17 @@ export async function runMeetingWatch(options = {}) {
 
     if (!dryRun) {
       persistState();
-      writeMeetingHeartbeat(heartbeatPath, heartbeat());
+      writeMeetingHeartbeat(heartbeatPath, heartbeat(), machineIdentity);
     }
-    return { exitCode: composioFailed ? 1 : 0, summary };
+    return { exitCode: workspaceFailed ? 1 : 0, summary };
   } catch (error) {
     summary.errors += 1;
     summary.error_messages.push({ error: boundedError(error) });
     if (!dryRun) {
       try {
-        writeMeetingHeartbeat(heartbeatPath, heartbeat());
+        if (machineIdentity) {
+          writeMeetingHeartbeat(heartbeatPath, heartbeat(), machineIdentity);
+        }
       } catch (heartbeatError) {
         summary.error_messages.push({
           error: `heartbeat: ${boundedError(heartbeatError)}`,
@@ -770,13 +768,52 @@ export async function runMeetingWatch(options = {}) {
   }
 }
 
-export async function main(args = process.argv.slice(2)) {
+export async function main(args = process.argv.slice(2), options = {}) {
   const unknown = args.filter((arg) => arg !== "--once" && arg !== "--dry-run");
   if (unknown.length > 0) {
     process.stderr.write(`Unknown option: ${unknown[0]}\n`);
     return 2;
   }
-  const result = await runMeetingWatch({ dryRun: args.includes("--dry-run") });
+  const dryRun = args.includes("--dry-run");
+  const startedAt = new Date().toISOString();
+  const result = await (options.runMeetingWatchImpl ?? runMeetingWatch)({
+    ...(options.runOptions ?? {}),
+    dryRun,
+  });
+  if (!dryRun) {
+    const outcome = result.exitCode !== 0
+      ? "failed"
+      : result.summary.errors > 0
+        ? "partial"
+        : "success";
+    try {
+      (options.recordRunReceiptImpl ?? recordReceipt)({
+        dbPath: options.dbPath ||
+          coveEnvTrimmed("DB_PATH") ||
+          path.join(defaultDataDir, "cove.db"),
+        source: "meeting-watch",
+        startedAt,
+        summary: outcome === "success"
+          ? `Meeting notes processed ${result.summary.processed} message(s).`
+          : `Meeting notes processing finished with ${result.summary.errors} error(s).`,
+        actions: {
+          ...result.summary,
+          errorMessages: result.summary.error_messages,
+        },
+        outcome,
+        failureKey: "meeting-watch-run",
+        failureMessage: result.summary.error_messages
+          .map((entry) => entry.error)
+          .filter(Boolean)
+          .join("; ") ||
+          "Meeting watcher run failed.",
+      });
+    } catch (error) {
+      result.summary.error_messages.push({
+        error: `run receipt: ${boundedError(error)}`,
+      });
+    }
+  }
   process.stdout.write(`${JSON.stringify(result.summary)}\n`);
   return result.exitCode;
 }

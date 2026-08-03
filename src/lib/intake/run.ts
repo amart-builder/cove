@@ -40,6 +40,11 @@ import {
 } from "./task-writer";
 import { nativeNotificationArgs } from "./notification-transport.mjs";
 import { coveEnv, coveEnvTrimmed } from "../env";
+import {
+  detectRecurrenceIntent,
+  type RecurrenceCadence,
+} from "../tasks/recurrence";
+import { getRuntimeMode } from "../runtime/mode";
 
 const MODULE_REPO_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -64,7 +69,7 @@ export type IntakeSource =
   | "email"
   | "voice";
 
-export type ForgeIntakeInput = {
+export type CoveIntakeInput = {
   text: string;
   source: IntakeSource;
   sourceId?: string;
@@ -73,7 +78,7 @@ export type ForgeIntakeInput = {
 
 type SpawnImpl = typeof spawn;
 
-export type ForgeIntakeOptions = InboundTaskWriterOptions & {
+export type CoveIntakeOptions = InboundTaskWriterOptions & {
   dataDir?: string;
   repoDir?: string;
   claudePath?: string;
@@ -84,7 +89,7 @@ export type ForgeIntakeOptions = InboundTaskWriterOptions & {
   notifyNow?: (title: string) => Promise<void>;
 };
 
-export type ForgeIntakeResult = {
+export type CoveIntakeResult = {
   exitCode: 0 | 1;
   event: InboundEvent;
   taskId?: string;
@@ -92,13 +97,14 @@ export type ForgeIntakeResult = {
   spooled: boolean;
   fallback: boolean;
   error?: string;
+  proposedRecurrence?: RecurrenceCadence;
 };
 
-export function forgeIntakeRepoDir(): string {
+export function coveIntakeRepoDir(): string {
   return MODULE_REPO_DIR;
 }
 
-function resolvedOptions(options: ForgeIntakeOptions): ForgeIntakeOptions & {
+function resolvedOptions(options: CoveIntakeOptions): CoveIntakeOptions & {
   repoDir: string;
   dataDir: string;
 } {
@@ -171,7 +177,7 @@ function signalChild(
 
 function runTriageCommand(
   prompt: string,
-  options: ForgeIntakeOptions,
+  options: CoveIntakeOptions,
 ): Promise<string> {
   const repoDir = options.repoDir ?? MODULE_REPO_DIR;
   const executable =
@@ -287,7 +293,7 @@ function missingProjectColumn(error: unknown): boolean {
   );
 }
 
-async function boardContext(options: ForgeIntakeOptions): Promise<BoardContext> {
+async function boardContext(options: CoveIntakeOptions): Promise<BoardContext> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const baseUrl = (
     options.webBaseUrl ??
@@ -297,7 +303,7 @@ async function boardContext(options: ForgeIntakeOptions): Promise<BoardContext> 
   const timeoutMs = options.fetchTimeoutMs ?? 10_000;
   const columns = await fetchJsonRows(
     fetchImpl,
-    `${baseUrl}/api/forge-rest/task_columns?select=id,name,position&order=position.asc`,
+    `${baseUrl}/api/cove-rest/task_columns?select=id,name,position&order=position.asc`,
     timeoutMs,
   );
   const baseTaskQuery =
@@ -306,14 +312,14 @@ async function boardContext(options: ForgeIntakeOptions): Promise<BoardContext> 
   try {
     tasks = await fetchJsonRows(
       fetchImpl,
-      `${baseUrl}/api/forge-rest/tasks?select=id,column_id,title,description,priority,due_at,status,project&${baseTaskQuery}`,
+      `${baseUrl}/api/cove-rest/tasks?select=id,column_id,title,description,priority,due_at,status,project&${baseTaskQuery}`,
       timeoutMs,
     );
   } catch (error) {
     if (!missingProjectColumn(error)) throw error;
     tasks = await fetchJsonRows(
       fetchImpl,
-      `${baseUrl}/api/forge-rest/tasks?select=id,column_id,title,description,priority,due_at,status&${baseTaskQuery}`,
+      `${baseUrl}/api/cove-rest/tasks?select=id,column_id,title,description,priority,due_at,status&${baseTaskQuery}`,
       timeoutMs,
     );
   }
@@ -413,7 +419,7 @@ function writeScheduledReminder(
 function runBestEffort(
   executable: string,
   args: string[],
-  options: ForgeIntakeOptions,
+  options: CoveIntakeOptions,
 ): Promise<boolean> {
   return new Promise((resolve) => {
     let child: ChildProcess;
@@ -452,7 +458,7 @@ function runBestEffort(
 
 async function defaultNotifyNow(
   title: string,
-  options: ForgeIntakeOptions,
+  options: CoveIntakeOptions,
 ): Promise<void> {
   const repoDir = options.repoDir ?? MODULE_REPO_DIR;
   const [channelDelivered, nativeDelivered] = await Promise.all([
@@ -480,7 +486,7 @@ async function defaultNotifyNow(
 
 async function notifyNativeOnly(
   title: string,
-  options: ForgeIntakeOptions,
+  options: CoveIntakeOptions,
 ): Promise<void> {
   if (process.platform !== "darwin") return;
   await runBestEffort(
@@ -519,7 +525,7 @@ function enforceSurfacePolicy(
 async function surfaceTriage(
   taskId: string,
   triage: TriageOutput,
-  options: ForgeIntakeOptions,
+  options: CoveIntakeOptions,
 ): Promise<void> {
   if (triage.surface === "now") {
     await (options.notifyNow
@@ -535,7 +541,7 @@ async function surfaceTriage(
 
 async function resumePendingSurface(
   taskId: string,
-  options: ForgeIntakeOptions,
+  options: CoveIntakeOptions,
 ): Promise<void> {
   const file = scheduledReminderPath(options.dataDir, taskId);
   if (!existsSync(file)) return;
@@ -560,9 +566,14 @@ async function resumePendingSurface(
 export async function triageRecordedEvent(
   event: InboundEvent,
   input: { taskId: string },
-  options: ForgeIntakeOptions = {},
+  options: CoveIntakeOptions = {},
 ): Promise<boolean> {
-  const runtimeOptions = resolvedOptions(options);
+  const runtimeOptions = resolvedOptions({
+    ...options,
+    proposedRecurrenceCadence:
+      options.proposedRecurrenceCadence ??
+      detectRecurrenceIntent(event.raw_text),
+  });
   if (input.taskId !== event.id) throw new Error("triage_task_id_mismatch");
   if (await inboundTaskExists(event.id, runtimeOptions)) {
     await resumePendingSurface(event.id, runtimeOptions);
@@ -603,16 +614,23 @@ export async function triageRecordedEvent(
   return true;
 }
 
-export async function runForgeIntake(
-  input: ForgeIntakeInput,
-  options: ForgeIntakeOptions = {},
-): Promise<ForgeIntakeResult> {
-  const runtimeOptions = resolvedOptions(options);
-  const write = runtimeOptions.write ??
+export async function runCoveIntake(
+  input: CoveIntakeInput,
+  options: CoveIntakeOptions = {},
+): Promise<CoveIntakeResult> {
+  const baseRuntimeOptions = resolvedOptions(options);
+  const write = baseRuntimeOptions.write ??
     ((line: string) => process.stdout.write(`${line}\n`));
-  const now = (runtimeOptions.now ?? (() => new Date()))();
+  const now = (baseRuntimeOptions.now ?? (() => new Date()))();
   const text = input.text.trim();
   if (!text) throw new Error("intake_text_required");
+  const proposedRecurrence = getRuntimeMode() === "local"
+    ? detectRecurrenceIntent(text)
+    : undefined;
+  const runtimeOptions = {
+    ...baseRuntimeOptions,
+    proposedRecurrenceCadence: proposedRecurrence,
+  };
   const sourceId =
     input.sourceId?.trim() || derivedSourceId(input.source, text, now);
   const captureInput: RecordEventInput = {
@@ -633,6 +651,7 @@ export async function runForgeIntake(
       spooled: false,
       fallback: false,
       error: capture.event.error ?? "intake_capture_failed",
+      ...(proposedRecurrence ? { proposedRecurrence } : {}),
     };
   }
   if (capture.event.spooled === true) {
@@ -646,6 +665,7 @@ export async function runForgeIntake(
       existed: capture.existed,
       spooled: true,
       fallback: false,
+      ...(proposedRecurrence ? { proposedRecurrence } : {}),
     };
   }
   if (capture.existed && capture.event.task_id) {
@@ -667,6 +687,7 @@ export async function runForgeIntake(
       existed: true,
       spooled: false,
       fallback: false,
+      ...(proposedRecurrence ? { proposedRecurrence } : {}),
     };
   }
   if (input.dryRun) {
@@ -677,6 +698,7 @@ export async function runForgeIntake(
       existed: capture.existed,
       spooled: false,
       fallback: false,
+      ...(proposedRecurrence ? { proposedRecurrence } : {}),
     };
   }
 
@@ -698,6 +720,7 @@ export async function runForgeIntake(
       existed: capture.existed,
       spooled: false,
       fallback: false,
+      ...(proposedRecurrence ? { proposedRecurrence } : {}),
     };
   } catch (error) {
     const reason = boundedReason(error);
@@ -715,6 +738,7 @@ export async function runForgeIntake(
         existing: false,
         fallback: true,
         error: reason,
+        ...(proposedRecurrence ? { proposedRecurrence } : {}),
       })}`);
       return {
         exitCode: 0,
@@ -724,6 +748,7 @@ export async function runForgeIntake(
         spooled: false,
         fallback: true,
         error: reason,
+        ...(proposedRecurrence ? { proposedRecurrence } : {}),
       };
     } catch (fallbackError) {
       (runtimeOptions.writeError ?? console.error)(
@@ -736,6 +761,7 @@ export async function runForgeIntake(
         spooled: false,
         fallback: true,
         error: reason,
+        ...(proposedRecurrence ? { proposedRecurrence } : {}),
       };
     }
   }

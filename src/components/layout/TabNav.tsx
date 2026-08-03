@@ -1,19 +1,53 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { getRuntimeMode, type RuntimeMode } from '@/lib/runtime/mode';
 
-const tabs = [
+const baseTabs = [
   { name: 'Today', href: '/tasks' },
   { name: 'People', href: '/crm' },
 ];
 
+export function tabNavItems(runtimeMode: RuntimeMode) {
+  return runtimeMode === 'local'
+    ? [...baseTabs, { name: 'Issues', href: '/failures' }]
+    : baseTabs;
+}
+
+export function preferredDarkTheme(
+  storedTheme: string | null,
+  systemPrefersDark: boolean,
+): boolean {
+  return storedTheme === 'dark' || (!storedTheme && systemPrefersDark);
+}
+
 export default function TabNav() {
   const pathname = usePathname();
+  const tabs = tabNavItems(getRuntimeMode());
   const [dark, setDark] = useState(
     () => typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
   );
+
+  // Hydration can rewrite the <html> class the pre-paint script added, so
+  // re-apply the stored preference once after mount.
+  useEffect(() => {
+    let wantDark: boolean;
+    try {
+      const stored = localStorage.getItem('theme');
+      wantDark = preferredDarkTheme(
+        stored,
+        matchMedia('(prefers-color-scheme: dark)').matches,
+      );
+    } catch {
+      return;
+    }
+    document.documentElement.classList.toggle('dark', wantDark);
+    // Hydration may replace the pre-paint class, so mirror its repaired state.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setDark(wantDark);
+  }, []);
 
   function toggleTheme() {
     const next = !dark;
@@ -25,7 +59,7 @@ export default function TabNav() {
   return (
     <nav className="quiet-main-nav flex h-12 items-center gap-1 border-b px-4 sm:px-6" aria-label="Main navigation">
       <span className="mr-4 flex items-center gap-2 text-sm font-semibold tracking-[-0.02em] text-foreground sm:mr-7">
-        <span className="quiet-forge-mark" aria-hidden="true" />
+        <span className="quiet-cove-mark" aria-hidden="true" />
         Cove
       </span>
       <div className="flex items-center h-full">
@@ -50,7 +84,18 @@ export default function TabNav() {
           );
         })}
       </div>
-      <div className="ml-auto">
+      <div className="ml-auto flex items-center gap-2">
+        <Link
+          href="/guide"
+          className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
+            pathname.startsWith('/guide')
+              ? 'text-foreground'
+              : 'text-muted-foreground hover:text-foreground'
+          }`}
+          aria-current={pathname.startsWith('/guide') ? 'page' : undefined}
+        >
+          Guide
+        </Link>
         <button
           onClick={toggleTheme}
           className="w-7 h-7 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors duration-150"

@@ -15,8 +15,14 @@ import type {
 // v8: settlement progress, explicit next steps, and carried streaks guide continuity.
 // v9: headline plus real paragraphs, and the label tics ("Quick re-anchor:") the
 //     v8 worked example was teaching the model to write are gone.
-export const MORNING_BRIEF_PROMPT_VERSION = 13;
-export const MORNING_BRIEF_SCHEMA_VERSION = 3;
+// 14: five-weekday lookback (recent_dumps, recent_briefs) plus the stale-dump
+// guardrail in the chief-of-staff mandate.
+// 15 / schema 4: whole-board priority selection plus staged chief-of-staff
+// board management actions that activate at Morning Arrival.
+// 16 / schema 5: remove the retired outreach section from generation and
+// public brief projections while tolerating it as ignored legacy data.
+export const MORNING_BRIEF_PROMPT_VERSION = 16;
+export const MORNING_BRIEF_SCHEMA_VERSION = 5;
 
 export type MorningBriefStatus = "queued" | "running" | "succeeded" | "failed";
 
@@ -42,16 +48,22 @@ export type MorningBriefWatchItem = {
   evidenceRefs: string[];
 };
 
-export type MorningBriefDraftKind = "full" | "beats_only" | "pointer" | "blocked";
-
-export type MorningBriefSalesAction = {
-  contact: string;
-  channel: string;
+type MorningBriefBoardActionBase = {
+  taskId: string;
+  why: string;
   evidenceRefs: string[];
-  draftKind: MorningBriefDraftKind;
-  draftOrBeats: string;
-  approvalRequired: true;
+  expectedTaskUpdatedAt: string;
 };
+
+export type MorningBriefBoardAction = MorningBriefBoardActionBase & (
+  | { op: "move_column"; column: "today" | "in_flight" | "not_started" }
+  | { op: "set_priority"; priority: "high" | "medium" | "low" }
+  | { op: "set_due"; dueLocalDate: string | null }
+  | { op: "retitle"; title: string }
+  | { op: "edit_description"; description: string }
+  | { op: "archive" }
+  | { op: "archive_duplicate"; duplicateOfTaskId: string }
+);
 
 export type MorningBrief = {
   // The day's single decisive move, as one plain sentence. Optional because
@@ -67,7 +79,7 @@ export type MorningBrief = {
   existingTaskCandidates: MorningBriefTaskCandidate[];
   suggestedAdditions: MorningBriefSuggestedAddition[];
   watchItems: MorningBriefWatchItem[];
-  salesActions: MorningBriefSalesAction[];
+  boardActions: MorningBriefBoardAction[];
   // Cove-added record of items dropped during validation (for example a watch
   // item whose evidence refs cite no collected source). Never model-authored.
   validationNotes?: string[];
@@ -88,9 +100,8 @@ export type BriefSourceReport = {
 
 export type MorningBriefSourceManifest = {
   sources: BriefSourceReport[];
-  // Coverage names what the brief could and could not see. Calendar and CRM
-  // last-touch are missing by design in v1; the prompt must never imply they
-  // were checked.
+  // Coverage names what the brief could and could not see. Live integrations
+  // remain missing until their collected source supplies content.
   coverage: Record<string, "included" | "stale" | "missing">;
   trims: string[];
   totalChars: number;
@@ -114,6 +125,7 @@ export type MorningBriefArtifact = {
   updatedAt: string;
   startedAt?: string;
   finishedAt?: string;
+  boardActionsPending?: boolean;
 };
 
 export function morningBriefWriterFromJson(
@@ -127,16 +139,6 @@ export function morningBriefWriterFromJson(
     return undefined;
   }
 }
-
-export type MorningBriefSalesActionState = "approved" | "edited" | "skipped";
-
-export type MorningBriefSalesActionRecord = {
-  briefId: string;
-  actionIndex: number;
-  state: MorningBriefSalesActionState;
-  editedText?: string;
-  updatedAt: string;
-};
 
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
@@ -152,6 +154,9 @@ export type BriefSourceInput = {
   required: boolean;
   // Per-source character cap applied before the total cap.
   maxChars: number;
+  // A plain prefix trim can erase structurally critical tail sections, so a
+  // source may choose how its per-source cap is applied.
+  contentTrimmer?: (content: string, maxChars: number) => string;
   // Lower number = more important. Total-cap trimming removes content from the
   // least important sources first.
   priority: number;
@@ -168,13 +173,19 @@ export type AssembledBriefContext = {
   sections: Array<{ id: string; label: string; text: string }>;
   manifest: MorningBriefSourceManifest;
   missingRequired: string[];
+  trimmedRequired: string[];
 };
 
 // Raised from 48k when the brain dump became a source. At 48k the budget sat
 // exactly full and the dump displaced the tail of memory_decisions, which is
-// the failure this whole change exists to stop. ~15k input tokens, a rounding
+// the failure this whole change exists to stop.
+//
+// Raised again from 60k when the five-weekday lookback (recent_dumps,
+// recent_briefs) landed: the 2026-07-29 brief already spent 58,469 of 60,000, so
+// the new sources would have paid for themselves by silently trimming the tail
+// off email_brief and settlement_summary. ~23k input tokens, still a rounding
 // error against the $1.50 brief budget.
-export const MORNING_BRIEF_TOTAL_MAX_CHARS = 60_000;
+export const MORNING_BRIEF_TOTAL_MAX_CHARS = 90_000;
 
 // Everything that shapes the generated brief participates in the input hash:
 // the exact bounded sections as sent to the selected writer (not the untrimmed source
@@ -192,6 +203,9 @@ export type MorningBriefGenerationEnvelope = {
   effort: string;
   budgetUsd: number;
   writer?: "codex" | "claude";
+  // The exact chief-of-staff mandate is not stored in the artifact, but its
+  // bytes participate in the hash so an instruction edit always regenerates.
+  mandate?: string;
 };
 
 export function morningBriefInputHash(
@@ -210,6 +224,7 @@ export function morningBriefInputHash(
       envelope.effort,
       envelope.budgetUsd,
     ],
+    mandate: envelope.mandate ?? "",
     freshness: [...envelope.sourceFreshness]
       .sort((left, right) => left.id.localeCompare(right.id))
       .map((entry) => `${entry.id}=${entry.freshness}`),
@@ -338,7 +353,12 @@ export function assembleMorningBriefContext(
     let text = raw ?? "";
     let trimmed = false;
     if (text.length > source.maxChars) {
-      text = text.slice(0, source.maxChars);
+      text = source.contentTrimmer
+        ? source.contentTrimmer(text, source.maxChars)
+        : text.slice(0, source.maxChars);
+      if (text.length > source.maxChars) {
+        throw new Error(`brief_source_trimmer_exceeded_cap:${source.id}`);
+      }
       trimmed = true;
       trims.push(`${source.id}:source_cap`);
     }
@@ -356,8 +376,20 @@ export function assembleMorningBriefContext(
       const excess = total - totalMaxChars;
       const keep = Math.max(0, entry.text.length - excess);
       if (keep === entry.text.length) continue;
-      total -= entry.text.length - keep;
-      entry.text = entry.text.slice(0, keep);
+      const previousLength = entry.text.length;
+      // keep === 0 means trimmed out entirely; a content trimmer given a zero
+      // budget would throw instead of vanishing, so bypass it.
+      entry.text = keep === 0
+        ? ""
+        : entry.source.contentTrimmer
+          ? entry.source.contentTrimmer(entry.text, keep)
+          : entry.text.slice(0, keep);
+      if (entry.text.length > keep) {
+        throw new Error(`brief_source_trimmer_exceeded_cap:${entry.source.id}`);
+      }
+      // A source-aware trimmer may preserve less than its target. Account for
+      // what it actually returned so later sources receive the correct budget.
+      total -= previousLength - entry.text.length;
       entry.trimmed = true;
       trims.push(keep === 0 ? `${entry.source.id}:trimmed_out` : `${entry.source.id}:total_cap`);
     }
@@ -376,7 +408,8 @@ export function assembleMorningBriefContext(
   }));
 
   const coverage: MorningBriefSourceManifest["coverage"] = {
-    // Missing by design in v1. The brief must never imply these were checked.
+    // Keep unavailable live integrations explicit even when a caller omits
+    // their source rows entirely.
     calendar: "missing",
     crm_last_touch: "missing",
   };
@@ -413,6 +446,9 @@ export function assembleMorningBriefContext(
     missingRequired: prepared
       .filter((entry) => entry.source.required && entry.text.length === 0)
       .map((entry) => entry.source.id),
+    trimmedRequired: prepared
+      .filter((entry) => entry.source.required && entry.present && entry.trimmed)
+      .map((entry) => entry.source.id),
   };
 }
 
@@ -421,12 +457,6 @@ export function assembleMorningBriefContext(
 // ---------------------------------------------------------------------------
 
 const OWNER_VALUES = new Set<DayPlanOwner>(["me", "claude", "together"]);
-const DRAFT_KINDS = new Set<MorningBriefDraftKind>([
-  "full",
-  "beats_only",
-  "pointer",
-  "blocked",
-]);
 
 class MorningBriefInvalid extends Error {
   constructor(detail: string) {
@@ -497,7 +527,7 @@ export type MorningBriefValidation = {
   warnings: string[];
 };
 
-// Bounded grounding for watch items and sales actions: every evidence ref must
+// Bounded grounding for watch items: every evidence ref must
 // name a collected source ("goals", "sprint_memo:gio", ...). This is not the
 // full per-fact evidence registry (explicitly deferred); it only guarantees
 // each surviving item cites something Cove actually showed the model.
@@ -519,9 +549,11 @@ export function validateMorningBrief(
   value: unknown,
   options: {
     knownTaskIds?: ReadonlySet<string>;
+    taskUpdatedAtById?: ReadonlyMap<string, string>;
+    recurringTaskIds?: ReadonlySet<string>;
     // Collected source ids (present sources only). When provided, watch items
-    // and sales actions whose evidence refs do not resolve are dropped and
-    // counted in validationNotes.
+    // whose evidence refs do not resolve are dropped and counted in
+    // validationNotes.
     sourceIds?: ReadonlySet<string>;
   } = {},
 ): MorningBriefValidation {
@@ -642,50 +674,114 @@ export function validateMorningBrief(
     watchItems.push(item);
   }
 
-  const salesActions: MorningBriefSalesAction[] = [];
-  for (const [index, entry] of briefArray(
-    raw.sales_actions,
-    "sales_actions",
-    10,
-  ).entries()) {
+  const boardActions: MorningBriefBoardAction[] = [];
+  for (const [index, entry] of briefArray(raw.board_actions, "board_actions", 15).entries()) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      throw new MorningBriefInvalid(`sales_${index}_shape`);
+      throw new MorningBriefInvalid(`board_action_${index}_shape`);
     }
     const action = entry as Record<string, unknown>;
-    const draftKind = action.draft_kind;
-    if (
-      typeof draftKind !== "string" ||
-      !DRAFT_KINDS.has(draftKind as MorningBriefDraftKind)
-    ) {
-      throw new MorningBriefInvalid(`sales_${index}_draft_kind`);
-    }
-    // Approval is the human gate. A sales action that does not declare it is a
-    // contract violation, never a silently-corrected one.
-    if (action.approval_required !== true) {
-      throw new MorningBriefInvalid(`sales_${index}_approval_required`);
-    }
-    const parsedAction: MorningBriefSalesAction = {
-      contact: briefString(action.contact, `sales_${index}_contact`, 200),
-      channel: briefString(action.channel, `sales_${index}_channel`, 80),
-      evidenceRefs: briefStringArray(
-        action.evidence_refs,
-        `sales_${index}_evidence_refs`,
-        8,
-        300,
-      ),
-      draftKind: draftKind as MorningBriefDraftKind,
-      draftOrBeats: briefString(
-        action.draft_or_beats,
-        `sales_${index}_draft_or_beats`,
-        2400,
-      ),
-      approvalRequired: true,
-    };
-    if (!evidenceRefsResolve(parsedAction.evidenceRefs, options.sourceIds)) {
-      validationNotes.push(`dropped_sales_action:${index}:unresolved_evidence`);
+    const op = briefString(action.op, `board_action_${index}_op`, 40);
+    const taskId = briefString(action.task_id, `board_action_${index}_task_id`, 200);
+    if (options.knownTaskIds && !options.knownTaskIds.has(taskId)) {
+      validationNotes.push(`dropped_board_action:${index}:unknown_task`);
       continue;
     }
-    salesActions.push(parsedAction);
+    if (options.recurringTaskIds?.has(taskId)) {
+      validationNotes.push(`dropped_board_action:${index}:recurring_task`);
+      continue;
+    }
+    const evidenceRefs = briefStringArray(
+      action.evidence_refs,
+      `board_action_${index}_evidence_refs`,
+      8,
+      300,
+    );
+    const base: MorningBriefBoardActionBase = {
+      taskId,
+      why: briefString(action.why, `board_action_${index}_why`, 600),
+      evidenceRefs,
+      expectedTaskUpdatedAt: options.taskUpdatedAtById?.get(taskId) ?? "",
+    };
+    let parsedAction: MorningBriefBoardAction;
+    if (op === "move_column") {
+      const column = action.column;
+      if (column !== "today" && column !== "in_flight" && column !== "not_started") {
+        throw new MorningBriefInvalid(`board_action_${index}_column`);
+      }
+      parsedAction = { ...base, op, column };
+    } else if (op === "set_priority") {
+      const priority = action.priority;
+      if (priority !== "high" && priority !== "medium" && priority !== "low") {
+        throw new MorningBriefInvalid(`board_action_${index}_priority`);
+      }
+      parsedAction = { ...base, op, priority };
+    } else if (op === "set_due") {
+      const dueLocalDate = action.due_local_date;
+      if (
+        dueLocalDate !== null &&
+        (typeof dueLocalDate !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dueLocalDate))
+      ) {
+        throw new MorningBriefInvalid(`board_action_${index}_due_local_date`);
+      }
+      if (
+        dueLocalDate !== null &&
+        (dueLocalDate < "2024-01-01" || dueLocalDate > "2036-12-31")
+      ) {
+        validationNotes.push(`dropped_board_action:${index}:due_date_out_of_range`);
+        continue;
+      }
+      if (!evidenceRefsResolve(evidenceRefs, options.sourceIds)) {
+        validationNotes.push(`dropped_board_action:${index}:unresolved_deadline_evidence`);
+        continue;
+      }
+      parsedAction = { ...base, op, dueLocalDate };
+    } else if (op === "retitle") {
+      parsedAction = {
+        ...base,
+        op,
+        title: briefString(action.title, `board_action_${index}_title`, 240),
+      };
+    } else if (op === "edit_description") {
+      parsedAction = {
+        ...base,
+        op,
+        description: briefString(
+          action.description,
+          `board_action_${index}_description`,
+          4000,
+          { required: false },
+        ),
+      };
+    } else if (op === "archive") {
+      parsedAction = { ...base, op };
+    } else if (op === "archive_duplicate") {
+      const duplicateOfTaskId = briefString(
+        action.duplicate_of_task_id,
+        `board_action_${index}_duplicate_of_task_id`,
+        200,
+      );
+      if (options.knownTaskIds && !options.knownTaskIds.has(duplicateOfTaskId)) {
+        validationNotes.push(`dropped_board_action:${index}:unknown_survivor`);
+        continue;
+      }
+      if (options.recurringTaskIds?.has(duplicateOfTaskId)) {
+        validationNotes.push(`dropped_board_action:${index}:recurring_survivor`);
+        continue;
+      }
+      parsedAction = { ...base, op, duplicateOfTaskId };
+    } else {
+      throw new MorningBriefInvalid(`board_action_${index}_op`);
+    }
+    boardActions.push(parsedAction);
+  }
+
+  const archivedIds = new Set(
+    boardActions
+      .filter((action) => action.op === "archive" || action.op === "archive_duplicate")
+      .map((action) => action.taskId),
+  );
+  if (existingTaskCandidates.some((candidate) => archivedIds.has(candidate.taskId))) {
+    throw new MorningBriefInvalid("candidate_archived_by_board_action");
   }
 
   return {
@@ -696,7 +792,7 @@ export function validateMorningBrief(
       existingTaskCandidates,
       suggestedAdditions,
       watchItems,
-      salesActions,
+      boardActions,
       ...(validationNotes.length > 0 ? { validationNotes } : {}),
     },
     warnings,
@@ -773,7 +869,8 @@ export function selectEligibleMorningBrief(
         artifact.targetLocalDate === targetLocalDate &&
         artifact.promptVersion === versions.promptVersion &&
         artifact.schemaVersion === versions.schemaVersion &&
-        Boolean(artifact.briefJson),
+        Boolean(artifact.briefJson) &&
+        !artifact.boardActionsPending,
     )
     .sort((left, right) =>
       (right.finishedAt ?? right.createdAt).localeCompare(left.finishedAt ?? left.createdAt) ||
@@ -795,6 +892,7 @@ export type MorningBriefGenerationState =
 export type MorningBriefGeneration = {
   state: MorningBriefGenerationState;
   startedAt?: string;
+  pickedTasks?: Array<{ taskId: string; whyToday: string }>;
   // How long this run is expected to take, from recent history. Attached by the
   // read path (which can reach the store), never by the pure selector below, and
   // only while a run is actually live. Drives the arrival's progress bar.
@@ -817,6 +915,9 @@ export function selectMorningBriefGeneration(
   now: Date,
   options: {
     failedWindowHours?: number;
+    // The read path passes the same duration used by the worker. Expired rows
+    // stop looking live so the arrival can render its existing retry control.
+    runningStaleAfterMs?: number;
     // A live (unexpired) brief generation on another machine in the relay mesh.
     // When present and no local row is already active, the arrival stays
     // in-progress until that machine's artifact syncs in and is imported.
@@ -828,7 +929,13 @@ export function selectMorningBriefGeneration(
   );
 
   const running = forDate
-    .filter((artifact) => artifact.status === "running")
+    .filter((artifact) => {
+      if (artifact.status !== "running") return false;
+      if (!options.runningStaleAfterMs) return true;
+      const startedAt = Date.parse(artifact.startedAt ?? artifact.createdAt);
+      return Number.isFinite(startedAt) &&
+        now.getTime() - startedAt <= options.runningStaleAfterMs;
+    })
     .sort((left, right) =>
       (right.startedAt ?? right.createdAt).localeCompare(left.startedAt ?? left.createdAt),
     )[0];
@@ -849,14 +956,28 @@ export function selectMorningBriefGeneration(
         artifact.status === "succeeded" &&
         artifact.promptVersion === MORNING_BRIEF_PROMPT_VERSION &&
         artifact.schemaVersion === MORNING_BRIEF_SCHEMA_VERSION &&
-        Boolean(artifact.briefJson),
+        Boolean(artifact.briefJson) &&
+        !artifact.boardActionsPending,
     )
     .sort((left, right) =>
       (right.finishedAt ?? right.createdAt).localeCompare(left.finishedAt ?? left.createdAt) ||
       right.createdAt.localeCompare(left.createdAt) ||
       right.id.localeCompare(left.id),
     )[0];
-  if (succeeded) return { state: "succeeded" };
+  if (succeeded) {
+    const brief = morningBriefFromArtifact(succeeded);
+    return {
+      state: "succeeded",
+      ...(brief
+        ? {
+            pickedTasks: brief.existingTaskCandidates.map((candidate) => ({
+              taskId: candidate.taskId,
+              whyToday: candidate.whyToday,
+            })),
+          }
+        : {}),
+    };
+  }
 
   const windowHours = options.failedWindowHours ?? MORNING_BRIEF_FAILED_WINDOW_HOURS;
   const cutoff = now.getTime() - windowHours * 60 * 60 * 1000;
@@ -927,12 +1048,12 @@ export function morningBriefFromArtifact(
     const candidatesRaw = parsed.existingTaskCandidates;
     const additionsRaw = parsed.suggestedAdditions;
     const watchRaw = parsed.watchItems;
-    const salesRaw = parsed.salesActions;
+    const boardRaw = parsed.boardActions;
     if (
       !Array.isArray(candidatesRaw) ||
       !Array.isArray(additionsRaw) ||
       !Array.isArray(watchRaw) ||
-      !Array.isArray(salesRaw)
+      (artifact.schemaVersion >= 4 && !Array.isArray(boardRaw))
     ) {
       return undefined;
     }
@@ -995,29 +1116,55 @@ export function morningBriefFromArtifact(
         evidenceRefs: watch.evidenceRefs,
       });
     }
-    const salesActions: MorningBriefSalesAction[] = [];
-    for (const entry of salesRaw) {
+    const boardActions: MorningBriefBoardAction[] = [];
+    for (const entry of Array.isArray(boardRaw) ? boardRaw : []) {
       const action = storedRecord(entry);
       if (
         !action ||
-        !storedString(action.contact) ||
-        !storedString(action.channel) ||
+        !storedString(action.op) ||
+        !storedString(action.taskId) ||
+        !storedString(action.why) ||
         !storedStringArray(action.evidenceRefs) ||
-        typeof action.draftKind !== "string" ||
-        !DRAFT_KINDS.has(action.draftKind as MorningBriefDraftKind) ||
-        !storedString(action.draftOrBeats) ||
-        action.approvalRequired !== true
+        !storedString(action.expectedTaskUpdatedAt)
       ) {
         return undefined;
       }
-      salesActions.push({
-        contact: action.contact,
-        channel: action.channel,
+      const base = {
+        taskId: action.taskId,
+        why: action.why,
         evidenceRefs: action.evidenceRefs,
-        draftKind: action.draftKind as MorningBriefDraftKind,
-        draftOrBeats: action.draftOrBeats,
-        approvalRequired: true,
-      });
+        expectedTaskUpdatedAt: action.expectedTaskUpdatedAt,
+      };
+      if (
+        action.op === "move_column" &&
+        (action.column === "today" || action.column === "in_flight" || action.column === "not_started")
+      ) {
+        boardActions.push({ ...base, op: action.op, column: action.column });
+      } else if (
+        action.op === "set_priority" &&
+        (action.priority === "high" || action.priority === "medium" || action.priority === "low")
+      ) {
+        boardActions.push({ ...base, op: action.op, priority: action.priority });
+      } else if (
+        action.op === "set_due" &&
+        (action.dueLocalDate === null || storedString(action.dueLocalDate))
+      ) {
+        boardActions.push({ ...base, op: action.op, dueLocalDate: action.dueLocalDate });
+      } else if (action.op === "retitle" && storedString(action.title)) {
+        boardActions.push({ ...base, op: action.op, title: action.title });
+      } else if (action.op === "edit_description" && storedString(action.description)) {
+        boardActions.push({ ...base, op: action.op, description: action.description });
+      } else if (action.op === "archive") {
+        boardActions.push({ ...base, op: action.op });
+      } else if (action.op === "archive_duplicate" && storedString(action.duplicateOfTaskId)) {
+        boardActions.push({
+          ...base,
+          op: action.op,
+          duplicateOfTaskId: action.duplicateOfTaskId,
+        });
+      } else {
+        return undefined;
+      }
     }
     // Artifacts written before schema 3 have neither field. Splitting the flat
     // narrative gives them the same paragraph rendering as a new brief, so an
@@ -1036,7 +1183,7 @@ export function morningBriefFromArtifact(
       existingTaskCandidates: candidates,
       suggestedAdditions: additions,
       watchItems,
-      salesActions,
+      boardActions,
       ...(parsed.validationNotes ? { validationNotes: parsed.validationNotes } : {}),
     };
   } catch {
@@ -1059,6 +1206,11 @@ export function localDateInTimezone(date: Date, timezone: string): string {
   return `${values.year}-${values.month}-${values.day}`;
 }
 
+// Client components import these from the pure weekday module; re-exported
+// here so server-side callers keep one import surface.
+export { isWeekendLocalDate, nextWeekdayLocalDate } from "./weekday";
+import { isWeekendLocalDate, nextWeekdayLocalDate } from "./weekday";
+
 // The brief generated after a settlement targets the next morning: today in the
 // plan's timezone when the settled day is already behind us (the normal evening
 // close), otherwise the calendar day after the settled date (a stale plan being
@@ -1069,10 +1221,10 @@ export function nextBriefTargetLocalDate(
   timezone: string,
 ): string {
   const today = localDateInTimezone(now, timezone);
-  if (today > settledLocalDate) return today;
-  const next = new Date(`${settledLocalDate}T12:00:00.000Z`);
-  next.setUTCDate(next.getUTCDate() + 1);
-  return next.toISOString().slice(0, 10);
+  if (today > settledLocalDate) {
+    return isWeekendLocalDate(today) ? nextWeekdayLocalDate(today) : today;
+  }
+  return nextWeekdayLocalDate(settledLocalDate);
 }
 
 // Settlement reconciliation is complete when no immediate ('pending')
@@ -1099,17 +1251,15 @@ export type PublicMorningBrief = {
   id: string;
   targetLocalDate: string;
   generatedAt: string;
+  writer?: "codex" | "claude";
+  modelAlias: string;
+  effort: string;
   headline?: string;
   narrativeParagraphs: string[];
   lensNarrative: string;
+  managementSummary?: string;
   watchItems: MorningBriefWatchItem[];
   suggestedAdditions: MorningBriefSuggestedAddition[];
-  salesActions: Array<
-    MorningBriefSalesAction & {
-      state?: MorningBriefSalesActionState;
-      editedText?: string;
-    }
-  >;
 };
 
 // brief_json carries contact names and message drafts. Exactly like a run's
@@ -1117,29 +1267,22 @@ export type PublicMorningBrief = {
 export function publicMorningBrief(
   artifact: MorningBriefArtifact,
   brief: MorningBrief,
-  actionStates: readonly MorningBriefSalesActionRecord[],
   accessMode: string | undefined,
+  managementSummary?: string,
 ): PublicMorningBrief | undefined {
   if (accessMode !== "loopback") return undefined;
-  const stateByIndex = new Map(
-    actionStates.map((record) => [record.actionIndex, record]),
-  );
   return {
     id: artifact.id,
     targetLocalDate: artifact.targetLocalDate,
     generatedAt: artifact.finishedAt ?? artifact.updatedAt,
+    ...(artifact.writer ? { writer: artifact.writer } : {}),
+    modelAlias: artifact.modelAlias,
+    effort: artifact.effort,
     ...(brief.headline ? { headline: brief.headline } : {}),
     narrativeParagraphs: brief.narrativeParagraphs,
     lensNarrative: brief.lensNarrative,
+    ...(managementSummary ? { managementSummary } : {}),
     watchItems: brief.watchItems,
     suggestedAdditions: brief.suggestedAdditions,
-    salesActions: brief.salesActions.map((action, index) => {
-      const record = stateByIndex.get(index);
-      return {
-        ...action,
-        state: record?.state,
-        editedText: record?.editedText,
-      };
-    }),
   };
 }

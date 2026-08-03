@@ -1,15 +1,15 @@
-export type ForgeId = string;
+export type CoveId = string;
 
 export type TaskColumn = {
-  id: ForgeId;
+  id: CoveId;
   name: string;
   position: number;
   is_default: boolean;
 };
 
 export type Task = {
-  id: ForgeId;
-  column_id: ForgeId | null;
+  id: CoveId;
+  column_id: CoveId | null;
   title: string;
   description: string;
   priority: "low" | "medium" | "high";
@@ -19,12 +19,17 @@ export type Task = {
   position: number;
   status: "open" | "done" | "archived";
   source_type?: string;
+  archived_at?: string | null;
+  archived_from_status?: "open" | "done" | null;
+  proposed_recurrence_cadence?: string | null;
+  recurring_template_id?: string | null;
+  occurrence_local_date?: string | null;
   created_at?: string;
   updated_at?: string;
 };
 
 export type Company = {
-  id: ForgeId;
+  id: CoveId;
   name: string;
   domain: string | null;
   website: string | null;
@@ -40,8 +45,8 @@ export type Company = {
 };
 
 export type Contact = {
-  id: ForgeId;
-  company_id: ForgeId | null;
+  id: CoveId;
+  company_id: CoveId | null;
   name: string;
   email: string | null;
   phone: string | null;
@@ -53,29 +58,51 @@ export type Contact = {
   tags: string[];
   notes: string;
   last_interaction_at?: string | null;
+  provenance_source?: string | null;
   created_at?: string;
   updated_at?: string;
 };
 
 export type ContactActivity = {
-  id: ForgeId;
-  contact_id: ForgeId | null;
-  company_id: ForgeId | null;
+  id: CoveId;
+  contact_id: CoveId | null;
+  company_id: CoveId | null;
+  source_ref?: string | null;
   activity_type: string;
   title: string | null;
   content: string | null;
   direction: "inbound" | "outbound" | "internal" | null;
+  metadata?: Record<string, unknown>;
   created_at: string;
+  updated_at?: string;
 };
 
 export type EmailItem = {
-  id: ForgeId;
-  contact_id: ForgeId | null;
-  company_id: ForgeId | null;
+  id: CoveId;
+  contact_id: CoveId | null;
+  company_id: CoveId | null;
   message_id: string | null;
   thread_id: string | null;
   classification: "action_item" | "tiding" | "log_only";
-  status: "pending" | "reviewed" | "actioned" | "dismissed" | "archived";
+  status:
+    | "pending"
+    | "archiving"
+    | "reviewed"
+    | "actioned"
+    | "dismissed"
+    | "archived";
+  workflow_state?:
+    | "legacy"
+    | "observed"
+    | "classifying"
+    | "open"
+    | "finalizing"
+    | "terminal"
+    | "failed";
+  bucket?: "reply" | "action" | "fyi" | "noise" | null;
+  thread_version?: number;
+  latest_inbound_message_id?: string | null;
+  gmail_draft_id?: string | null;
   sender_name: string | null;
   sender_email: string | null;
   subject: string | null;
@@ -92,8 +119,8 @@ export type EmailItem = {
 };
 
 export type Draft = {
-  id: ForgeId;
-  email_item_id: ForgeId | null;
+  id: CoveId;
+  email_item_id: CoveId | null;
   subject?: string | null;
   body: string;
   status: "needs_review" | "edited" | "approved" | "sent" | "dismissed";
@@ -104,15 +131,15 @@ export type Draft = {
 };
 
 export type EmailActionLog = {
-  id: ForgeId;
-  email_item_id: ForgeId | null;
+  id: CoveId;
+  email_item_id: CoveId | null;
   action_type: string;
   description: string;
   created_at: string;
 };
 
 export type EmailTriageRun = {
-  id: ForgeId;
+  id: CoveId;
   summary: string | null;
   created_at: string;
 };
@@ -133,12 +160,12 @@ export type CommitmentSourceKind =
   | "brief";
 
 export type Commitment = {
-  id: ForgeId;
+  id: CoveId;
   kind: CommitmentKind;
   title: string;
   details: string | null;
   counterparty: string | null;
-  contact_id: ForgeId | null;
+  contact_id: CoveId | null;
   source_kind: CommitmentSourceKind;
   source_quote: string | null;
   source_ref: string | null;
@@ -159,13 +186,13 @@ export type InboundEventState =
   | "dismissed";
 
 export type InboundEvent = {
-  id: ForgeId;
+  id: CoveId;
   source: string;
   source_id: string;
   raw_text: string;
   machine: string | null;
   state: InboundEventState;
-  task_id: ForgeId | null;
+  task_id: CoveId | null;
   error: string | null;
   attempts: number;
   created_at: string;

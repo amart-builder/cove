@@ -50,9 +50,12 @@ import {
 import {
   buildMorningBriefCommand,
   buildMorningBriefPrompt,
+  chiefOfStaffMandate,
   morningBriefModelConfig,
+  morningBriefStaleAfterMs,
   parseMorningBriefOutput,
 } from "./brief-commands";
+import { writeMorningBriefInput } from "./brief-inputs";
 import {
   configuredMorningBriefWriter,
   createCodexMorningBriefAttempt,
@@ -69,12 +72,17 @@ import {
   type DumpExistingCommitment,
   type DumpResolution,
 } from "./dump-commands";
-import { markForgeOrchestratorSession } from "./orchestrator-session";
+import { markCoveOrchestratorSession } from "./orchestrator-session";
 import {
   notifyExecutionRun,
   rememberNotificationTransition,
   type ExecutionNotificationInput,
 } from "./notify";
+import {
+  completeSpawnedChild,
+  registerSpawnedChild,
+  type ClaudeChildLane,
+} from "./child-process-registry";
 import {
   drainSpoolFiles,
   getEvent,
@@ -85,6 +93,8 @@ import {
   createFallbackInboundTask,
 } from "../intake/task-writer";
 import { coveEnv } from "../env";
+import { coveDataDir } from "../operator";
+import { recordReceipt, type ReceiptOutcome } from "../reliability/receipts";
 
 export { fallbackInboundDueAt } from "../intake/task-writer";
 
@@ -111,6 +121,9 @@ export type ClaudeWorkerOptions = {
   notifyExecution?: ExecutionNotifier;
   processStartedAt?: Date;
   notifiedTransitions?: Set<string>;
+  receiptDbPath?: string;
+  childServerGeneration?: string;
+  childBootId?: string;
 };
 
 type ChildResult = {
@@ -207,12 +220,25 @@ function spawnCommand(
     timeoutMs: number;
     maxStdoutBytes: number;
     maxStderrBytes: number;
+    // Some commands write their real result to a separate bounded artifact.
+    // Their console stream is progress chatter, so crossing the diagnostic
+    // buffer cap must not invalidate that artifact. The streams are still
+    // drained; bytes beyond the caps are simply discarded.
+    allowOutputOverflow?: boolean;
     onSpawn?: (child: ChildProcessWithoutNullStreams) => void;
     onChunk?: (stream: "stdout" | "stderr", chunk: Buffer) => void;
     onPulse?: () => boolean;
     pulseIntervalMs?: number;
     terminationGraceMs: number;
     abortSignal?: AbortSignal;
+    childRegistration?: {
+      lane: ClaudeChildLane;
+      runId: string;
+      dbPath?: string;
+      serverGeneration?: string;
+      bootId?: string;
+      identityToken?: string;
+    };
   },
 ): Promise<ChildResult> {
   return new Promise((resolve) => {
@@ -243,6 +269,7 @@ function spawnCommand(
     let settled = false;
     let terminatedBy: ChildResult["terminatedBy"];
     let killTimer: NodeJS.Timeout | undefined;
+    let childRegistrationId: string | undefined;
     const terminate = (reason: NonNullable<ChildResult["terminatedBy"]>) => {
       if (terminatedBy) return;
       terminatedBy = reason;
@@ -264,6 +291,18 @@ function spawnCommand(
     const onAbort = () => terminate("shutdown");
     options.abortSignal?.addEventListener("abort", onAbort, { once: true });
     try {
+      if (child.pid && options.childRegistration?.dbPath) {
+        childRegistrationId = registerSpawnedChild({
+          lane: options.childRegistration.lane,
+          runId: options.childRegistration.runId,
+          pid: child.pid,
+          executable: command.executable,
+          dbPath: options.childRegistration.dbPath,
+          serverGeneration: options.childRegistration.serverGeneration,
+          bootId: options.childRegistration.bootId,
+          identityToken: options.childRegistration.identityToken,
+        });
+      }
       options.onSpawn?.(child);
     } catch (error) {
       stderr = error instanceof Error ? error.message : "spawn_registration_failed";
@@ -276,7 +315,7 @@ function spawnCommand(
       if (stdoutBytes + chunk.length <= options.maxStdoutBytes) {
         stdout += chunk.toString("utf8");
         stdoutBytes += chunk.length;
-      } else {
+      } else if (!options.allowOutputOverflow) {
         overflowed = true;
       }
     });
@@ -286,7 +325,7 @@ function spawnCommand(
       if (stderrBytes + chunk.length <= options.maxStderrBytes) {
         stderr += chunk.toString("utf8");
         stderrBytes += chunk.length;
-      } else {
+      } else if (!options.allowOutputOverflow) {
         overflowed = true;
       }
     });
@@ -297,6 +336,9 @@ function spawnCommand(
       if (killTimer) clearTimeout(killTimer);
       if (pulse) clearInterval(pulse);
       options.abortSignal?.removeEventListener("abort", onAbort);
+      if (childRegistrationId && options.childRegistration?.dbPath) {
+        completeSpawnedChild(options.childRegistration.dbPath, childRegistrationId);
+      }
       resolve({ exitCode: undefined, stdout, stderr: error.message, overflowed, terminatedBy });
     });
     child.once("close", (code, signal) => {
@@ -306,6 +348,9 @@ function spawnCommand(
       if (killTimer) clearTimeout(killTimer);
       if (pulse) clearInterval(pulse);
       options.abortSignal?.removeEventListener("abort", onAbort);
+      if (childRegistrationId && options.childRegistration?.dbPath) {
+        completeSpawnedChild(options.childRegistration.dbPath, childRegistrationId);
+      }
       resolve({
         exitCode: code ?? undefined,
         signal: signal ?? undefined,
@@ -440,11 +485,19 @@ export async function runOneExecution(options: ClaudeWorkerOptions): Promise<boo
       maxStderrBytes: 64 * 1024,
       terminationGraceMs: options.terminationGraceMs ?? 2000,
       abortSignal: options.abortSignal,
+      childRegistration: {
+        lane: "execution",
+        runId: run.id,
+        dbPath: options.receiptDbPath,
+        serverGeneration: options.childServerGeneration,
+        bootId: options.childBootId,
+        identityToken: run.claudeSessionId,
+      },
       onSpawn: (child) => {
         childPid = child.pid;
         if (!childPid) return;
         try {
-          (options.markSession ?? markForgeOrchestratorSession)(run.claudeSessionId);
+          (options.markSession ?? markCoveOrchestratorSession)(run.claudeSessionId);
         } catch (error) {
           console.error("Could not mark Cove orchestrator session.", error);
         }
@@ -550,6 +603,9 @@ export type BriefRelayOptions = {
 export type MorningBriefWorkerOptions = ClaudeWorkerOptions & {
   // Test seam; production uses the real collector (files + loopback task fetch).
   collectBriefSources?: (store: DayPlanStore) => Promise<CollectedBriefSources>;
+  // The persisted replay input lives beside cove.db. Tests set this to their
+  // temporary data directory so generation never touches the installed data.
+  dataDir?: string;
   briefTimeoutMs?: number;
   briefWriter?: MorningBriefWriter;
   codexPath?: string;
@@ -623,7 +679,7 @@ function correctionPrompt(prompt: string, error: unknown): string {
   return `${prompt}\n\nYour previous output failed validation: ${reason}. Emit ONLY the required JSON object.`;
 }
 
-async function forgeCsrfToken(
+async function coveCsrfToken(
   fetchImpl: typeof fetch,
   baseUrl: string,
   timeoutMs: number,
@@ -749,7 +805,7 @@ export async function runOneDayDump(
         const attempt = createCodexStructuredAttempt({
           prompt,
           executable: options.codexPath,
-          tempPrefix: "forge-day-dump-",
+          tempPrefix: "cove-day-dump-",
         });
         if (!attempt) break;
         try {
@@ -760,6 +816,13 @@ export async function runOneDayDump(
             maxStderrBytes: 64 * 1024,
             terminationGraceMs: options.terminationGraceMs ?? 2000,
             abortSignal: options.abortSignal,
+            childRegistration: {
+              lane: "dump",
+              runId: claimed.id,
+              dbPath: options.receiptDbPath,
+              serverGeneration: options.childServerGeneration,
+              bootId: options.childBootId,
+            },
           });
           if (result.terminatedBy === "shutdown") {
             failDump("worker_interrupted");
@@ -799,6 +862,13 @@ export async function runOneDayDump(
           maxStderrBytes: 64 * 1024,
           terminationGraceMs: options.terminationGraceMs ?? 2000,
           abortSignal: options.abortSignal,
+          childRegistration: {
+            lane: "dump",
+            runId: claimed.id,
+            dbPath: options.receiptDbPath,
+            serverGeneration: options.childServerGeneration,
+            bootId: options.childBootId,
+          },
         });
         if (result.terminatedBy || result.signal) {
           failDump(result.terminatedBy === "timeout" ? "dump_timeout" : "worker_interrupted");
@@ -831,7 +901,7 @@ export async function runOneDayDump(
     let csrfToken: string | undefined;
     if (validated.items.length > 0 || validated.resolutions.length > 0) {
       try {
-        csrfToken = await forgeCsrfToken(fetchImpl, baseUrl, fetchTimeoutMs);
+        csrfToken = await coveCsrfToken(fetchImpl, baseUrl, fetchTimeoutMs);
       } catch (error) {
         const reason = (error instanceof Error ? error.message : "day_plan_token_failed")
           .replace(/\s+/g, " ")
@@ -848,11 +918,11 @@ export async function runOneDayDump(
       for (const item of csrfToken ? validated.items : []) {
         const id = randomUUID();
         try {
-          const response = await fetchImpl(`${baseUrl}/api/forge-rest/commitments`, {
+          const response = await fetchImpl(`${baseUrl}/api/cove-rest/commitments`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "X-Forge-CSRF": csrfToken!,
+              "X-Cove-CSRF": csrfToken!,
             },
             body: JSON.stringify({
               id,
@@ -866,7 +936,7 @@ export async function runOneDayDump(
             signal: AbortSignal.timeout(fetchTimeoutMs),
             cache: "no-store",
           });
-          if (!response.ok) throw new Error(`forge-rest commitments ${response.status}`);
+          if (!response.ok) throw new Error(`cove-rest commitments ${response.status}`);
           created.push({ id, title: item.title });
         } catch (error) {
           failed.push({
@@ -915,7 +985,7 @@ export async function runOneDayDump(
           patch.due_at = resolution.due_at;
         }
         const response = await fetchImpl(
-          `${baseUrl}/api/forge-rest/commitments` +
+          `${baseUrl}/api/cove-rest/commitments` +
             `?id=eq.${encodeURIComponent(id)}&status=eq.open&` +
             (row.evidence === null || row.evidence === undefined
               ? "evidence=is.null"
@@ -924,14 +994,14 @@ export async function runOneDayDump(
             method: "PATCH",
             headers: {
               "Content-Type": "application/json",
-              "X-Forge-CSRF": csrfToken!,
+              "X-Cove-CSRF": csrfToken!,
             },
             body: JSON.stringify(patch),
             signal: AbortSignal.timeout(fetchTimeoutMs),
             cache: "no-store",
           },
         );
-        if (!response.ok) throw new Error(`forge-rest commitments ${response.status}`);
+        if (!response.ok) throw new Error(`cove-rest commitments ${response.status}`);
         const patchedRows = await response.json() as unknown;
         if (
           !Array.isArray(patchedRows) ||
@@ -1049,9 +1119,8 @@ export async function runOneMorningBrief(
   const clock = options.now ?? (() => new Date());
   // The stale sweep must always outlast the configured run timeout, or a
   // long-budget brief could be marked interrupted while still running.
-  const staleAfterMs = Math.max(
-    20 * 60 * 1000,
-    (options.briefTimeoutMs ?? morningBriefModelConfig().timeoutMs) + 5 * 60 * 1000,
+  const staleAfterMs = morningBriefStaleAfterMs(
+    options.briefTimeoutMs ?? morningBriefModelConfig().timeoutMs,
   );
   options.store.interruptStaleMorningBriefs(cutoff(clock(), staleAfterMs));
   // Gating the enqueue is not enough on its own. A row queued while the relay
@@ -1074,13 +1143,37 @@ export async function runOneMorningBrief(
   }
   const claimed = options.store.claimNextMorningBrief();
   if (!claimed) return false;
+  const receiptStartedAt = claimed.startedAt ?? clock().toISOString();
+  let receiptRecorded = false;
+  const recordBriefReceipt = (
+    outcome: ReceiptOutcome,
+    summary: string,
+    actions: Record<string, unknown>,
+  ) => {
+    if (!options.receiptDbPath || receiptRecorded) return;
+    receiptRecorded = true;
+    try {
+      recordReceipt({
+        dbPath: options.receiptDbPath,
+        source: "morning-brief",
+        startedAt: receiptStartedAt,
+        summary,
+        actions: { briefId: claimed.id, targetLocalDate: claimed.targetLocalDate, ...actions },
+        outcome,
+      });
+    } catch (error) {
+      console.error("Could not record morning brief receipt.", error);
+    }
+  };
   const targetTimezone = resolveBriefTimezone(options.store);
   const relay = options.relay;
+  const briefDataDir = coveDataDir(options.dataDir ?? relay?.dataDir);
   const relayHost = relay?.host ?? originHost();
   // Fail a brief and, when relaying, publish a failed status so the peer machine
   // stops waiting on this attempt.
   const failBrief = (code: string) => {
     options.store.failMorningBrief(claimed.id, code);
+    recordBriefReceipt("failed", `Morning brief failed: ${code}`, { errorCode: code });
     if (relay) {
       writeBriefAttemptStatus(
         {
@@ -1126,15 +1219,18 @@ export async function runOneMorningBrief(
           targetLocalDate: claimed.targetLocalDate,
           targetTimezone,
           now: clock(),
-          // Without this the collector falls back to the forge.db directory,
+          // Without this the collector falls back to the cove.db directory,
           // so on a relaying machine it reads a different settlement relay than
           // the one every other call in this function writes to.
-          dataDir: relay?.dataDir,
+          dataDir: briefDataDir,
         }));
     const collected = await collect(options.store);
     const context = assembleMorningBriefContext(collected.sources, {
       now: clock(),
     });
+    if (context.trimmedRequired.length > 0) {
+      console.error(`brief warning: required source trimmed: ${context.trimmedRequired.join(",")}`);
+    }
     if (context.missingRequired.length > 0) {
       failBrief(`required_source_missing:${context.missingRequired.join(",")}`);
       return true;
@@ -1158,13 +1254,19 @@ export async function runOneMorningBrief(
         effort: claimed.effort,
         budgetUsd: claimed.budgetUsd,
         writer: preferredWriter,
+        mandate: chiefOfStaffMandate(),
       }),
       sourceManifest: context.manifest,
       promptVersion: MORNING_BRIEF_PROMPT_VERSION,
       schemaVersion: MORNING_BRIEF_SCHEMA_VERSION,
     });
     // Identical inputs already produced an artifact; nothing new to generate.
-    if (inputs.duplicateOfId) return true;
+    if (inputs.duplicateOfId) {
+      recordBriefReceipt("skipped", "Morning brief reused an identical result.", {
+        duplicateOfId: inputs.duplicateOfId,
+      });
+      return true;
+    }
     const promptInput = {
       targetLocalDate: claimed.targetLocalDate,
       targetTimezone,
@@ -1172,6 +1274,26 @@ export async function runOneMorningBrief(
       manifest: context.manifest,
     };
     const prompt = buildMorningBriefPrompt(promptInput);
+    try {
+      writeMorningBriefInput(
+        {
+          artifact_id: claimed.id,
+          target_local_date: claimed.targetLocalDate,
+          target_timezone: targetTimezone,
+          prompt_version: MORNING_BRIEF_PROMPT_VERSION,
+          schema_version: MORNING_BRIEF_SCHEMA_VERSION,
+          sections: context.sections,
+          manifest: context.manifest,
+          written_at: clock().toISOString(),
+        },
+        briefDataDir,
+      );
+    } catch (error) {
+      const reason = (error instanceof Error ? error.message : "brief_input_write_failed")
+        .replace(/\s+/g, " ")
+        .slice(0, 160);
+      console.error(`brief input write failed: ${reason}`);
+    }
     const sourceIds = new Set(
       context.manifest.sources
         .filter((source) => source.freshness !== "missing" && source.chars > 0)
@@ -1179,42 +1301,66 @@ export async function runOneMorningBrief(
     );
     const validateOutput = (raw: string) => validateMorningBrief(parseMorningBriefOutput(raw), {
       knownTaskIds: collected.knownTaskIds,
-      // Bounded grounding: watch items and sales actions must cite sources the
+      taskUpdatedAtById: collected.taskUpdatedAtById,
+      recurringTaskIds: collected.recurringTaskIds,
+      // Bounded grounding: watch items must cite sources the
       // model actually received bytes of (missing or fully-trimmed-out sources
       // cannot ground anything; citing them is fabrication by construction).
       sourceIds,
     });
     const timeoutMs = options.briefTimeoutMs ?? morningBriefModelConfig().timeoutMs;
-    let writer: MorningBriefWriter = preferredWriter;
+    const writer: MorningBriefWriter = preferredWriter;
     let validated: ReturnType<typeof validateMorningBrief> | undefined;
 
     if (writer === "codex") {
+      let failureCode = "codex_failed";
       let codexPrompt = prompt;
       for (let attemptIndex = 0; attemptIndex < 2 && !validated; attemptIndex += 1) {
         const attempt = createCodexMorningBriefAttempt({
           prompt: codexPrompt,
           executable: options.codexPath,
         });
-        if (!attempt) break;
+        if (!attempt) {
+          failureCode = "codex_unavailable";
+          break;
+        }
         try {
           const result = await spawnCommand(attempt.command, {
             spawnImpl: options.spawnImpl ?? spawn,
             timeoutMs,
             maxStdoutBytes: 1024 * 1024,
             maxStderrBytes: 64 * 1024,
+            // Codex writes the only output Cove consumes to outputPath.
+            // Its stdout/stderr can be much larger than the brief because it
+            // includes progress and reasoning status. Keep a bounded diagnostic
+            // prefix, discard the rest, and validate the final artifact below.
+            allowOutputOverflow: true,
             terminationGraceMs: options.terminationGraceMs ?? 2000,
             abortSignal: options.abortSignal,
+            childRegistration: {
+              lane: "brief",
+              runId: claimed.id,
+              dbPath: options.receiptDbPath,
+              serverGeneration: options.childServerGeneration,
+              bootId: options.childBootId,
+            },
           });
           if (result.terminatedBy === "shutdown") {
             failBrief("worker_interrupted");
             return true;
           }
           if (result.exitCode !== 0 || result.signal || result.terminatedBy || result.overflowed) {
+            failureCode = result.terminatedBy === "timeout"
+              ? "codex_timeout"
+              : result.overflowed
+                ? "brief_output_too_large"
+                : "codex_failed";
             break;
           }
           try {
             validated = validateOutput(readCodexMorningBriefOutput(attempt));
           } catch (error) {
+            failureCode = "codex_invalid_output";
             if (attemptIndex === 0) {
               const reason = (error instanceof Error ? error.message : "validation failed")
                 .replace(/\s+/g, " ")
@@ -1226,7 +1372,13 @@ export async function runOneMorningBrief(
           attempt.cleanup();
         }
       }
-      if (!validated) writer = "claude";
+      // Writer identity is part of the product contract. If Sol cannot produce
+      // a valid brief, surface the failure instead of silently substituting a
+      // different model whose judgment and voice may materially differ.
+      if (!validated) {
+        failBrief(failureCode);
+        return true;
+      }
     }
 
     if (!validated) {
@@ -1246,6 +1398,13 @@ export async function runOneMorningBrief(
         maxStderrBytes: 64 * 1024,
         terminationGraceMs: options.terminationGraceMs ?? 2000,
         abortSignal: options.abortSignal,
+        childRegistration: {
+          lane: "brief",
+          runId: claimed.id,
+          dbPath: options.receiptDbPath,
+          serverGeneration: options.childServerGeneration,
+          bootId: options.childBootId,
+        },
       });
       if (result.terminatedBy || result.signal) {
         failBrief(result.terminatedBy === "timeout" ? "brief_timeout" : "worker_interrupted");
@@ -1273,6 +1432,14 @@ export async function runOneMorningBrief(
       claimed.id,
       JSON.stringify({ ...dated.brief, writer }),
     );
+    if (completed) {
+      options.store.stageMorningBriefBoardActions(completed.id);
+      const activationNow = clock();
+      if (localDateInTimezone(activationNow, targetTimezone) === claimed.targetLocalDate) {
+        options.store.activateBriefBoardActions(claimed.targetLocalDate, activationNow);
+      }
+    }
+    recordBriefReceipt("success", "Morning brief completed.", { writer });
     console.info("Morning brief generated.", { briefId: claimed.id, writer });
     // Publish the immutable artifact to the relay so the other machine imports
     // it. The authoritative machine (the MBP) also refreshes the settlement

@@ -11,12 +11,14 @@ import {
 } from '../src/lib/day-plan/brief.ts';
 import { createDayPlanStore } from '../src/lib/day-plan/store.ts';
 import {
+  assertRecurringCarryAllowed,
   GET,
   POST,
   parseDayPlanPostBody,
 } from '../src/app/api/day-plan/route.ts';
-import { hasDayPlanRouteAccess, isLoopbackForgeRequest } from '../src/lib/request-security.ts';
+import { hasDayPlanRouteAccess, isLoopbackCoveRequest } from '../src/lib/request-security.ts';
 import { getQuietCurrentCsrfToken } from '../src/lib/quiet-current/store.ts';
+import { openLocalDatabase } from '../src/lib/local/database.ts';
 
 function candidate() {
   return buildDayPlanCandidates({
@@ -47,6 +49,59 @@ test('parses a bounded task-backed ensure request', () => {
   });
   assert.equal(parsed.action, 'ensure');
   assert.equal(parsed.input.candidates[0].taskId, 'task-a');
+  assert.equal(parsed.input.creation, 'automatic');
+});
+
+test('parses an honestly labeled due-backlog candidate', () => {
+  const backlog = buildDayPlanCandidates({
+    localDate: '2026-08-03',
+    timezone: 'America/Los_Angeles',
+    tasks: [{
+      id: 'backlog-due',
+      title: 'Evening backlog deadline',
+      priority: 'medium',
+      dueAt: '2026-08-04T02:00:00.000Z',
+      position: 0,
+      column: 'due_backlog',
+      status: 'open',
+      updatedAt: '2026-08-03T15:00:00.000Z',
+      refreshedAt: '2026-08-03T16:00:00.000Z',
+    }],
+  })[0];
+  const parsed = parseDayPlanPostBody({
+    action: 'ensure',
+    localDate: '2026-08-03',
+    timezone: 'America/Los_Angeles',
+    mutationId: 'ensure:due-backlog',
+    candidates: [backlog],
+  });
+
+  assert.equal(parsed.input.candidates[0].whyToday, 'This is due today and still open.');
+  assert.ok(parsed.input.candidates[0].rankReasons.includes('due_backlog'));
+  assert.equal(parsed.input.candidates[0].rankReasons.includes('accepted_today'), false);
+});
+
+test('parses manual creation intent and rejects unknown creation intent', () => {
+  const parsed = parseDayPlanPostBody({
+    action: 'ensure',
+    localDate: '2026-08-01',
+    timezone: 'America/Los_Angeles',
+    mutationId: 'ensure:weekend',
+    candidates: [],
+    creation: 'manual',
+  });
+  assert.equal(parsed.input.creation, 'manual');
+  assert.throws(
+    () => parseDayPlanPostBody({
+      action: 'ensure',
+      localDate: '2026-08-01',
+      timezone: 'America/Los_Angeles',
+      mutationId: 'ensure:weekend',
+      candidates: [],
+      creation: 'scheduled',
+    }),
+    /creation must be automatic or manual/,
+  );
 });
 
 test('rejects unstructured, stale, duplicate, and oversized candidates', () => {
@@ -178,6 +233,66 @@ test('settlement truncates oversized day dumps without blocking the mutation and
   );
 });
 
+test('settlement accepts all ten plan tasks and rejects an eleventh', () => {
+  const tenIds = Array.from({ length: 10 }, (_, index) => `task-${index + 1}`);
+  const parsed = parseDayPlanPostBody({
+    action: 'settlement_commit',
+    planId: 'plan-a',
+    mutationId: 'settlement:ten',
+    expectedVersion: 1,
+    completedHumanTaskIds: tenIds,
+  });
+  assert.deepEqual(parsed.input.completedHumanTaskIds, tenIds);
+  assert.throws(
+    () => parseDayPlanPostBody({
+      action: 'settlement_commit',
+      planId: 'plan-a',
+      mutationId: 'settlement:eleven',
+      expectedVersion: 1,
+      completedHumanTaskIds: [...tenIds, 'task-11'],
+    }),
+    /too many values/,
+  );
+});
+
+test('day-plan route rejects Carry for recurring rhythm task cards', (t) => {
+  const dir = path.join(
+    os.tmpdir(),
+    `cove-recurring-carry-${process.pid}-${Date.now()}-${Math.random()}`,
+  );
+  mkdirSync(dir, { recursive: true });
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dbPath = path.join(dir, 'cove.db');
+  const db = openLocalDatabase(dbPath);
+  try {
+    db.prepare(
+      `INSERT INTO tasks
+         (id, title, tags, status, recurring_template_id, occurrence_local_date,
+          created_at, updated_at)
+       VALUES ('task-rhythm', 'Daily reset', '["recurring"]', 'open',
+               'template-rhythm', '2026-07-10', ?, ?)`,
+    ).run(
+      '2026-07-10T16:00:00.000Z',
+      '2026-07-10T16:00:00.000Z',
+    );
+  } finally {
+    db.close();
+  }
+  const store = {
+    getPlan: () => ({
+      items: [{ id: 'item-rhythm', taskId: 'task-rhythm' }],
+    }),
+  };
+  assert.throws(
+    () => assertRecurringCarryAllowed(
+      store,
+      { planId: 'plan-rhythm', itemId: 'item-rhythm' },
+      dbPath,
+    ),
+    /cannot be carried/,
+  );
+});
+
 test('settlement decision parses trimmed progress fields and enforces their caps', () => {
   const parsed = parseDayPlanPostBody({
     action: 'settlement_decide',
@@ -226,7 +341,7 @@ test('settlement decision parses trimmed progress fields and enforces their caps
       disposition: 'carry',
       progressNote: 'This field does not belong on Carry.',
     }),
-    /must belong to a Progress settlement decision/,
+    /must use the Progress choice/,
   );
 });
 
@@ -237,7 +352,7 @@ test('POST returns 400 for invalid settlement progress fields', async () => {
       host: 'localhost:3200',
       origin: 'http://localhost:3200',
       'content-type': 'application/json',
-      'x-forge-csrf': getQuietCurrentCsrfToken(),
+      'x-cove-csrf': getQuietCurrentCsrfToken(),
     },
     body: JSON.stringify(body),
   }));
@@ -265,7 +380,7 @@ test('POST returns 400 for invalid settlement progress fields', async () => {
   assert.equal(wrongDisposition.status, 400);
   assert.match(
     (await wrongDisposition.json()).error,
-    /Progress details must belong to a Progress settlement decision/,
+    /Progress details must use the Progress choice/,
   );
 });
 
@@ -323,21 +438,111 @@ test('POST rejects untrusted hosts and missing CSRF before touching state', asyn
   assert.equal(missingToken.status, 403);
 });
 
-test('GET exposes briefGeneration on loopback and strips it for a remote session', async (t) => {
-  const dir = path.join(os.tmpdir(), `forge-route-gen-${process.pid}-${Date.now()}`);
+test('route returns the weekend gate for automatic creation and honors manual creation', async (t) => {
+  const dir = path.join(os.tmpdir(), `cove-route-weekend-${process.pid}-${Date.now()}`);
   mkdirSync(dir, { recursive: true });
-  const store = createDayPlanStore({ dbPath: path.join(dir, 'forge.db') });
+  const store = createDayPlanStore({ dbPath: path.join(dir, 'cove.db') });
   const globalRef = globalThis;
-  const previousStore = globalRef.__forgeDayPlanStore;
+  const previousStore = globalRef.__coveDayPlanStore;
+  const previousAccess = process.env.COVE_DAY_PLAN_ACCESS_MODE;
+  globalRef.__coveDayPlanStore = store;
+  process.env.COVE_DAY_PLAN_ACCESS_MODE = 'loopback';
+  t.after(() => {
+    if (previousStore === undefined) delete globalRef.__coveDayPlanStore;
+    else globalRef.__coveDayPlanStore = previousStore;
+    if (previousAccess === undefined) delete process.env.COVE_DAY_PLAN_ACCESS_MODE;
+    else process.env.COVE_DAY_PLAN_ACCESS_MODE = previousAccess;
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const csrfToken = (await (await GET(new NextRequest(
+    'http://localhost:3200/api/day-plan',
+    { headers: { host: 'localhost:3200', 'x-forwarded-for': '127.0.0.1' } },
+  ))).json()).csrfToken;
+  const post = (creation) => POST(new NextRequest('http://localhost:3200/api/day-plan', {
+    method: 'POST',
+    headers: {
+      host: 'localhost:3200',
+      origin: 'http://localhost:3200',
+      'content-type': 'application/json',
+      'x-cove-csrf': csrfToken,
+    },
+    body: JSON.stringify({
+      action: 'ensure',
+      localDate: '2026-08-01',
+      timezone: 'America/Los_Angeles',
+      mutationId: 'ensure:route-weekend',
+      candidates: [],
+      creation,
+    }),
+  }));
+
+  const automatic = await post('automatic');
+  assert.equal(automatic.status, 200);
+  assert.deepEqual(await automatic.json(), {
+    weekendGate: { localDate: '2026-08-01', weekday: 'Saturday' },
+    replayed: false,
+  });
+  assert.equal(store.getReadModel().currentPlan, undefined);
+
+  const manual = await post('manual');
+  assert.equal(manual.status, 201);
+  const manualBody = await manual.json();
+  assert.equal(manualBody.plan.localDate, '2026-08-01');
+  assert.equal(store.listEvents(manualBody.plan.id)[0].after.creation, 'manual');
+});
+
+test('GET skips failed day-plan initialization instead of returning 500', async (t) => {
+  const dir = path.join(os.tmpdir(), `cove-route-initialize-${process.pid}-${Date.now()}`);
+  mkdirSync(dir, { recursive: true });
+  const store = createDayPlanStore({ dbPath: path.join(dir, 'cove.db') });
+  const globalRef = globalThis;
+  const previousStore = globalRef.__coveDayPlanStore;
+  const previousAccess = process.env.COVE_DAY_PLAN_ACCESS_MODE;
+  globalRef.__coveDayPlanStore = store;
+  process.env.COVE_DAY_PLAN_ACCESS_MODE = 'loopback';
+  store.initialize = () => {
+    throw new Error('simulated weekend cleanup failure');
+  };
+  const errors = [];
+  const originalError = console.error;
+  console.error = (...values) => errors.push(values);
+  t.after(() => {
+    console.error = originalError;
+    if (previousStore === undefined) delete globalRef.__coveDayPlanStore;
+    else globalRef.__coveDayPlanStore = previousStore;
+    if (previousAccess === undefined) delete process.env.COVE_DAY_PLAN_ACCESS_MODE;
+    else process.env.COVE_DAY_PLAN_ACCESS_MODE = previousAccess;
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const response = await GET(new NextRequest(
+    'http://localhost:3200/api/day-plan',
+    { headers: { host: 'localhost:3200', 'x-forwarded-for': '127.0.0.1' } },
+  ));
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).currentPlan, undefined);
+  assert.match(errors[0][0], /initialization skipped/);
+  assert.match(errors[0][1].message, /simulated weekend cleanup failure/);
+});
+
+test('GET exposes briefGeneration on loopback and strips it for a remote session', async (t) => {
+  const dir = path.join(os.tmpdir(), `cove-route-gen-${process.pid}-${Date.now()}`);
+  mkdirSync(dir, { recursive: true });
+  const store = createDayPlanStore({ dbPath: path.join(dir, 'cove.db') });
+  const globalRef = globalThis;
+  const previousStore = globalRef.__coveDayPlanStore;
   const previousEnv = {
     access: process.env.COVE_DAY_PLAN_ACCESS_MODE,
     token: process.env.COVE_DAY_PLAN_REMOTE_TOKEN,
     hosts: process.env.COVE_ALLOWED_HOSTS,
   };
-  globalRef.__forgeDayPlanStore = store;
+  globalRef.__coveDayPlanStore = store;
   t.after(() => {
-    if (previousStore === undefined) delete globalRef.__forgeDayPlanStore;
-    else globalRef.__forgeDayPlanStore = previousStore;
+    if (previousStore === undefined) delete globalRef.__coveDayPlanStore;
+    else globalRef.__coveDayPlanStore = previousStore;
     for (const [key, value] of [
       ['COVE_DAY_PLAN_ACCESS_MODE', previousEnv.access],
       ['COVE_DAY_PLAN_REMOTE_TOKEN', previousEnv.token],
@@ -397,13 +602,13 @@ test('GET exposes briefGeneration on loopback and strips it for a remote session
   // brief content: a remote caller never learns a brief exists or is being written.
   process.env.COVE_DAY_PLAN_ACCESS_MODE = 'session';
   process.env.COVE_DAY_PLAN_REMOTE_TOKEN = 'secret-value';
-  process.env.COVE_ALLOWED_HOSTS = 'forge.example.test';
+  process.env.COVE_ALLOWED_HOSTS = 'cove.example.test';
   const remote = await GET(
-    new NextRequest('https://forge.example.test/api/day-plan', {
+    new NextRequest('https://cove.example.test/api/day-plan', {
       headers: {
-        host: 'forge.example.test',
-        origin: 'https://forge.example.test',
-        'x-forge-day-plan-session': 'secret-value',
+        host: 'cove.example.test',
+        origin: 'https://cove.example.test',
+        'x-cove-day-plan-session': 'secret-value',
       },
     }),
   );
@@ -415,23 +620,23 @@ test('GET exposes briefGeneration on loopback and strips it for a remote session
 });
 
 test('settlement opens with last-known state on a REST hiccup, then reconciles on reopen', async (t) => {
-  const dir = path.join(os.tmpdir(), `forge-route-settlement-${process.pid}-${Date.now()}`);
+  const dir = path.join(os.tmpdir(), `cove-route-settlement-${process.pid}-${Date.now()}`);
   mkdirSync(dir, { recursive: true });
   const store = createDayPlanStore({
-    dbPath: path.join(dir, 'forge.db'),
+    dbPath: path.join(dir, 'cove.db'),
     now: () => new Date('2026-07-10T18:00:00.000Z'),
   });
   const globalRef = globalThis;
-  const previousStore = globalRef.__forgeDayPlanStore;
+  const previousStore = globalRef.__coveDayPlanStore;
   const previousFetch = globalRef.fetch;
   const previousAccess = process.env.COVE_DAY_PLAN_ACCESS_MODE;
   const previousWebUrl = process.env.COVE_BRIEF_WEB_BASE;
-  globalRef.__forgeDayPlanStore = store;
+  globalRef.__coveDayPlanStore = store;
   process.env.COVE_DAY_PLAN_ACCESS_MODE = 'loopback';
-  process.env.COVE_BRIEF_WEB_BASE = 'http://forge.test';
+  process.env.COVE_BRIEF_WEB_BASE = 'http://cove.test';
   t.after(() => {
-    if (previousStore === undefined) delete globalRef.__forgeDayPlanStore;
-    else globalRef.__forgeDayPlanStore = previousStore;
+    if (previousStore === undefined) delete globalRef.__coveDayPlanStore;
+    else globalRef.__coveDayPlanStore = previousStore;
     globalRef.fetch = previousFetch;
     if (previousAccess === undefined) delete process.env.COVE_DAY_PLAN_ACCESS_MODE;
     else process.env.COVE_DAY_PLAN_ACCESS_MODE = previousAccess;
@@ -474,7 +679,7 @@ test('settlement opens with last-known state on a REST hiccup, then reconciles o
   globalRef.fetch = async (url) => {
     internalCalls.push(String(url));
     if (!restAvailable) return new Response('temporary failure', { status: 503 });
-    if (String(url).includes('/api/forge-rest/tasks')) {
+    if (String(url).includes('/api/cove-rest/tasks')) {
       return new Response(JSON.stringify([{
         id: 'task-a',
         title: 'Finish the proposal',
@@ -483,7 +688,7 @@ test('settlement opens with last-known state on a REST hiccup, then reconciles o
         updated_at: '2026-07-10T23:00:00.000Z',
       }]), { status: 200 });
     }
-    if (String(url).includes('/api/forge-rest/task_columns')) {
+    if (String(url).includes('/api/cove-rest/task_columns')) {
       return new Response(JSON.stringify([{ id: 'done-column', name: 'Done' }]), { status: 200 });
     }
     throw new Error(`unexpected internal fetch: ${url}`);
@@ -499,7 +704,7 @@ test('settlement opens with last-known state on a REST hiccup, then reconciles o
       host: 'localhost:3200',
       origin: 'http://localhost:3200',
       'content-type': 'application/json',
-      'x-forge-csrf': token,
+      'x-cove-csrf': token,
     },
     body: JSON.stringify({
       action: 'settlement_start',
@@ -512,9 +717,9 @@ test('settlement opens with last-known state on a REST hiccup, then reconciles o
   const body = await response.json();
   assert.equal(body.plan.state, 'settling');
   assert.equal(body.plan.items[0].decision, 'accepted');
-  assert.equal(body.plan.items[0].workedToday, true);
-  assert.equal(internalCalls.some((url) => url.includes('/api/forge-rest/tasks')), true);
-  assert.equal(internalCalls.some((url) => url.includes('/api/forge-rest/task_columns')), true);
+  assert.equal(body.plan.items[0].workedToday, false);
+  assert.equal(internalCalls.some((url) => url.includes('/api/cove-rest/tasks')), true);
+  assert.equal(internalCalls.some((url) => url.includes('/api/cove-rest/task_columns')), true);
 
   restAvailable = true;
   internalCalls.length = 0;
@@ -524,7 +729,7 @@ test('settlement opens with last-known state on a REST hiccup, then reconciles o
       host: 'localhost:3200',
       origin: 'http://localhost:3200',
       'content-type': 'application/json',
-      'x-forge-csrf': token,
+      'x-cove-csrf': token,
     },
     body: JSON.stringify({
       action: 'settlement_start',
@@ -545,15 +750,15 @@ test('non-loopback day-plan access requires the separate remote session secret',
     accessMode: process.env.COVE_DAY_PLAN_ACCESS_MODE,
     trustProxy: process.env.COVE_TRUST_PROXY,
   };
-  process.env.COVE_ALLOWED_HOSTS = 'forge.example.test';
+  process.env.COVE_ALLOWED_HOSTS = 'cove.example.test';
   delete process.env.COVE_DAY_PLAN_ACCESS_MODE;
   delete process.env.COVE_TRUST_PROXY;
   try {
-    const request = (session) => new NextRequest('https://forge.example.test/api/day-plan', {
+    const request = (session) => new NextRequest('https://cove.example.test/api/day-plan', {
       headers: {
-        host: 'forge.example.test',
-        origin: 'https://forge.example.test',
-        ...(session ? { 'x-forge-day-plan-session': session } : {}),
+        host: 'cove.example.test',
+        origin: 'https://cove.example.test',
+        ...(session ? { 'x-cove-day-plan-session': session } : {}),
       },
     });
     const sessionOptions = { accessMode: 'session', sessionToken: 'secret-value' };
@@ -561,15 +766,15 @@ test('non-loopback day-plan access requires the separate remote session secret',
     assert.equal(hasDayPlanRouteAccess(request('wrong-value'), sessionOptions), false);
     assert.equal(hasDayPlanRouteAccess(request('secret-value'), sessionOptions), true);
 
-    const spoofedForwardedHost = new NextRequest('http://forge.example.test/api/day-plan', {
+    const spoofedForwardedHost = new NextRequest('http://cove.example.test/api/day-plan', {
       headers: {
-        host: 'forge.example.test',
+        host: 'cove.example.test',
         'x-forwarded-host': 'localhost:3200',
       },
     });
     assert.equal(hasDayPlanRouteAccess(spoofedForwardedHost, sessionOptions), false);
 
-    const spoofedDirectHost = new NextRequest('http://forge.example.test/api/day-plan', {
+    const spoofedDirectHost = new NextRequest('http://cove.example.test/api/day-plan', {
       headers: {
         host: 'localhost:3200',
         'x-forwarded-for': '203.0.113.10',
@@ -592,7 +797,7 @@ test('non-loopback day-plan access requires the separate remote session secret',
     const proxiedToLoopback = new NextRequest('http://127.0.0.1:3200/api/day-plan', {
       headers: {
         host: '127.0.0.1:3200',
-        'x-forwarded-host': 'forge.example.test',
+        'x-forwarded-host': 'cove.example.test',
         'x-forwarded-proto': 'https',
       },
     });
@@ -646,7 +851,7 @@ test('loopback mode admits designated tailnet hosts and nothing else', () => {
       false,
     );
     assert.equal(
-      isLoopbackForgeRequest(viaTailnet),
+      isLoopbackCoveRequest(viaTailnet),
       false,
       'the buddy delete-token endpoint stays loopback-only',
     );
@@ -697,21 +902,22 @@ function candidateFor(localDate) {
 }
 
 function gateFixture(t) {
-  const dir = path.join(os.tmpdir(), `forge-route-gate-${process.pid}-${Date.now()}-${Math.random()}`);
+  const dir = path.join(os.tmpdir(), `cove-route-gate-${process.pid}-${Date.now()}-${Math.random()}`);
   mkdirSync(dir, { recursive: true });
-  const store = createDayPlanStore({ dbPath: path.join(dir, 'forge.db') });
+  const dbPath = path.join(dir, 'cove.db');
+  const store = createDayPlanStore({ dbPath });
   const globalRef = globalThis;
-  const previousStore = globalRef.__forgeDayPlanStore;
+  const previousStore = globalRef.__coveDayPlanStore;
   const previousEnv = {
     access: process.env.COVE_DAY_PLAN_ACCESS_MODE,
     token: process.env.COVE_DAY_PLAN_REMOTE_TOKEN,
     hosts: process.env.COVE_ALLOWED_HOSTS,
   };
-  globalRef.__forgeDayPlanStore = store;
+  globalRef.__coveDayPlanStore = store;
   process.env.COVE_DAY_PLAN_ACCESS_MODE = 'loopback';
   t.after(() => {
-    if (previousStore === undefined) delete globalRef.__forgeDayPlanStore;
-    else globalRef.__forgeDayPlanStore = previousStore;
+    if (previousStore === undefined) delete globalRef.__coveDayPlanStore;
+    else globalRef.__coveDayPlanStore = previousStore;
     for (const [key, value] of [
       ['COVE_DAY_PLAN_ACCESS_MODE', previousEnv.access],
       ['COVE_DAY_PLAN_REMOTE_TOKEN', previousEnv.token],
@@ -745,7 +951,7 @@ function gateFixture(t) {
     mutationId: 'ensure:2026-07-10',
     candidates: [candidateFor('2026-07-10')],
   }).plan;
-  return { store, yesterday, today };
+  return { store, yesterday, today, dbPath };
 }
 
 const LOOPBACK_HEADERS = { host: 'localhost:3200', 'x-forwarded-for': '127.0.0.1' };
@@ -762,7 +968,7 @@ async function loopbackPost(body) {
       host: 'localhost:3200',
       origin: 'http://localhost:3200',
       'content-type': 'application/json',
-      'x-forge-csrf': token,
+      'x-cove-csrf': token,
     },
     body: JSON.stringify(body),
   }));
@@ -801,6 +1007,33 @@ test('brief me anyway queues one blind brief, and a double tap never starts a se
   assert.equal(store.listMorningBriefs('2026-07-10').length, 1);
 });
 
+test('brief me anyway supersedes an expired running claim before it queues a retry', async (t) => {
+  const { store, dbPath } = gateFixture(t);
+  const expired = store.enqueueMorningBrief('2026-07-10', {
+    modelAlias: 'opus',
+    effort: 'high',
+    budgetUsd: 1.5,
+  }).brief;
+  store.claimNextMorningBrief();
+  const db = openLocalDatabase(dbPath);
+  db.prepare(
+    "UPDATE day_plan_briefs SET started_at = ?, updated_at = ? WHERE id = ?",
+  ).run(
+    new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    expired.id,
+  );
+  db.close();
+
+  const forced = await loopbackPost({ action: 'brief_force', localDate: '2026-07-10' });
+  assert.equal(forced.status, 200);
+  assert.equal((await forced.json()).briefGeneration.state, 'queued');
+  const rows = store.listMorningBriefs('2026-07-10');
+  assert.equal(rows.length, 2);
+  assert.equal(rows.find((row) => row.id === expired.id).status, 'failed');
+  assert.equal(rows.find((row) => row.id !== expired.id).status, 'queued');
+});
+
 test('brief me anyway never buys a second brief once one is already written', async (t) => {
   const { store } = gateFixture(t);
   const queued = store.enqueueMorningBrief('2026-07-10', {
@@ -818,20 +1051,91 @@ test('brief me anyway never buys a second brief once one is already written', as
   assert.equal(briefs[0].id, queued.brief.id);
 });
 
+test('brief me anyway attaches a refused-management artifact without buying another brief', async (t) => {
+  const { store, yesterday, dbPath } = gateFixture(t);
+  let prior = store.getPlan(yesterday.id);
+  prior = store.mutateDayPlan({
+    planId: prior.id,
+    mutationId: 'settlement:start:refused-management',
+    expectedVersion: prior.version,
+    action: 'settlement_start',
+    completedHumanTaskIds: [prior.items[0].taskId],
+  }).plan;
+  store.mutateDayPlan({
+    planId: prior.id,
+    mutationId: 'settlement:commit:refused-management',
+    expectedVersion: prior.version,
+    action: 'settlement_commit',
+    completedHumanTaskIds: [prior.items[0].taskId],
+  });
+  const today = store.ensureDayPlan({
+    localDate: '2026-07-10',
+    timezone: 'America/Los_Angeles',
+    mutationId: 'ensure:refused-management',
+    candidates: [candidateFor('2026-07-10')],
+  }).plan;
+  store.markArrivalInteraction(today.id, 'interact:refused-management');
+
+  const db = openLocalDatabase(dbPath);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS task_columns (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS tasks (
+      id TEXT PRIMARY KEY, column_id TEXT, title TEXT NOT NULL, description TEXT,
+      priority TEXT, due_at TEXT, due_date TEXT, tags TEXT, project TEXT,
+      position REAL, status TEXT, archived_at TEXT, archived_from_status TEXT,
+      recurring_template_id TEXT, occurrence_local_date TEXT,
+      created_at TEXT, updated_at TEXT
+    );
+    INSERT OR IGNORE INTO task_columns (id, name, position) VALUES ('col-ns', 'Not Started', 0);
+    INSERT OR IGNORE INTO tasks
+      (id, column_id, title, description, priority, tags, position, status, updated_at)
+    VALUES
+      ('task-managed', 'col-ns', 'Human title', '', 'medium', '[]', 0, 'open',
+       '2026-07-10T15:00:00.000Z');
+  `);
+  db.close();
+  const artifact = store.enqueueMorningBrief('2026-07-10', {
+    modelAlias: 'opus', effort: 'high', budgetUsd: 1.5,
+  }).brief;
+  store.claimNextMorningBrief();
+  store.completeMorningBrief(artifact.id, JSON.stringify({
+    headline: 'Focus.', narrativeParagraphs: ['Work.'], lensNarrative: 'Focus.\n\nWork.',
+    existingTaskCandidates: [], suggestedAdditions: [], watchItems: [],
+    boardActions: [{
+      op: 'retitle', taskId: 'task-managed', title: 'Agent title', why: 'Clarify.',
+      evidenceRefs: [], expectedTaskUpdatedAt: '2026-07-10T15:00:00.000Z',
+    }],
+  }));
+  store.stageMorningBriefBoardActions(artifact.id);
+  assert.equal(
+    store.activateBriefBoardActions('2026-07-10', new Date('2026-07-10T16:00:00.000Z')).activated,
+    false,
+  );
+  assert.equal(store.latestEligibleMorningBrief('2026-07-10').id, artifact.id);
+
+  const forced = await loopbackPost({ action: 'brief_force', localDate: '2026-07-10' });
+  assert.equal(forced.status, 200);
+  assert.equal((await forced.json()).attached, true);
+  assert.equal(store.getPlan(today.id).briefId, artifact.id);
+  assert.equal(store.listMorningBriefs('2026-07-10').length, 1);
+});
+
 test('forcing a brief is loopback-only, like every other brief surface', async (t) => {
   const { store } = gateFixture(t);
   const token = (await (await loopbackGet()).json()).csrfToken;
   process.env.COVE_DAY_PLAN_ACCESS_MODE = 'session';
   process.env.COVE_DAY_PLAN_REMOTE_TOKEN = 'secret-value';
-  process.env.COVE_ALLOWED_HOSTS = 'forge.example.test';
-  const remote = await POST(new NextRequest('https://forge.example.test/api/day-plan', {
+  process.env.COVE_ALLOWED_HOSTS = 'cove.example.test';
+  const remote = await POST(new NextRequest('https://cove.example.test/api/day-plan', {
     method: 'POST',
     headers: {
-      host: 'forge.example.test',
-      origin: 'https://forge.example.test',
+      host: 'cove.example.test',
+      origin: 'https://cove.example.test',
       'content-type': 'application/json',
-      'x-forge-csrf': token,
-      'x-forge-day-plan-session': 'secret-value',
+      'x-cove-csrf': token,
+      'x-cove-day-plan-session': 'secret-value',
     },
     body: JSON.stringify({ action: 'brief_force', localDate: '2026-07-10' }),
   }));

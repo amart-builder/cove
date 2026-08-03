@@ -1,4 +1,8 @@
-export type SuggestionKind = "create_task" | "returned_work" | "observed_progress";
+export type SuggestionKind =
+  | "create_task"
+  | "returned_work"
+  | "observed_progress"
+  | "stale_task";
 
 export type SuggestionState =
   | "proposed"
@@ -47,7 +51,7 @@ let csrfToken: string | undefined;
 
 async function fetchQuietCurrentSnapshot(): Promise<QuietCurrentSnapshot> {
   const response = await fetch("/api/quiet-current", { cache: "no-store" });
-  if (!response.ok) throw new Error("Cove couldn't refresh Jarvis suggestions.");
+  if (!response.ok) throw new Error("Cove couldn't refresh its suggestions.");
   const snapshot = (await response.json()) as QuietCurrentSnapshot;
   csrfToken = snapshot.csrfToken;
   return snapshot;
@@ -60,7 +64,7 @@ async function quietCurrentRequest<T>(body?: Record<string, unknown>): Promise<T
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(csrfToken ? { "X-Forge-CSRF": csrfToken } : {}),
+      ...(csrfToken ? { "X-Cove-CSRF": csrfToken } : {}),
     },
     body: JSON.stringify(body),
     cache: "no-store",

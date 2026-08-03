@@ -28,13 +28,15 @@ import {
   stripMorningBriefDateClaim,
   publicMorningBrief,
   selectMorningBriefGeneration,
-  type MorningBriefSalesActionState,
 } from "@/lib/day-plan/brief";
 import {
   maybeQueueMorningBrief,
   withQueuedAttemptStatus,
 } from "@/lib/day-plan/brief-triggers";
-import { morningBriefModelConfig } from "@/lib/claude-execution/brief-commands";
+import {
+  morningBriefModelConfig,
+  morningBriefStaleAfterMs,
+} from "@/lib/claude-execution/brief-commands";
 import { estimateBriefSeconds } from "@/lib/day-plan/presentation";
 import {
   liveRemoteBriefAttempt,
@@ -56,6 +58,9 @@ import {
 } from "@/lib/day-plan/public-execution";
 import { taskColumnKeyForName } from "@/lib/tasks/columns";
 import { coveEnv } from "../../../lib/env";
+import { getRuntimeMode } from "@/lib/runtime/mode";
+import { expireRecurringInstances } from "@/lib/tasks/recurrence";
+import { openLocalDatabase } from "@/lib/local/database";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -93,16 +98,62 @@ const SUPPORTS = new Set([
   "returned_work",
   "priority",
 ]);
+
+export function assertRecurringCarryAllowed(
+  store: Pick<DayPlanStore, "getPlan">,
+  input: Pick<DayPlanMutationInput, "planId" | "itemId">,
+  dbPath?: string,
+): void {
+  const plan = store.getPlan(input.planId);
+  const taskId = plan?.items.find((item) => item.id === input.itemId)?.taskId;
+  if (!taskId) return;
+  const db = openLocalDatabase(dbPath);
+  try {
+    const task = db.prepare(
+      "SELECT tags, recurring_template_id FROM tasks WHERE id = ?",
+    ).get(taskId) as {
+      tags: string | null;
+      recurring_template_id: string | null;
+    } | undefined;
+    let tags: unknown = [];
+    try {
+      tags = JSON.parse(task?.tags ?? "[]");
+    } catch {
+      tags = [];
+    }
+    const recurring = Boolean(task?.recurring_template_id) ||
+      (
+        Array.isArray(tags) &&
+        tags.some((tag) =>
+          typeof tag === "string" && tag.trim().toLowerCase() === "recurring"
+        )
+      );
+    if (recurring) {
+      throw new DayPlanInvalidTransition(
+        "Recurring items end when you close the day and cannot be carried.",
+      );
+    }
+  } finally {
+    db.close();
+  }
+}
 const TASK_SUPPORTS = new Set(["commitment", "deadline", "priority"]);
 const WHY_TODAY = new Set([
   "This is accepted work already in flight.",
   "This is accepted work already committed for today.",
   "This accepted commitment has a verified overdue date.",
   "This accepted commitment has a verified due date today.",
+  "This is overdue and still open.",
+  "This is due today and still open.",
+]);
+const DUE_BACKLOG_WHY_TODAY = new Set([
+  "This is overdue and still open.",
+  "This is due today and still open.",
 ]);
 const RANK_REASONS = new Set([
   "accepted_in_flight",
   "accepted_today",
+  "due_backlog",
   "priority_low",
   "priority_medium",
   "priority_high",
@@ -116,13 +167,6 @@ type ParsedPost =
   | { action: "reconciliation_applied"; reconciliationId: string }
   | { action: "task_mutation_applied"; mutationId: string }
   | { action: "arrival_interact"; planId: string; mutationId: string }
-  | {
-      action: "brief_action";
-      briefId: string;
-      actionIndex: number;
-      state: MorningBriefSalesActionState;
-      editedText?: string;
-    }
   | { action: "brief_force"; localDate: string }
   | { action: DayPlanMutationAction; input: DayPlanMutationInput };
 
@@ -270,7 +314,8 @@ function candidateValue(value: unknown, index: number): RecommendationCandidate 
   if (
     hasDeadline !==
     (whyToday === "This accepted commitment has a verified overdue date." ||
-      whyToday === "This accepted commitment has a verified due date today.")
+      whyToday === "This accepted commitment has a verified due date today." ||
+      DUE_BACKLOG_WHY_TODAY.has(whyToday))
   ) {
     throw new Error("Task candidate reason does not match its deadline evidence.");
   }
@@ -286,9 +331,15 @@ function candidateValue(value: unknown, index: number): RecommendationCandidate 
   }
   if (
     !rankReasons.includes("accepted_today") &&
-    !rankReasons.includes("accepted_in_flight")
+    !rankReasons.includes("accepted_in_flight") &&
+    !rankReasons.includes("due_backlog")
   ) {
-    throw new Error("Task candidate rank must preserve its accepted column.");
+    throw new Error("Task candidate rank must preserve its eligibility source.");
+  }
+  if (
+    rankReasons.includes("due_backlog") !== DUE_BACKLOG_WHY_TODAY.has(whyToday)
+  ) {
+    throw new Error("Due-backlog rank must preserve its open deadline reason.");
   }
   if (
     rankReasons.some((reason) => reason.startsWith("verified_")) !== hasDeadline
@@ -364,6 +415,14 @@ function mutationIdValue(value: unknown): string {
   })!;
 }
 
+function creationValue(value: unknown): "automatic" | "manual" {
+  const creation = stringValue(value, "creation", { max: 20 }) ?? "automatic";
+  if (creation !== "automatic" && creation !== "manual") {
+    throw new Error("creation must be automatic or manual.");
+  }
+  return creation;
+}
+
 export function parseDayPlanPostBody(value: unknown): ParsedPost {
   const body = recordValue(value, "request body");
   const action = stringValue(body.action, "action", { required: true, max: 40 });
@@ -387,6 +446,7 @@ export function parseDayPlanPostBody(value: unknown): ParsedPost {
         timezone: timezoneValue(body.timezone),
         mutationId: mutationIdValue(body.mutationId),
         candidates,
+        creation: creationValue(body.creation),
         // Late-brief poll mode: attach-or-silent-no-op, never a new plan or a
         // ledger row (only a real brief_attach records anything).
         ...(body.attachOnly === true ? { attachOnly: true } : {}),
@@ -419,24 +479,6 @@ export function parseDayPlanPostBody(value: unknown): ParsedPost {
   if (action === "brief_force") {
     return { action, localDate: localDateValue(body.localDate) };
   }
-  if (action === "brief_action") {
-    const state = stringValue(body.state, "state", { required: true, max: 20 });
-    if (state !== "approved" && state !== "edited" && state !== "skipped") {
-      throw new Error("Unknown brief action state.");
-    }
-    const actionIndex = body.actionIndex;
-    if (!Number.isInteger(actionIndex) || (actionIndex as number) < 0) {
-      throw new Error("actionIndex must be a non-negative integer.");
-    }
-    return {
-      action,
-      briefId: stringValue(body.briefId, "briefId", { required: true, max: 200 })!,
-      actionIndex: actionIndex as number,
-      state,
-      editedText: stringValue(body.editedText, "editedText", { max: 2400 }),
-    };
-  }
-
   if (!action || !ACTIONS.has(action as DayPlanMutationAction)) {
     throw new Error("Unknown day-plan action.");
   }
@@ -461,7 +503,7 @@ export function parseDayPlanPostBody(value: unknown): ParsedPost {
   if (action === "item_add" && !owner) throw new Error("owner is required.");
   const disposition = stringValue(body.disposition, "disposition", { max: 20 });
   if (disposition && !DISPOSITIONS.has(disposition as SettlementDisposition)) {
-    throw new Error("Unknown settlement disposition.");
+    throw new Error("Unknown closing choice.");
   }
   const progressNote = stringValue(body.progressNote, "progressNote", { max: 500 });
   const nextStep = stringValue(body.nextStep, "nextStep", { max: 200 });
@@ -469,7 +511,7 @@ export function parseDayPlanPostBody(value: unknown): ParsedPost {
     (progressNote || nextStep) &&
     (action !== "settlement_decide" || disposition !== "progress")
   ) {
-    throw new Error("Progress details must belong to a Progress settlement decision.");
+    throw new Error("Progress details must use the Progress choice.");
   }
   const position = body.position;
   if (position !== undefined && !Number.isInteger(position)) {
@@ -499,7 +541,7 @@ export function parseDayPlanPostBody(value: unknown): ParsedPost {
       completedHumanTaskIds: stringArray(
         body.completedHumanTaskIds,
         "completedHumanTaskIds",
-        { maxItems: 3, maxLength: 200 },
+        { maxItems: 10, maxLength: 200 },
       ),
       nextDayNote: nextDayNoteValue(body.nextDayNote),
     },
@@ -533,8 +575,8 @@ function readModelMorningBrief(
     return publicMorningBrief(
       artifact,
       dated.brief,
-      store.listMorningBriefSalesActionStates(artifact.id),
       accessMode,
+      store.morningBriefManagementSummary(artifact.id),
     );
   } catch {
     return undefined;
@@ -560,7 +602,10 @@ function readModelBriefGeneration(
       store.listMorningBriefs(plan.localDate),
       plan.localDate,
       new Date(),
-      { remoteAttempt: remoteAttempt ? { startedAt: remoteAttempt.startedAt } : undefined },
+      {
+        remoteAttempt: remoteAttempt ? { startedAt: remoteAttempt.startedAt } : undefined,
+        runningStaleAfterMs: morningBriefStaleAfterMs(),
+      },
     );
     // Only a live run needs an estimate, and only a live run pays for the query.
     if (generation.state !== "queued" && generation.state !== "running") return generation;
@@ -632,6 +677,11 @@ export async function GET(request: NextRequest) {
   }
   try {
     const store = getDayPlanStore();
+    try {
+      store.initialize();
+    } catch (error) {
+      console.error("Day plan initialization skipped.", error);
+    }
     const accessMode = currentDayPlanAccessMode();
     // One read model read: the projection is derived from the same plan the
     // response carries, so plan.briefId and the brief id always agree.
@@ -663,7 +713,7 @@ export async function POST(request: NextRequest) {
   if (!hasDayPlanRouteAccess(request)) {
     return NextResponse.json({ error: "Untrusted request host." }, { status: 403 });
   }
-  const suppliedToken = request.headers.get("x-forge-csrf");
+  const suppliedToken = request.headers.get("x-cove-csrf");
   if (!suppliedToken || suppliedToken !== getQuietCurrentCsrfToken()) {
     return NextResponse.json({ error: "Cove request token is missing." }, { status: 403 });
   }
@@ -679,24 +729,6 @@ export async function POST(request: NextRequest) {
     }
     const parsed = parseDayPlanPostBody(JSON.parse(text) as unknown);
     const store = getDayPlanStore();
-    if (parsed.action === "brief_action") {
-      // Brief content (contacts, drafts) is loopback-only; so is marking it.
-      if (currentDayPlanAccessMode() !== "loopback") {
-        return NextResponse.json(
-          { error: "Morning brief actions are only available on this machine." },
-          { status: 403 },
-        );
-      }
-      store.setMorningBriefSalesActionState(
-        parsed.briefId,
-        parsed.actionIndex,
-        parsed.state,
-        parsed.editedText,
-      );
-      return NextResponse.json({
-        states: store.listMorningBriefSalesActionStates(parsed.briefId),
-      });
-    }
     if (parsed.action === "brief_force") {
       // "Brief me anyway": the one path that writes a brief past the gate. It is
       // loopback-only for the same reason brief content is.
@@ -710,6 +742,8 @@ export async function POST(request: NextRequest) {
       // the Mini already finished and synced to disk is invisible here and the
       // tap buys a second generation of a brief we own.
       scanAndImportBriefRelay({ store, targetLocalDate: parsed.localDate });
+      const staleBefore = new Date(Date.now() - morningBriefStaleAfterMs()).toISOString();
+      store.interruptStaleMorningBriefs(staleBefore);
       // Idempotent by design, because this button is the one a frustrated person
       // taps twice. A finished brief already exists, or this machine has a live
       // row, or the peer is mid-generation: in all three cases the answer is the
@@ -764,10 +798,21 @@ export async function POST(request: NextRequest) {
       // failure: omitting the optional ids preserves the plan's last-known
       // decisions and still lets the Settlement dialog open.
       try {
-        parsed.input.completedHumanTaskIds = await completedPlanTaskIds(plan);
+        parsed.input.completedHumanTaskIds = stringArray(
+          await completedPlanTaskIds(plan),
+          "completedHumanTaskIds",
+          { maxItems: 10, maxLength: 200 },
+        );
       } catch {
         parsed.input.completedHumanTaskIds = undefined;
       }
+    }
+    if (
+      parsed.action === "settlement_decide" &&
+      parsed.input.disposition === "carry" &&
+      getRuntimeMode() === "local"
+    ) {
+      assertRecurringCarryAllowed(store, parsed.input);
     }
     const result = parsed.action === "ensure"
       ? store.ensureDayPlan(parsed.input)
@@ -776,6 +821,15 @@ export async function POST(request: NextRequest) {
         : parsed.action === "task_mutation_applied"
           ? store.acknowledgeTaskMutation(parsed.mutationId)
         : store.mutateDayPlan(parsed.input);
+    if (
+      parsed.action === "settlement_commit" &&
+      getRuntimeMode() === "local" &&
+      "plan" in result
+    ) {
+      expireRecurringInstances({
+        localDate: result.plan.localDate,
+      });
+    }
     // Trigger-driven enqueues announce themselves to the relay as `queued`
     // immediately (see withQueuedAttemptStatus), closing the enqueue→claim
     // duplicate-generation window.
@@ -829,7 +883,10 @@ export async function POST(request: NextRequest) {
         }
       : result;
     return NextResponse.json(publicResult, {
-      status: parsed.action === "ensure" ? 201 : 200,
+      status:
+        parsed.action === "ensure" && !("weekendGate" in result)
+          ? 201
+          : 200,
     });
   } catch (error) {
     if (error instanceof DayPlanVersionConflict) {
@@ -853,7 +910,7 @@ export async function POST(request: NextRequest) {
     }
     if (
       error instanceof Error &&
-      /required|invalid|unknown|must|supports|candidate|too long/i.test(error.message)
+      /required|invalid|unknown|must|supports|candidate|too long|too many/i.test(error.message)
     ) {
       return NextResponse.json({ error: error.message }, { status: 400 });
     }

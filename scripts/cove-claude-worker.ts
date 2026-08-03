@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import path from "node:path";
 import { createDayPlanStore } from "../src/lib/day-plan/store";
@@ -20,6 +21,11 @@ import {
 } from "../src/lib/autonomy/groundwork";
 import { triageRecordedEvent } from "../src/lib/intake/run";
 import { coveEnv } from "../src/lib/env";
+import {
+  currentBootId,
+  pruneSpawnedChildren,
+  reapSpawnedChildren,
+} from "../src/lib/claude-execution/child-process-registry";
 
 async function main(): Promise<number> {
   const laneIndex = process.argv.indexOf("--lane");
@@ -32,7 +38,7 @@ async function main(): Promise<number> {
   if (!existsSync(claudePath)) {
     return 4;
   }
-  const dbPath = coveEnv("DB_PATH") ?? path.join(repoDir, "data", "forge.db");
+  const dbPath = coveEnv("DB_PATH") ?? path.join(repoDir, "data", "cove.db");
   if (lane === "groundwork") {
     const shutdown = new AbortController();
     const stop = () => shutdown.abort();
@@ -64,7 +70,10 @@ async function main(): Promise<number> {
     requireSourceCheckpoint: coveEnv("BRIEF_REQUIRE_SOURCE_CHECKPOINT") === "1",
   };
   const heartbeatPath = path.join(repoDir, "data", "claude-worker.heartbeat");
+  const childServerGeneration = randomUUID();
+  const childBootId = currentBootId();
   let heartbeat: NodeJS.Timeout | undefined;
+  let orphanReaper: NodeJS.Timeout | undefined;
   try {
     const shutdown = new AbortController();
     const stop = () => shutdown.abort();
@@ -78,7 +87,24 @@ async function main(): Promise<number> {
       fallbackCwd: repoDir,
       abortSignal: shutdown.signal,
       relay,
+      receiptDbPath: dbPath,
+      childServerGeneration,
+      childBootId,
     };
+    pruneSpawnedChildren({ dbPath });
+    reapSpawnedChildren({ dbPath, serverGeneration: childServerGeneration, bootId: childBootId });
+    orphanReaper = setInterval(() => {
+      try {
+        reapSpawnedChildren({
+          dbPath,
+          serverGeneration: childServerGeneration,
+          bootId: childBootId,
+        });
+      } catch (error) {
+        console.error("Claude child reaper failed; continuing.", error);
+      }
+    }, 30_000);
+    orphanReaper.unref();
     if (lane === "watch") {
       mkdirSync(path.dirname(heartbeatPath), { recursive: true, mode: 0o700 });
       const writeHeartbeat = () => writeFileSync(
@@ -144,6 +170,7 @@ async function main(): Promise<number> {
     return 0;
   } finally {
     if (heartbeat) clearInterval(heartbeat);
+    if (orphanReaper) clearInterval(orphanReaper);
     if (lane === "watch") rmSync(heartbeatPath, { force: true });
     store.close();
   }

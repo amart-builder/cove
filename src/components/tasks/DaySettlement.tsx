@@ -10,6 +10,11 @@ import {
   staleSettlementNotice,
   type SettlementDecision,
 } from '@/lib/day-plan/presentation';
+import {
+  TASK_SESSION_STATUS_LABELS,
+  type TaskSessionRunStatus,
+} from '@/lib/task-sessions/types';
+import { taskSessionSettlementNote } from '@/lib/task-sessions/presentation';
 
 const DECISIONS: Array<{
   value: SettlementDecision;
@@ -28,12 +33,14 @@ export type SettlementCompletedItem = {
   id: string;
   title: string;
   detail?: string;
+  sessionStatus?: TaskSessionRunStatus;
 };
 
 export type SettlementOpenItem = {
   item: DayPlanItem;
   title: string;
   outcome?: string;
+  sessionStatus?: TaskSessionRunStatus;
 };
 
 interface DaySettlementProps {
@@ -58,6 +65,16 @@ interface DaySettlementProps {
   onCancel: () => void;
   onNoteChange: (note: string) => void;
   onCloseDay: () => void | Promise<void>;
+}
+
+// Nearest ancestor that actually scrolls, so the note's auto-grow can put the
+// scroll position back exactly where it found it.
+function scrollParentOf(element: HTMLElement): HTMLElement | null {
+  for (let node = element.parentElement; node; node = node.parentElement) {
+    const { overflowY } = getComputedStyle(node);
+    if (overflowY === 'auto' || overflowY === 'scroll') return node;
+  }
+  return null;
 }
 
 export default function DaySettlement({
@@ -90,8 +107,36 @@ export default function DaySettlement({
   useLayoutEffect(() => {
     const textarea = noteRef.current;
     if (!textarea) return;
-    textarea.style.height = 'auto';
-    textarea.style.height = `${textarea.scrollHeight}px`;
+    // Measuring the note means collapsing it to 'auto' first, which briefly
+    // shrinks the card. The scroll container clamps its scrollTop to that
+    // smaller content, and growing the note back does not restore the scroll,
+    // so once the note ran past one screen every keystroke threw the view back
+    // to the top. Measured at 1440x813: 464 -> 0 on the first keystroke.
+    // Put the position back in the same frame, before the browser paints.
+    const fit = () => {
+      const scroller = scrollParentOf(textarea);
+      const restoreTop = scroller ? scroller.scrollTop : window.scrollY;
+      textarea.style.height = 'auto';
+      textarea.style.height = `${textarea.scrollHeight}px`;
+      if (scroller) scroller.scrollTop = restoreTop;
+      else window.scrollTo(window.scrollX, restoreTop);
+    };
+    fit();
+    // The height above is a pixel value measured at one width. Narrow the
+    // window (or change the font size) and the same text wraps onto more
+    // lines, but the note is still the height it needed before, and the extra
+    // lines are cut off by its overflow-hidden with no scrollbar to find them.
+    // Nothing about that changes `note`, so only watching the box itself
+    // catches it. Comparing widths keeps our own height writes from
+    // retriggering the observer.
+    let lastWidth = textarea.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (textarea.clientWidth === lastWidth) return;
+      lastWidth = textarea.clientWidth;
+      fit();
+    });
+    observer.observe(textarea);
+    return () => observer.disconnect();
   }, [note]);
   const allDecided = allSettlementDecisionsMade(
     unresolved.map((view) => view.item),
@@ -158,7 +203,7 @@ export default function DaySettlement({
       >
         <div className="max-h-[calc(100dvh-7rem)] overflow-y-auto">
           <header className="sticky top-0 z-10 border-b bg-background/95 px-4 py-5 backdrop-blur sm:px-7">
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">Day settlement</p>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">Closing your day</p>
             <p className="mt-2 text-xs text-muted-foreground">
               Closing <time dateTime={plan.localDate}>{planDateLabel}</time>
             </p>
@@ -187,6 +232,11 @@ export default function DaySettlement({
                     <li key={item.id} className="rounded-xl border bg-card px-4 py-3">
                       <p className="text-sm font-medium text-foreground">{item.title}</p>
                       {item.detail && <p className="mt-1 text-xs text-muted-foreground">{item.detail}</p>}
+                      {item.sessionStatus && (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          Claude session: {TASK_SESSION_STATUS_LABELS[item.sessionStatus]}.
+                        </p>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -196,11 +246,12 @@ export default function DaySettlement({
             </section>
 
             <section aria-labelledby={`${titleId}-unresolved`}>
-              <h2 id={`${titleId}-unresolved`} className="text-base font-semibold">Unresolved commitments</h2>
+              <h2 id={`${titleId}-unresolved`} className="text-base font-semibold">Still open</h2>
               {unresolved.length > 0 ? (
                 <ol className="mt-3 space-y-3">
                   {unresolved.map((view, index) => {
                     const saving = savingItemIds.has(view.item.id);
+                    const sessionNote = taskSessionSettlementNote(view.sessionStatus);
                     return (
                       <li key={view.item.id}>
                         <article className="rounded-2xl border bg-card p-4 sm:p-5">
@@ -217,6 +268,11 @@ export default function DaySettlement({
                           )}
                           {view.item.workedToday === true && (
                             <p className="mt-2 text-xs text-muted-foreground">Claude worked on this today.</p>
+                          )}
+                          {sessionNote && (
+                            <p className="mt-2 text-xs text-muted-foreground">
+                              {sessionNote}
+                            </p>
                           )}
 
                           <fieldset className="mt-4" disabled={anyDecisionSaving || closing}>
@@ -294,7 +350,7 @@ export default function DaySettlement({
                   })}
                 </ol>
               ) : (
-                <p className="mt-2 text-sm text-muted-foreground">There are no unresolved essential outcomes.</p>
+                <p className="mt-2 text-sm text-muted-foreground">Nothing is still open.</p>
               )}
             </section>
 
@@ -324,7 +380,7 @@ export default function DaySettlement({
                 rows={3}
                 disabled={closing}
                 onChange={(event) => onNoteChange(event.target.value)}
-                placeholder="Anything I couldn't see today — who texted you, what you decided, ideas, and anything you want me to take care of."
+                placeholder="Anything I couldn't see today: who texted you, what you decided, ideas, and anything you want me to take care of."
                 className="mt-3 min-h-24 w-full resize-none overflow-hidden border-0 bg-transparent p-0 text-sm leading-relaxed text-foreground outline-none placeholder:text-muted-foreground focus:ring-0 disabled:opacity-60"
               />
             </section>

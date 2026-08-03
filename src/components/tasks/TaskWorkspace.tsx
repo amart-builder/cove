@@ -20,8 +20,14 @@ export default function TaskWorkspace() {
   // initial state is what keeps the server and client markup identical.
   useEffect(() => {
     const requested = new URLSearchParams(window.location.search).get('view');
-    if (requested === 'all-work') setView('all-work');
-    else if (requested === 'today' && quietCurrentAvailable) setView('today');
+    const requestedView = requested === 'all-work'
+      ? 'all-work'
+      : requested === 'today' && quietCurrentAvailable
+        ? 'today'
+        : undefined;
+    if (!requestedView) return;
+    const update = window.setTimeout(() => setView(requestedView), 0);
+    return () => window.clearTimeout(update);
   }, [quietCurrentAvailable]);
 
   return (
@@ -62,7 +68,7 @@ export default function TaskWorkspace() {
           id="convex-today-notice"
           className="shrink-0 border-b px-4 py-2 text-center text-xs text-muted-foreground"
         >
-          Today is paused for this Convex workspace until its Quiet Current flow is verified. All Work remains available.
+          Today is paused for this cloud workspace until its planning flow is verified. All Work remains available.
         </p>
       )}
       <div className="min-h-0 flex-1">

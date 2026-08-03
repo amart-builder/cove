@@ -15,10 +15,19 @@ Turn a natural-language request into a task on the local Cove board at
 `http://localhost:3200`, with a sensible due date and a reminder. Confirm in one
 short, human sentence when done.
 
-## 1. Read the board
+## 1. Read the request token and board
+
+Read the current day-plan state first. Keep its `csrfToken`; every POST or
+PATCH below must send it as `X-Cove-CSRF`.
 
 ```bash
-curl -s 'http://localhost:3200/api/forge-rest/task_columns?select=*&order=position.asc'
+curl -s 'http://localhost:3200/api/day-plan'
+```
+
+Then read the board:
+
+```bash
+curl -s 'http://localhost:3200/api/cove-rest/task_columns?select=*&order=position.asc'
 ```
 
 Columns are: **Not Started**, **Must happen today**, **In Flight / Waiting**,
@@ -46,7 +55,7 @@ no time, use `09:00:00` that morning.
 1. Current open tasks and their due dates, to avoid piling everything on one
    day:
    ```bash
-   curl -s 'http://localhost:3200/api/forge-rest/tasks?select=title,due_at,priority,status&status=eq.open'
+   curl -s 'http://localhost:3200/api/cove-rest/tasks?select=title,due_at,priority,status&status=eq.open'
    ```
 2. The user's priorities in their `CLAUDE.md` (check `~/.claude/CLAUDE.md` and
    any project `CLAUDE.md`). Higher-priority themes get sooner dates.
@@ -77,8 +86,9 @@ they can correct it.
 ## 6. Create the task
 
 ```bash
-curl -s -X POST 'http://localhost:3200/api/forge-rest/tasks' \
+curl -s -X POST 'http://localhost:3200/api/cove-rest/tasks' \
   -H 'Content-Type: application/json' \
+  -H 'X-Cove-CSRF: <token from the day-plan GET>' \
   -d '{
     "column_id": "<chosen column id>",
     "title": "<title>",

@@ -20,8 +20,8 @@ type ActiveBuddyTurn = {
 };
 
 type BuddyProcessGlobal = {
-  __forgeActiveBuddyTurn?: ActiveBuddyTurn;
-  __forgeBuddyShutdownHandlersRegistered?: boolean;
+  __coveActiveBuddyTurn?: ActiveBuddyTurn;
+  __coveBuddyShutdownHandlersRegistered?: boolean;
 };
 
 function buddyProcessGlobal(): BuddyProcessGlobal {
@@ -29,7 +29,7 @@ function buddyProcessGlobal(): BuddyProcessGlobal {
 }
 
 function stopActiveBuddyTurn(): void {
-  const active = buddyProcessGlobal().__forgeActiveBuddyTurn;
+  const active = buddyProcessGlobal().__coveActiveBuddyTurn;
   if (!active) return;
   if (active.child) signalProcessGroup(active.child, "SIGTERM");
   try {
@@ -41,13 +41,13 @@ function stopActiveBuddyTurn(): void {
   } catch {
     // Process shutdown is best-effort; never prevent the server from exiting.
   }
-  buddyProcessGlobal().__forgeActiveBuddyTurn = undefined;
+  buddyProcessGlobal().__coveActiveBuddyTurn = undefined;
 }
 
 function ensureBuddyShutdownHandlers(): void {
   const global = buddyProcessGlobal();
-  if (global.__forgeBuddyShutdownHandlersRegistered) return;
-  global.__forgeBuddyShutdownHandlersRegistered = true;
+  if (global.__coveBuddyShutdownHandlersRegistered) return;
+  global.__coveBuddyShutdownHandlersRegistered = true;
   process.once("SIGTERM", () => {
     stopActiveBuddyTurn();
     process.exit(143);
@@ -65,16 +65,16 @@ export function registerActiveBuddyTurn(
 ): () => void {
   ensureBuddyShutdownHandlers();
   const active = { store, turnId };
-  buddyProcessGlobal().__forgeActiveBuddyTurn = active;
+  buddyProcessGlobal().__coveActiveBuddyTurn = active;
   return () => {
-    if (buddyProcessGlobal().__forgeActiveBuddyTurn === active) {
-      buddyProcessGlobal().__forgeActiveBuddyTurn = undefined;
+    if (buddyProcessGlobal().__coveActiveBuddyTurn === active) {
+      buddyProcessGlobal().__coveActiveBuddyTurn = undefined;
     }
   };
 }
 
 function registerActiveBuddyChild(child: ChildProcessWithoutNullStreams): () => void {
-  const active = buddyProcessGlobal().__forgeActiveBuddyTurn;
+  const active = buddyProcessGlobal().__coveActiveBuddyTurn;
   if (!active) return () => {};
   active.child = child;
   return () => {
@@ -117,6 +117,15 @@ export function isBuddyContextOverflow(
     .test(done.resultText);
 }
 
+export function isBuddyResumeExecutionFailure(
+  done: BuddyStreamEvent & { kind: "done" },
+  streamedText: string,
+): boolean {
+  if (!done.isError || done.resultText.trim() || streamedText.trim()) return false;
+  const subtype = done.errorSubtype?.toLowerCase().replace(/[^a-z0-9]+/g, "_") ?? "";
+  return subtype === "error_during_execution";
+}
+
 function record(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -142,7 +151,9 @@ function resultText(value: unknown): string {
   }).filter(Boolean).join("\n");
 }
 
-export function createBuddyEventParser() {
+export function createBuddyEventParser(
+  options: { expectsStructuredOutput?: boolean } = {},
+) {
   const seenTools = new Set<string>();
   const buddyDataTools = new Set<string>();
   const seenToolResults = new Set<string>();
@@ -204,9 +215,12 @@ export function createBuddyEventParser() {
       return results;
     }
     if (event.type === "result" && typeof event.session_id === "string") {
+      const structuredOutput = event.structured_output ?? event.structuredOutput;
       return [{
         kind: "done",
-        resultText: typeof event.result === "string" ? event.result : "",
+        resultText: options.expectsStructuredOutput && structuredOutput !== undefined
+          ? JSON.stringify({ structured_output: structuredOutput })
+          : typeof event.result === "string" ? event.result : "",
         sessionId: event.session_id,
         costUsd: typeof event.total_cost_usd === "number" ? event.total_cost_usd : 0,
         isError: event.is_error === true,
@@ -226,7 +240,9 @@ export async function runBuddyCommand(
 ): Promise<BuddyStreamEvent & { kind: "done" }> {
   const timeoutMs = options.timeoutMs ?? BUDDY_COMMAND_TIMEOUT_MS;
   const graceMs = options.terminationGraceMs ?? BUDDY_COMMAND_TERMINATION_GRACE_MS;
-  const parse = createBuddyEventParser();
+  const parse = createBuddyEventParser({
+    expectsStructuredOutput: command.expectsStructuredOutput === true,
+  });
 
   return new Promise((resolve, reject) => {
     let child: ChildProcessWithoutNullStreams;

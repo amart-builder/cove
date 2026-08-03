@@ -17,6 +17,9 @@ export type ArrivalTask = {
   dueAt?: string;
   tags: string[];
   status?: ArrivalTaskStatus;
+  proposedRecurrenceCadence?: string;
+  recurringTemplateId?: string;
+  occurrenceLocalDate?: string;
   blocked: boolean;
   position: number;
   createdAt: number;
@@ -33,7 +36,7 @@ export type ArrivalSnapshot = {
 type StorageReader = Pick<Storage, 'getItem'>;
 type StorageWriter = Pick<Storage, 'setItem'>;
 
-export const ARRIVAL_CACHE_KEY = 'forge.quiet-current.arrival.v1';
+export const ARRIVAL_CACHE_KEY = 'cove.quiet-current.arrival.v1';
 export const ARRIVAL_CACHE_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
@@ -70,6 +73,12 @@ function isArrivalTask(value: unknown): value is ArrivalTask {
     Array.isArray(value.tags) &&
     value.tags.every((tag) => typeof tag === 'string') &&
     (status === undefined || status === 'open' || status === 'done' || status === 'archived') &&
+    (value.proposedRecurrenceCadence === undefined ||
+      typeof value.proposedRecurrenceCadence === 'string') &&
+    (value.recurringTemplateId === undefined ||
+      typeof value.recurringTemplateId === 'string') &&
+    (value.occurrenceLocalDate === undefined ||
+      typeof value.occurrenceLocalDate === 'string') &&
     typeof value.blocked === 'boolean' &&
     isFiniteNumber(value.position) &&
     isFiniteNumber(value.createdAt) &&

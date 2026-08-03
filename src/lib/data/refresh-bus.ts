@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from 'react';
 
-const EVENT_NAME = 'forge:data-changed';
+const EVENT_NAME = 'cove:data-changed';
 
 export function emitDataChanged(tables: string[]): void {
   if (typeof window === 'undefined') return;
@@ -14,7 +14,9 @@ export function emitDataChanged(tables: string[]): void {
 export function useDataChanged(tables: string[], callback: () => void): void {
   const callbackRef = useRef(callback);
   const tableKey = tables.join('\u0000');
-  callbackRef.current = callback;
+  useEffect(() => {
+    callbackRef.current = callback;
+  }, [callback]);
   useEffect(() => {
     const subscribed = new Set(tableKey.split('\u0000').filter(Boolean));
     const onChanged = (rawEvent: Event) => {

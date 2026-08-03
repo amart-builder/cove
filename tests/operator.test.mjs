@@ -13,7 +13,7 @@ import {
 } from '../src/lib/operator.ts';
 
 function fixture(t) {
-  const dir = path.join(os.tmpdir(), `forge-operator-${process.pid}-${Date.now()}-${Math.random()}`);
+  const dir = path.join(os.tmpdir(), `cove-operator-${process.pid}-${Date.now()}-${Math.random()}`);
   mkdirSync(dir, { recursive: true });
   const profilePath = path.join(dir, 'cove-profile.json');
   const previousProfilePath = process.env.COVE_PROFILE_PATH;
@@ -75,18 +75,18 @@ test('workspace root uses a trimmed env override, then an existing legacy Atlas 
   }), null);
 });
 
-test('forge data directory prefers an explicit argument, then COVE_DATA_DIR', (t) => {
+test('cove data directory prefers an explicit argument, then COVE_DATA_DIR', (t) => {
   const previous = process.env.COVE_DATA_DIR;
   t.after(() => {
     if (previous === undefined) delete process.env.COVE_DATA_DIR;
     else process.env.COVE_DATA_DIR = previous;
   });
-  process.env.COVE_DATA_DIR = ' /srv/forge-data ';
-  assert.equal(coveDataDir(), '/srv/forge-data');
-  assert.equal(coveDataDir('/tmp/explicit-forge-data'), '/tmp/explicit-forge-data');
+  process.env.COVE_DATA_DIR = ' /srv/cove-data ';
+  assert.equal(coveDataDir(), '/srv/cove-data');
+  assert.equal(coveDataDir('/tmp/explicit-cove-data'), '/tmp/explicit-cove-data');
 });
 
-test('operatorTimezone prefers the env var, then the profile, then this machine', (t) => {
+test('operatorTimezone prefers the shared profile, then the env var, then this machine', (t) => {
   const { profilePath } = fixture(t);
   const previousZone = process.env.COVE_TIMEZONE;
   t.after(() => {
@@ -99,16 +99,19 @@ test('operatorTimezone prefers the env var, then the profile, then this machine'
   assert.equal(operatorTimezone(), 'America/New_York');
 
   process.env.COVE_TIMEZONE = 'Europe/Lisbon';
-  assert.equal(operatorTimezone(), 'Europe/Lisbon');
+  assert.equal(operatorTimezone(), 'America/New_York');
 
   // A garbage zone must not be handed to Intl, where it throws at format time
   // rather than here. It falls through to the next source instead.
   process.env.COVE_TIMEZONE = 'Not/AZone';
   assert.equal(operatorTimezone(), 'America/New_York');
 
+  writeFileSync(profilePath, JSON.stringify({ name: 'Jamie' }));
+  process.env.COVE_TIMEZONE = 'Europe/Lisbon';
+  assert.equal(operatorTimezone(), 'Europe/Lisbon');
+
   // With no env var and no usable profile value, fall back to this machine's
   // zone rather than a hardcoded one.
   delete process.env.COVE_TIMEZONE;
-  writeFileSync(profilePath, JSON.stringify({ name: 'Jamie' }));
   assert.equal(operatorTimezone(), Intl.DateTimeFormat().resolvedOptions().timeZone);
 });

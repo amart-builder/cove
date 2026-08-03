@@ -127,6 +127,14 @@ export async function GET(request: NextRequest) {
     const plan = store.getPlan(planId);
     if (!plan) throw new DayPlanNotFound();
     const accessMode = currentDayPlanAccessMode();
+    if (request.nextUrl.searchParams.get("statusOnly") === "1") {
+      return NextResponse.json({
+        runs: store.listExecutionRuns(plan.id).map((run) =>
+          publicExecutionRun(run, accessMode),
+        ),
+        workerAvailable: isClaudeWorkerAvailable(),
+      });
+    }
     return NextResponse.json({
       items: plan.items.map((item) => ({
         itemId: item.id,
@@ -150,7 +158,7 @@ export async function POST(request: NextRequest) {
   if (!hasDayPlanRouteAccess(request)) {
     return NextResponse.json({ error: "Untrusted request host." }, { status: 403 });
   }
-  if (request.headers.get("x-forge-csrf") !== getQuietCurrentCsrfToken()) {
+  if (request.headers.get("x-cove-csrf") !== getQuietCurrentCsrfToken()) {
     return NextResponse.json({ error: "Cove request token is missing." }, { status: 403 });
   }
   try {

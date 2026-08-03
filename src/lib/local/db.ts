@@ -2,20 +2,20 @@
  * Local SQLite backend for Cove.
  *
  * This is the default data layer: everything lives in a single file
- * (data/forge.db by default), no account and no login required. The app's
- * data layer talks to `/api/forge-rest/[table]` using a small subset of
+ * (data/cove.db by default), no account and no login required. The app's
+ * data layer talks to `/api/cove-rest/[table]` using a small subset of
  * PostgREST query syntax; this module answers those same requests against
  * SQLite so the existing UI works unchanged.
  *
  * Only runs on the server (Node runtime). Never imported into client code.
  */
-import Database from "better-sqlite3";
+import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import path from "node:path";
-import { COVE_REST_TABLES } from "../data/forge-tables";
+import { COVE_REST_TABLES } from "../data/cove-tables";
 import { TASK_COLUMNS } from "../tasks/columns";
-import { coveEnv } from "../env";
+import { syncRecurringOccurrenceForTask } from "../tasks/recurrence";
+import { recordFailureInDatabase } from "../reliability/failures";
+import { localDatabasePath, openLocalDatabase } from "./database";
 
 export type RestResult = { status: number; body?: unknown };
 
@@ -58,236 +58,26 @@ const OPERATORS: Record<string, string> = {
   ilike: "LIKE", // SQLite LIKE is already case-insensitive for ASCII
 };
 
-// Keep this schema in sync with src/lib/data/types.ts. There is no migration
-// system; columns the app sends that don't exist here are silently dropped.
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS task_columns (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  position INTEGER NOT NULL DEFAULT 0,
-  is_default INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT,
-  updated_at TEXT
-);
-CREATE TABLE IF NOT EXISTS tasks (
-  id TEXT PRIMARY KEY,
-  column_id TEXT,
-  title TEXT NOT NULL,
-  description TEXT DEFAULT '',
-  priority TEXT DEFAULT 'medium',
-  due_at TEXT,
-  tags TEXT DEFAULT '[]',
-  project TEXT NOT NULL DEFAULT 'Atlas',
-  position INTEGER DEFAULT 0,
-  status TEXT DEFAULT 'open',
-  source_type TEXT DEFAULT 'manual',
-  remind_native INTEGER DEFAULT 1,
-  remind_text INTEGER DEFAULT 0,
-  notified_at TEXT,
-  created_at TEXT,
-  updated_at TEXT
-);
-CREATE TABLE IF NOT EXISTS companies (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  domain TEXT,
-  website TEXT,
-  industry TEXT,
-  location TEXT,
-  linkedin TEXT,
-  description TEXT,
-  tags TEXT DEFAULT '[]',
-  notes TEXT DEFAULT '',
-  last_interaction_at TEXT,
-  created_at TEXT,
-  updated_at TEXT
-);
-CREATE TABLE IF NOT EXISTS contacts (
-  id TEXT PRIMARY KEY,
-  company_id TEXT,
-  name TEXT NOT NULL,
-  email TEXT,
-  phone TEXT,
-  role TEXT,
-  linkedin TEXT,
-  location TEXT,
-  how_we_met TEXT,
-  tier TEXT DEFAULT 'C',
-  tags TEXT DEFAULT '[]',
-  notes TEXT DEFAULT '',
-  last_interaction_at TEXT,
-  created_at TEXT,
-  updated_at TEXT
-);
-CREATE TABLE IF NOT EXISTS contact_activities (
-  id TEXT PRIMARY KEY,
-  contact_id TEXT,
-  company_id TEXT,
-  activity_type TEXT,
-  title TEXT,
-  content TEXT,
-  direction TEXT,
-  created_at TEXT,
-  updated_at TEXT
-);
-CREATE TABLE IF NOT EXISTS email_items (
-  id TEXT PRIMARY KEY,
-  contact_id TEXT,
-  company_id TEXT,
-  message_id TEXT,
-  thread_id TEXT,
-  classification TEXT,
-  status TEXT DEFAULT 'pending',
-  sender_name TEXT,
-  sender_email TEXT,
-  subject TEXT,
-  body_excerpt TEXT,
-  summary TEXT,
-  context TEXT,
-  source_payload TEXT,
-  recommended_action TEXT,
-  priority INTEGER DEFAULT 0,
-  received_at TEXT,
-  account_email TEXT,
-  created_at TEXT,
-  updated_at TEXT
-);
-CREATE TABLE IF NOT EXISTS drafts (
-  id TEXT PRIMARY KEY,
-  email_item_id TEXT,
-  subject TEXT,
-  body TEXT DEFAULT '',
-  status TEXT DEFAULT 'needs_review',
-  voice_version TEXT,
-  humanizer_version TEXT,
-  created_at TEXT,
-  updated_at TEXT
-);
-CREATE TABLE IF NOT EXISTS email_action_log (
-  id TEXT PRIMARY KEY,
-  email_item_id TEXT,
-  action_type TEXT,
-  description TEXT,
-  created_at TEXT,
-  updated_at TEXT
-);
-CREATE TABLE IF NOT EXISTS email_triage_runs (
-  id TEXT PRIMARY KEY,
-  summary TEXT,
-  created_at TEXT,
-  updated_at TEXT
-);
-CREATE TABLE IF NOT EXISTS commitments (
-  id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL CHECK (kind IN ('follow_up','promise','waiting_on','open_decision','overnight_request','idea')),
-  title TEXT NOT NULL,
-  details TEXT,
-  counterparty TEXT,
-  contact_id TEXT,
-  source_kind TEXT NOT NULL CHECK (source_kind IN ('brain_dump','manual','chat','detector','brief')),
-  source_quote TEXT,
-  source_ref TEXT,
-  due_at TEXT,
-  review_at TEXT,
-  confidence TEXT NOT NULL DEFAULT 'high' CHECK (confidence IN ('high','medium','low')),
-  confirmed INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','done','dropped','expired')),
-  evidence TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS commitments_status_due_at_idx
-  ON commitments(status, due_at);
-CREATE INDEX IF NOT EXISTS commitments_status_review_at_idx
-  ON commitments(status, review_at);
-CREATE TABLE IF NOT EXISTS inbound_events (
-  id TEXT PRIMARY KEY,
-  source TEXT NOT NULL,
-  source_id TEXT NOT NULL,
-  raw_text TEXT NOT NULL,
-  machine TEXT,
-  state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','triaged','failed','dismissed')),
-  task_id TEXT,
-  error TEXT,
-  attempts INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  UNIQUE (source, source_id)
-);
-CREATE INDEX IF NOT EXISTS inbound_events_state_created_at_idx
-  ON inbound_events(state, created_at);
-`;
-
-type ForgeGlobal = { __forgeDb?: Database.Database };
-
-function dbPath(): string {
-  return (
-    coveEnv("DB_PATH") || path.join(process.cwd(), "data", "forge.db")
-  );
-}
+type CoveGlobal = {
+  __coveDb?: Database.Database;
+};
+const databasePaths = new WeakMap<Database.Database, string>();
 
 function getDb(): Database.Database {
-  const g = globalThis as unknown as ForgeGlobal;
-  if (g.__forgeDb) return g.__forgeDb;
+  const g = globalThis as unknown as CoveGlobal;
+  const file = localDatabasePath();
+  if (g.__coveDb && databasePaths.get(g.__coveDb) === file) return g.__coveDb;
+  if (g.__coveDb?.open) g.__coveDb.close();
 
-  const file = dbPath();
-  mkdirSync(path.dirname(file), { recursive: true });
-  const conn = new Database(file);
-  conn.pragma("journal_mode = WAL");
-  conn.pragma("busy_timeout = 5000");
-  conn.exec(SCHEMA);
-  migrate(conn);
+  const conn = openLocalDatabase(file);
   seedDefaults(conn);
-  g.__forgeDb = conn;
+  g.__coveDb = conn;
+  databasePaths.set(conn, file);
   return conn;
 }
 
 function nowIso(): string {
   return new Date().toISOString();
-}
-
-/** Add columns introduced after a database may already exist. Idempotent. */
-function migrate(conn: Database.Database): void {
-  const cols = new Set(
-    (conn.prepare("PRAGMA table_info(tasks)").all() as { name: string }[]).map(
-      (c) => c.name,
-    ),
-  );
-  // A database created before the current task schema keeps its old `tasks`
-  // table, because CREATE TABLE IF NOT EXISTS is a no-op against it. Nothing
-  // below adds these columns, so the REST layer would bind to an incompatible
-  // table and fail one confusing query at a time instead of at startup. Stop
-  // here with something the operator can act on.
-  const REQUIRED_TASK_COLUMNS = ["status", "due_at", "source_type", "position", "tags"];
-  const missing = REQUIRED_TASK_COLUMNS.filter((column) => !cols.has(column));
-  if (missing.length > 0) {
-    throw new Error(
-      `${dbPath()} has an incompatible tasks table (missing: ${missing.join(", ")}). ` +
-        "It predates the current schema. Stop Cove, move that file aside " +
-        "(rename it, do not delete it), and start Cove again to get a fresh board.",
-    );
-  }
-
-  if (!cols.has("remind_native"))
-    conn.exec("ALTER TABLE tasks ADD COLUMN remind_native INTEGER DEFAULT 1");
-  if (!cols.has("remind_text"))
-    conn.exec("ALTER TABLE tasks ADD COLUMN remind_text INTEGER DEFAULT 0");
-  if (!cols.has("notified_at"))
-    conn.exec("ALTER TABLE tasks ADD COLUMN notified_at TEXT");
-  if (!cols.has("project"))
-    conn.exec("ALTER TABLE tasks ADD COLUMN project TEXT NOT NULL DEFAULT 'Atlas'");
-  conn.exec("UPDATE tasks SET project = 'Atlas' WHERE project IS NULL");
-  conn.exec(
-    "CREATE INDEX IF NOT EXISTS tasks_project_status_idx ON tasks(project, status)",
-  );
-
-  const commitmentCols = new Set(
-    (conn.prepare("PRAGMA table_info(commitments)").all() as { name: string }[]).map(
-      (c) => c.name,
-    ),
-  );
-  if (!commitmentCols.has("confirmed"))
-    conn.exec("ALTER TABLE commitments ADD COLUMN confirmed INTEGER NOT NULL DEFAULT 0");
 }
 
 function seedDefaults(conn: Database.Database): void {
@@ -367,8 +157,9 @@ export function resolveLocalInboundEvent(input: {
   error: string | null;
   updatedAt: string;
 }): Record<string, unknown> | undefined {
-  const row = getDb()
-    .prepare(
+  const db = getDb();
+  return db.transaction(() => {
+    const row = db.prepare(
       `UPDATE inbound_events
        SET state = ?, task_id = ?, error = ?,
            attempts = attempts + 1, updated_at = ?
@@ -382,7 +173,30 @@ export function resolveLocalInboundEvent(input: {
       input.updatedAt,
       input.id,
     ) as Record<string, unknown> | undefined;
-  return row ? decodeRow("inbound_events", row) : undefined;
+    if (!row) return undefined;
+    if (input.state === "failed") {
+      recordFailureInDatabase(db, {
+        source: "inbound-event",
+        sourceId: input.id,
+        message: `Could not process ${String(row.source ?? "inbound")} item: ${input.error ?? "unknown error"}`,
+        details: {
+          eventId: input.id,
+          eventSource: row.source,
+          attempts: row.attempts,
+          error: input.error,
+        },
+        occurredAt: input.updatedAt,
+      });
+    } else {
+      db.prepare(
+        `UPDATE cove_failure_inbox
+         SET dismissed_at = ?
+         WHERE source = 'inbound-event' AND source_id = ?
+           AND dismissed_at IS NULL`,
+      ).run(input.updatedAt, input.id);
+    }
+    return decodeRow("inbound_events", row);
+  })();
 }
 
 const RESERVED = new Set(["select", "order", "limit", "offset"]);
@@ -440,9 +254,13 @@ function parseWhere(table: string, params: URLSearchParams): {
 
 function selectRows(table: string, params: URLSearchParams): RestResult {
   const db = getDb();
+  const effectiveParams = new URLSearchParams(params);
+  if (table === "tasks" && !effectiveParams.has("status")) {
+    effectiveParams.set("status", "neq.archived");
+  }
 
   let columns = "*";
-  const select = params.get("select");
+  const select = effectiveParams.get("select");
   if (select && select !== "*") {
     const cols = select
       .split(",")
@@ -452,7 +270,7 @@ function selectRows(table: string, params: URLSearchParams): RestResult {
   }
 
   let orderBy = "";
-  const order = params.get("order");
+  const order = effectiveParams.get("order");
   if (order) {
     const clauses: string[] = [];
     for (const part of order.split(",").map((p) => p.trim()).filter(Boolean)) {
@@ -467,18 +285,18 @@ function selectRows(table: string, params: URLSearchParams): RestResult {
   }
 
   let tail = "";
-  const limitRaw = params.get("limit");
+  const limitRaw = effectiveParams.get("limit");
   if (limitRaw !== null) {
     const limit = Number(limitRaw);
     if (Number.isInteger(limit) && limit >= 0) tail += ` LIMIT ${limit}`;
   }
-  const offsetRaw = params.get("offset");
+  const offsetRaw = effectiveParams.get("offset");
   if (offsetRaw !== null) {
     const offset = Number(offsetRaw);
     if (Number.isInteger(offset) && offset >= 0) tail += ` OFFSET ${offset}`;
   }
 
-  const { clause, args } = parseWhere(table, params);
+  const { clause, args } = parseWhere(table, effectiveParams);
   const sql = `SELECT ${columns} FROM "${table}"${clause}${orderBy}${tail}`;
   const rows = db.prepare(sql).all(...args) as Record<string, unknown>[];
   return { status: 200, body: rows.map((r) => decodeRow(table, r)) };
@@ -526,38 +344,67 @@ function updateRows(
     return { status: 400, body: "Refusing to update without a filter." };
   }
 
-  // Capture the matched primary keys before mutating so the returned
-  // representation is the rows this update actually changed, even when the
-  // update rewrites a column the filter tested (PostgREST RETURNING semantics).
-  // Re-selecting with the same clause after the update would drop exactly those
-  // rows, which breaks compare-and-swap callers that filter on the value they
-  // are about to overwrite.
-  const matchedIds = (
-    db.prepare(`SELECT id FROM "${table}"${clause}`).all(...args) as {
-      id: unknown;
-    }[]
-  ).map((r) => r.id);
-
+  const requestedKeys = Object.keys(payload as Record<string, unknown>);
   const row = encodeRow(table, { ...(payload as Record<string, unknown>) });
   delete row.id; // never reassign the primary key
   row.updated_at = nowIso();
-
-  const known = tableColumns(table);
-  const cols = Object.keys(row).filter((c) => known.has(c));
-  if (cols.length) {
-    const setSql = cols.map((c) => `"${c}" = ?`).join(", ");
-    db.prepare(`UPDATE "${table}" SET ${setSql}${clause}`).run(
-      ...cols.map((c) => row[c]),
-      ...args,
-    );
-  }
-
-  if (matchedIds.length === 0) return { status: 200, body: [] };
-  const placeholders = matchedIds.map(() => "?").join(", ");
-  const rows = db
-    .prepare(`SELECT * FROM "${table}" WHERE id IN (${placeholders})`)
-    .all(...matchedIds) as Record<string, unknown>[];
-  return { status: 200, body: rows.map((r) => decodeRow(table, r)) };
+  return db.transaction(() => {
+    // Capture the matched primary keys before mutating so the returned
+    // representation has PostgREST RETURNING semantics even when a filtered
+    // column changes.
+    const matchedIds = (
+      db.prepare(`SELECT id FROM "${table}"${clause}`).all(...args) as {
+        id: unknown;
+      }[]
+    ).map((matched) => matched.id);
+    if (
+      table === "tasks" &&
+      row.status === "archived" &&
+      row.archived_at === undefined
+    ) {
+      db.prepare(
+        `UPDATE tasks
+         SET archived_at = COALESCE(archived_at, ?),
+             archived_from_status = COALESCE(archived_from_status, status)
+         ${clause}`,
+      ).run(row.updated_at, ...args);
+    }
+    const known = tableColumns(table);
+    const cols = Object.keys(row).filter((column) => known.has(column));
+    if (cols.length) {
+      const setSql = cols.map((column) => `"${column}" = ?`).join(", ");
+      db.prepare(`UPDATE "${table}" SET ${setSql}${clause}`).run(
+        ...cols.map((column) => row[column]),
+        ...args,
+      );
+    }
+    const positionOnly = requestedKeys.length === 1 &&
+      requestedKeys[0] === "position";
+    if (table === "tasks" && matchedIds.length > 0 && !positionOnly) {
+      const updatedAt = typeof row.updated_at === "string"
+        ? row.updated_at
+        : nowIso();
+      const statusRows = db.prepare(
+        `SELECT id, status FROM tasks WHERE id IN (${
+          matchedIds.map(() => "?").join(", ")
+        })`,
+      ).all(...matchedIds) as Array<{ id: string; status: string | null }>;
+      for (const statusRow of statusRows) {
+        syncRecurringOccurrenceForTask(
+          db,
+          statusRow.id,
+          statusRow.status,
+          updatedAt,
+        );
+      }
+    }
+    if (matchedIds.length === 0) return { status: 200, body: [] };
+    const placeholders = matchedIds.map(() => "?").join(", ");
+    const rows = db
+      .prepare(`SELECT * FROM "${table}" WHERE id IN (${placeholders})`)
+      .all(...matchedIds) as Record<string, unknown>[];
+    return { status: 200, body: rows.map((result) => decodeRow(table, result)) };
+  }).immediate();
 }
 
 function deleteRows(table: string, params: URLSearchParams): RestResult {
@@ -571,14 +418,15 @@ function deleteRows(table: string, params: URLSearchParams): RestResult {
 }
 
 /**
- * Answer a forge-rest request against the local database.
- * `table` is the unprefixed table name; `body` is the raw request body text.
+ * Answer a cove-rest request against the local database.
+ * `table` is the unprefixed table name. Direct callers may pass raw JSON;
+ * routes that already parsed a request may pass the decoded payload.
  */
 export function handleLocalRest(
   table: string,
   method: string,
   params: URLSearchParams,
-  body: string | undefined,
+  body: string | Record<string, unknown> | unknown[] | undefined,
 ): RestResult {
   if (!ALLOWED_TABLES.has(table)) {
     return { status: 404, body: "Unknown Cove table." };
@@ -588,9 +436,16 @@ export function handleLocalRest(
     case "GET":
       return selectRows(table, params);
     case "POST":
-      return insertRows(table, body ? JSON.parse(body) : {});
+      return insertRows(
+        table,
+        typeof body === "string" ? (body ? JSON.parse(body) : {}) : body ?? {},
+      );
     case "PATCH":
-      return updateRows(table, params, body ? JSON.parse(body) : {});
+      return updateRows(
+        table,
+        params,
+        typeof body === "string" ? (body ? JSON.parse(body) : {}) : body ?? {},
+      );
     case "DELETE":
       return deleteRows(table, params);
     default:

@@ -1,7 +1,6 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useMutation, useQuery } from 'convex/react';
 import {
   DndContext,
   DragOverlay,
@@ -20,8 +19,6 @@ import type {
   UniqueIdentifier,
 } from '@dnd-kit/core';
 import { sortableKeyboardCoordinates } from '@dnd-kit/sortable';
-import { api } from '../../../convex/_generated/api';
-import type { Id } from '../../../convex/_generated/dataModel';
 import { getRuntimeMode } from '@/lib/runtime/mode';
 import {
   createTask as createSupabaseTask,
@@ -30,7 +27,9 @@ import {
   listTaskColumns,
   listTasks,
   updateTask as updateSupabaseTask,
+  restoreTask as restoreSupabaseTask,
 } from '@/lib/data/tasks';
+import { confirmTaskRecurrence } from '@/lib/data/recurrence';
 import type {
   Task as SupabaseTask,
   TaskColumn as SupabaseTaskColumn,
@@ -45,6 +44,8 @@ import {
 import Column from './Column';
 import TaskCard from './TaskCard';
 import TaskDetail from './TaskDetail';
+import RecentlyDeleted from './RecentlyDeleted';
+import useTaskSessionRuns from './useTaskSessionRuns';
 
 interface ColumnData {
   _id: string;
@@ -63,16 +64,15 @@ interface TaskData {
   dueDate?: string;
   tags: string[];
   status?: TaskStatus;
+  proposedRecurrenceCadence?: string;
+  recurringTemplateId?: string;
+  occurrenceLocalDate?: string;
   blocked: boolean;
   position: number;
   _creationTime: number;
   createdAt: number;
   updatedAt: number;
 }
-
-type TaskWithoutBlocked = Omit<TaskData, 'blocked'> & {
-  tags?: string[];
-};
 
 type CreateTaskInput = {
   columnId?: string | null;
@@ -103,6 +103,8 @@ interface KanbanBoardContentProps {
   onCreateTask: (input: CreateTaskInput) => Promise<void>;
   onUpdateTask: (id: string, patch: UpdateTaskInput, nextTasks?: TaskData[]) => Promise<void>;
   onDeleteTask: (id: string) => Promise<void>;
+  onRestoreTask?: (id: string) => Promise<void>;
+  onConfirmRecurrence?: (id: string, cadence: string) => Promise<void>;
 }
 
 const BLOCKED_TAG = 'blocked';
@@ -122,91 +124,10 @@ const pointerFirstCollisionDetection: CollisionDetection = (args) => {
 export default function KanbanBoard() {
   // Local and Supabase both use the REST-backed board; only Convex differs.
   if (getRuntimeMode() !== 'convex') return <SupabaseKanbanBoard />;
-  return <ConvexKanbanBoard />;
-}
-
-function ConvexKanbanBoard() {
-  const columnsQuery = useQuery(api.columns.list);
-  const tasksQuery = useQuery(api.tasks.list);
-
-  const seedMutation = useMutation(api.init.seed);
-  const createTaskMutation = useMutation(api.tasks.create);
-  const updateTaskMutation = useMutation(api.tasks.update);
-  const removeTaskMutation = useMutation(api.tasks.remove);
-  const currentTasks = ((tasksQuery ?? []) as TaskWithoutBlocked[]).map((task) => ({
-    ...task,
-    tags: task.tags ?? [],
-    blocked: isTaskBlocked(task.tags ?? []),
-  }));
-  const handleSeed = useCallback(async () => {
-    await seedMutation();
-  }, [seedMutation]);
-
   return (
-    <KanbanBoardContent
-      columnsData={(columnsQuery ?? []) as ColumnData[]}
-      tasksData={currentTasks}
-      loading={columnsQuery === undefined || tasksQuery === undefined}
-      onSeed={handleSeed}
-      onCreateTask={async (input) => {
-        if (!input.columnId) throw new Error('Task column is required.');
-        await createTaskMutation({
-          title: input.title,
-          columnId: input.columnId as Id<'columns'>,
-          priority: input.priority,
-          description: input.description || undefined,
-          dueDate: input.dueDate || undefined,
-          tags: input.tags && input.tags.length > 0 ? input.tags : undefined,
-        });
-      }}
-      onUpdateTask={async (id, patch, nextTasks) => {
-        const changedTasks = nextTasks
-          ? nextTasks.filter((nextTask) => {
-              const currentTask = currentTasks.find((task) => task._id === nextTask._id);
-              return (
-                currentTask &&
-                (currentTask.columnId !== nextTask.columnId || currentTask.position !== nextTask.position)
-              );
-            })
-          : [];
-
-        if (changedTasks.length > 0) {
-          await Promise.all(
-            changedTasks.map((task) =>
-              updateTaskMutation({
-                id: task._id as Id<'tasks'>,
-                columnId: task.columnId as Id<'columns'>,
-                position: task.position,
-                ...(task._id === id
-                  ? {
-                      title: patch.title,
-                      description: patch.description,
-                      priority: patch.priority,
-                      dueDate: patch.dueDate,
-                      tags: patch.tags,
-                    }
-                  : {}),
-              })
-            )
-          );
-          return;
-        }
-
-        await updateTaskMutation({
-          id: id as Id<'tasks'>,
-          columnId: patch.columnId ? (patch.columnId as Id<'columns'>) : undefined,
-          position: patch.position,
-          title: patch.title,
-          description: patch.description,
-          priority: patch.priority,
-          dueDate: patch.dueDate,
-          tags: patch.tags,
-        });
-      }}
-      onDeleteTask={async (id) => {
-        await removeTaskMutation({ id: id as Id<'tasks'> });
-      }}
-    />
+    <div className="rounded-md border bg-card p-4 text-sm text-muted-foreground" role="status">
+      Task changes are not supported in this runtime. Start Cove in local mode to use the board.
+    </div>
   );
 }
 
@@ -261,6 +182,9 @@ function normalizeSupabaseTask(task: SupabaseTask): TaskData {
     dueDate: toDateInput(task.due_at),
     tags,
     status: task.status,
+    proposedRecurrenceCadence: task.proposed_recurrence_cadence ?? undefined,
+    recurringTemplateId: task.recurring_template_id ?? undefined,
+    occurrenceLocalDate: task.occurrence_local_date ?? undefined,
     blocked: isTaskBlocked(tags),
     position: task.position,
     _creationTime: toEpoch(row.created_at),
@@ -313,6 +237,7 @@ function toSupabaseDueAt(value: string | null | undefined): string | null | unde
 }
 
 function SupabaseKanbanBoard() {
+  const localMode = getRuntimeMode() === 'local';
   const [columns, setColumns] = useState<ColumnData[]>([]);
   const [tasks, setTasks] = useState<TaskData[]>([]);
   const [loading, setLoading] = useState(true);
@@ -456,6 +381,21 @@ function SupabaseKanbanBoard() {
           throw err;
         }
       }}
+      onRestoreTask={localMode
+        ? async (id) => {
+            const restored = await restoreSupabaseTask(id);
+            setTasks((currentTasks) => [
+              ...currentTasks.filter((task) => task._id !== id),
+              normalizeSupabaseTask(restored),
+            ]);
+          }
+        : undefined}
+      onConfirmRecurrence={localMode
+        ? async (id, cadence) => {
+            await confirmTaskRecurrence(id, cadence);
+            await reload();
+          }
+        : undefined}
     />
   );
 }
@@ -469,6 +409,8 @@ function KanbanBoardContent({
   onCreateTask,
   onUpdateTask,
   onDeleteTask,
+  onRestoreTask,
+  onConfirmRecurrence,
 }: KanbanBoardContentProps) {
 
   const [localTasks, setLocalTasks] = useState<TaskData[] | null>(null);
@@ -480,6 +422,11 @@ function KanbanBoardContent({
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>('all');
   const [completingTaskId, setCompletingTaskId] = useState<string | null>(null);
+  const [showRecentlyDeleted, setShowRecentlyDeleted] = useState(false);
+  const [archiveUndo, setArchiveUndo] = useState<{
+    id: string;
+    title: string;
+  } | null>(null);
 
   const [newTask, setNewTask] = useState({
     title: '',
@@ -549,6 +496,9 @@ function KanbanBoardContent({
     };
   };
   const tasks = (localTasks ?? tasksData).map(normalizeDisplayTask);
+  const taskSessions = useTaskSessionRuns(
+    getRuntimeMode() === 'local' ? tasks.map((task) => task._id) : [],
+  );
 
   const tasksRef = useRef(tasks);
   tasksRef.current = tasks;
@@ -560,6 +510,12 @@ function KanbanBoardContent({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tasksData]);
+
+  useEffect(() => {
+    if (!archiveUndo) return;
+    const timeout = window.setTimeout(() => setArchiveUndo(null), 10000);
+    return () => window.clearTimeout(timeout);
+  }, [archiveUndo]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -818,8 +774,12 @@ function KanbanBoardContent({
     }
   }
 
-  function handleTaskDeleted() {
+  function handleTaskDeleted(id: string) {
+    const archived = tasks.find((task) => task._id === id);
     setDetailTaskId(null);
+    if (archived && onRestoreTask) {
+      setArchiveUndo({ id: archived._id, title: archived.title });
+    }
   }
 
   async function handleCompleteTask(taskId: string) {
@@ -904,16 +864,16 @@ function KanbanBoardContent({
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
-        Loading board...
+      <div className="water-workspace flex h-full items-center justify-center p-6">
+        <div className="water-empty-state px-6 py-5 text-sm">Loading board...</div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="flex items-center justify-center h-full p-6">
-        <div className="max-w-lg rounded-lg border bg-card p-4 text-sm">
+      <div className="water-workspace flex h-full items-center justify-center p-6">
+        <div className="water-empty-state max-w-lg p-5 text-sm">
           <p className="font-medium text-foreground">Tasks could not load.</p>
           <p className="mt-1 text-muted-foreground">{error}</p>
         </div>
@@ -921,10 +881,14 @@ function KanbanBoardContent({
     );
   }
 
+  if (showRecentlyDeleted && onRestoreTask) {
+    return <RecentlyDeleted onClose={() => setShowRecentlyDeleted(false)} />;
+  }
+
   return (
-    <div className="flex flex-col h-full">
-      <div className="flex items-center gap-3 px-5 py-2.5 border-b transition-colors duration-200">
-        <h1 className="text-sm font-semibold text-foreground">Tasks</h1>
+    <div className="water-workspace all-work-surface flex h-full flex-col">
+      <div className="water-toolbar all-work-toolbar flex items-center gap-3 border-b px-5">
+        <h1 className="water-workspace-title text-sm">All Work</h1>
 
         <div className="ml-4 flex items-center gap-2 flex-1">
           <div className="relative max-w-[240px] flex-1">
@@ -938,7 +902,7 @@ function KanbanBoardContent({
               placeholder="Search tasks..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-8 pr-3 py-1.5 text-xs rounded-md border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-accent-blue/40"
+              className="water-control w-full py-1.5 pl-8 pr-3 text-xs placeholder:text-muted-foreground"
             />
           </div>
 
@@ -946,7 +910,7 @@ function KanbanBoardContent({
             aria-label="Filter tasks"
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-            className="px-2 py-1.5 text-xs rounded-md border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-accent-blue/40"
+            className="water-control px-3 py-1.5 text-xs"
           >
             <option value="all">All Tasks</option>
             <option value="today">Must happen today</option>
@@ -960,7 +924,7 @@ function KanbanBoardContent({
             aria-label="Filter tasks by priority"
             value={priorityFilter}
             onChange={(e) => setPriorityFilter(e.target.value as PriorityFilter)}
-            className="px-2 py-1.5 text-xs rounded-md border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-accent-blue/40"
+            className="water-control px-3 py-1.5 text-xs"
           >
             <option value="all">All Priority</option>
             <option value="high">High</option>
@@ -973,20 +937,36 @@ function KanbanBoardContent({
           </span>
         </div>
 
+        {onRestoreTask && (
+          <button
+            type="button"
+            onClick={() => setShowRecentlyDeleted(true)}
+            className="water-text-button ml-2 px-2.5 py-1.5"
+          >
+            Recently deleted
+          </button>
+        )}
+
         <button
           onClick={() => setShowAddForm(!showAddForm)}
           aria-label={showAddForm ? 'Close add task form' : 'Open add task form'}
-          className="ml-2 px-3 py-1.5 text-xs font-medium bg-foreground text-background rounded-md hover:opacity-90 transition-opacity duration-150"
+          className="water-primary-button ml-2 px-4 py-2"
         >
           + Add Task
         </button>
       </div>
 
+      {taskSessions.error && (
+        <p role="alert" className="mx-5 mt-2 text-xs text-accent-red">
+          {taskSessions.error}
+        </p>
+      )}
+
       {showAddForm && (
-        <form onSubmit={handleAddTask} className="px-5 py-3 border-b bg-muted/30 transition-colors duration-200">
+        <form onSubmit={handleAddTask} className="water-form-panel mx-5 mt-3 rounded-[20px] px-5 py-4">
           <div className="flex items-end gap-3 max-w-2xl">
             <div className="flex-1">
-              <label className="block text-[11px] text-muted-foreground mb-1">Title *</label>
+              <label className="mb-1.5 block">Title *</label>
               <input
                 type="text"
                 aria-label="New task title"
@@ -994,18 +974,18 @@ function KanbanBoardContent({
                 onChange={(e) => setNewTask((prev) => ({ ...prev, title: e.target.value }))}
                 placeholder="Task title"
                 autoFocus
-                className="w-full px-2.5 py-1.5 text-sm rounded-md border bg-card text-foreground focus:outline-none focus:ring-1 focus:ring-accent-blue/40"
+                className="w-full px-3 py-2 text-sm"
               />
             </div>
             <div className="w-24">
-              <label className="block text-[11px] text-muted-foreground mb-1">Priority</label>
+              <label className="mb-1.5 block">Priority</label>
               <select
                 aria-label="New task priority"
                 value={newTask.priority}
                 onChange={(e) =>
                   setNewTask((prev) => ({ ...prev, priority: e.target.value as 'low' | 'medium' | 'high' }))
                 }
-                className="w-full px-2 py-1.5 text-sm rounded-md border bg-card text-foreground focus:outline-none focus:ring-1 focus:ring-accent-blue/40"
+                className="w-full px-3 py-2 text-sm"
               >
                 <option value="low">Low</option>
                 <option value="medium">Medium</option>
@@ -1013,20 +993,20 @@ function KanbanBoardContent({
               </select>
             </div>
             <div className="w-36">
-              <label className="block text-[11px] text-muted-foreground mb-1">Due date</label>
+              <label className="mb-1.5 block">Due date</label>
               <input
                 type="date"
                 aria-label="New task due date"
                 value={newTask.dueDate}
                 onChange={(e) => setNewTask((prev) => ({ ...prev, dueDate: e.target.value }))}
-                className="w-full px-2 py-1.5 text-sm rounded-md border bg-card text-foreground focus:outline-none focus:ring-1 focus:ring-accent-blue/40"
+                className="w-full px-3 py-2 text-sm"
               />
             </div>
             <div className="flex gap-1.5 shrink-0">
               <button
                 type="submit"
                 disabled={!newTask.title.trim()}
-                className="px-3 py-1.5 text-xs font-medium bg-accent-blue text-white rounded-md hover:opacity-90 transition-opacity duration-150 disabled:opacity-40"
+                className="water-primary-button px-4 py-2 disabled:opacity-40"
               >
                 Add Task
               </button>
@@ -1036,7 +1016,7 @@ function KanbanBoardContent({
                   setShowAddForm(false);
                   setNewTask({ title: '', priority: 'medium', dueDate: '', description: '', tags: '' });
                 }}
-                className="px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors duration-150"
+                className="water-text-button px-3 py-2"
               >
                 Cancel
               </button>
@@ -1044,32 +1024,32 @@ function KanbanBoardContent({
           </div>
           <div className="flex items-end gap-3 max-w-2xl mt-2">
             <div className="flex-1">
-              <label className="block text-[11px] text-muted-foreground mb-1">Description</label>
+              <label className="mb-1.5 block">Description</label>
               <input
                 type="text"
                 aria-label="New task description"
                 value={newTask.description}
                 onChange={(e) => setNewTask((prev) => ({ ...prev, description: e.target.value }))}
                 placeholder="Optional description"
-                className="w-full px-2.5 py-1.5 text-sm rounded-md border bg-card text-foreground focus:outline-none focus:ring-1 focus:ring-accent-blue/40"
+                className="w-full px-3 py-2 text-sm"
               />
             </div>
             <div className="flex-1">
-              <label className="block text-[11px] text-muted-foreground mb-1">Tags</label>
+              <label className="mb-1.5 block">Tags</label>
               <input
                 type="text"
                 aria-label="New task tags"
                 value={newTask.tags}
                 onChange={(e) => setNewTask((prev) => ({ ...prev, tags: e.target.value }))}
                 placeholder="design, frontend (comma-separated)"
-                className="w-full px-2.5 py-1.5 text-sm rounded-md border bg-card text-foreground focus:outline-none focus:ring-1 focus:ring-accent-blue/40"
+                className="w-full px-3 py-2 text-sm"
               />
             </div>
           </div>
         </form>
       )}
 
-      <div className="flex-1 overflow-x-auto overflow-y-hidden">
+      <div className="all-work-board flex-1 overflow-x-auto overflow-y-hidden">
         <DndContext
           sensors={sensors}
           collisionDetection={pointerFirstCollisionDetection}
@@ -1077,17 +1057,26 @@ function KanbanBoardContent({
           onDragOver={handleDragOver}
           onDragEnd={handleDragEnd}
         >
-          <div className="flex gap-3 p-5 h-full min-w-max">
-            {columns.map((col) => (
-              <Column
-                key={col._id}
-                column={col}
-                tasks={getTasksForColumn(col._id)}
-                onOpenDetail={setDetailTaskId}
-                onCompleteTask={handleCompleteTask}
-                completingTaskId={completingTaskId}
-              />
-            ))}
+          <div className="flex h-full min-w-max gap-4">
+            {columns.length === 0 ? (
+              <div className="water-empty-state flex min-h-[180px] w-[360px] items-center justify-center px-6 text-center text-sm">
+                No task lists yet.
+              </div>
+            ) : (
+              columns.map((col) => (
+                <Column
+                  key={col._id}
+                  column={col}
+                  tasks={getTasksForColumn(col._id)}
+                  onOpenDetail={setDetailTaskId}
+                  onCompleteTask={handleCompleteTask}
+                  completingTaskId={completingTaskId}
+                  sessionRuns={getRuntimeMode() === 'local' ? taskSessions.latestByTaskId : undefined}
+                  launchingTaskIds={taskSessions.launchingTaskIds}
+                  onLaunchSession={getRuntimeMode() === 'local' ? taskSessions.launch : undefined}
+                />
+              ))
+            )}
           </div>
 
           <DragOverlay dropAnimation={null}>
@@ -1111,7 +1100,29 @@ function KanbanBoardContent({
           onDeleted={handleTaskDeleted}
           onSaveTask={handleSaveDetailTask}
           onDeleteTask={() => onDeleteTask(detailTaskId)}
+          onConfirmRecurrence={onConfirmRecurrence
+            ? async (cadence) => {
+                await onConfirmRecurrence(detailTaskId, cadence);
+              }
+            : undefined}
         />
+      )}
+
+      {archiveUndo && onRestoreTask && (
+        <div className="quiet-undo" role="status" aria-live="polite">
+          <span>“{archiveUndo.title}” moved to Recently deleted.</span>
+          <button
+            type="button"
+            onClick={() => {
+              const pending = archiveUndo;
+              setArchiveUndo(null);
+              void onRestoreTask(pending.id);
+            }}
+          >
+            Undo
+          </button>
+          <span className="quiet-undo-timer" aria-hidden="true" />
+        </div>
       )}
     </div>
   );

@@ -10,7 +10,6 @@ import { useBuddy, useBuddyStream } from '@/components/buddy/BuddyProvider';
 import { matchesArrivalAddition } from '@/lib/day-plan/arrival-addition';
 import type {
   MorningBriefGeneration,
-  MorningBriefSalesActionState,
   MorningBriefSuggestedAddition,
   PublicMorningBrief,
 } from '@/lib/day-plan/brief';
@@ -22,6 +21,7 @@ import type {
 } from '@/lib/day-plan/types';
 import {
   arrivalDateLabel,
+  isMorningBriefWriting,
   morningArrivalGreeting,
   resolveArrivalEscape,
   selectEssentialItems,
@@ -49,6 +49,8 @@ interface MorningArrivalProps {
   recommendation: string;
   brief?: PublicMorningBrief;
   briefGeneration?: MorningBriefGeneration;
+  briefAttachTimedOut: boolean;
+  arrivalInteracted: boolean;
   recap?: string;
   freshnessLabel?: string;
   expandedItemId?: string | null;
@@ -62,11 +64,6 @@ interface MorningArrivalProps {
   onOwnerChange: (itemId: string, owner: DayOwner) => void | Promise<void>;
   onDragReorder: (activeId: string, overId: string) => void | Promise<void>;
   onDismiss: (itemId: string, title: string) => void | Promise<void>;
-  onSalesAction?: (
-    actionIndex: number,
-    state: MorningBriefSalesActionState,
-    editedText?: string,
-  ) => void | Promise<void>;
   onAddSuggestion?: (
     addition: MorningBriefSuggestedAddition,
     owner: DayOwner,
@@ -93,7 +90,7 @@ const STEP_TITLES: Record<Exclude<ArrivalStep, 'brief'>, string> = {
 const STEP_DESCRIPTIONS: Record<ArrivalStep, string> = {
   brief: '',
   priorities: 'Drag three outcomes into priority order, then choose who owns each one. Items you give to Claude start planning when you begin your day.',
-  extras: 'Review the optional details, make any final refinements, and begin your day.',
+  extras: 'Review the optional details, make any final changes, and begin your day.',
 };
 
 const STEP_ANNOUNCEMENTS: Record<ArrivalStep, string> = {
@@ -108,6 +105,8 @@ export default function MorningArrival({
   recommendation,
   brief,
   briefGeneration,
+  briefAttachTimedOut,
+  arrivalInteracted,
   recap,
   freshnessLabel,
   expandedItemId,
@@ -121,7 +120,6 @@ export default function MorningArrival({
   onOwnerChange,
   onDragReorder,
   onDismiss,
-  onSalesAction,
   onAddSuggestion,
   onSnooze,
   onSkip,
@@ -134,19 +132,25 @@ export default function MorningArrival({
 }: MorningArrivalProps) {
   const { setPageContext, busy: buddyBusy } = useBuddy();
   const { streamingTurn } = useBuddyStream();
-  const [editingIndex, setEditingIndex] = useState<number | null>(null);
-  const [editDraft, setEditDraft] = useState('');
   const draggingRef = useRef(false);
   const disclosureRefs = useRef(new Map<string, HTMLButtonElement>());
   const ownerChipEscapeRef = useRef<OwnerChipEscapeHandler | null>(null);
-  const hasExtras = useRef(
-    Boolean(
-      (brief?.salesActions.length && onSalesAction) || brief?.suggestedAdditions.length,
-    ),
-  ).current;
-  const briefWriting =
-    !brief && (briefGeneration?.state === 'queued' || briefGeneration?.state === 'running');
-  const hasBrief = useRef(Boolean(recap || brief || briefWriting || recommendation)).current;
+  const hasExtras = Boolean(brief?.suggestedAdditions.length);
+  const briefWriting = isMorningBriefWriting({
+    briefAttached: Boolean(plan.briefId),
+    arrivalInteracted,
+    attachTimedOut: briefAttachTimedOut,
+    generationState: briefGeneration?.state,
+  });
+  const hasBrief = Boolean(
+    recap ||
+      brief ||
+      briefWriting ||
+      recommendation ||
+      plan.briefId ||
+      briefAttachTimedOut ||
+      briefGeneration?.state === 'failed',
+  );
   const availableSteps: ArrivalStep[] = [
     ...(hasBrief ? ['brief' as const] : []),
     'priorities',
@@ -309,10 +313,16 @@ export default function MorningArrival({
               // No brief yet means the deterministic recommendation stands in,
               // and it is one sentence, so it becomes the headline rather than
               // an orphan paragraph under an empty heading.
-              paragraphs={brief?.narrativeParagraphs ?? (recommendation ? [recommendation] : [])}
+              paragraphs={brief
+                ? [
+                    ...brief.narrativeParagraphs,
+                    ...(brief.managementSummary ? [brief.managementSummary] : []),
+                  ]
+                : recommendation ? [recommendation] : []}
               watchItems={brief?.watchItems ?? []}
               briefWriting={briefWriting}
               briefGeneration={briefGeneration}
+              briefAttached={Boolean(plan.briefId)}
               hasBriefContent={Boolean(brief)}
               onForceBrief={onForceBrief}
               forcingBrief={forcingBrief}
@@ -330,19 +340,17 @@ export default function MorningArrival({
               setDisclosureRef={setDisclosureRef}
               onOwnerChipOpen={handleOwnerChipOpen}
               onOwnerChipClose={handleOwnerChipClose}
+              suggestedAdditions={brief?.suggestedAdditions ?? []}
+              addedSuggestionIndexes={addedSuggestionIndexes}
+              onAddSuggestion={onAddSuggestion}
               onAddWhatChanged={onAddWhatChanged}
               onOpenAllWork={onOpenAllWork}
             />
           ) : (
             <ArrivalStepExtras
               brief={brief}
-              onSalesAction={onSalesAction}
               onAddSuggestion={onAddSuggestion}
               busy={busy}
-              editingIndex={editingIndex}
-              setEditingIndex={setEditingIndex}
-              editDraft={editDraft}
-              setEditDraft={setEditDraft}
               addedSuggestionIndexes={addedSuggestionIndexes}
               onOwnerChoiceOpen={handleOwnerChipOpen}
               onOwnerChoiceClose={handleOwnerChipClose}
@@ -384,7 +392,7 @@ export default function MorningArrival({
                 className="press-scale min-h-8 whitespace-nowrap text-[11px] text-muted-foreground hover:underline hover:underline-offset-2 disabled:opacity-50 sm:min-h-9 sm:text-xs"
                 onClick={() => void onBypass()}
               >
-                Enter Living Current
+                Continue to Today
               </button>
             </div>
 

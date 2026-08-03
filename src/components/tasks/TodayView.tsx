@@ -8,6 +8,7 @@ import {
   deleteTask as deleteRestTask,
   listTaskColumns,
   listTasks,
+  restoreTask as restoreRestTask,
   updateTask as updateRestTask,
 } from '@/lib/data/tasks';
 import type { Task as RestTask, TaskColumn as RestTaskColumn } from '@/lib/data/types';
@@ -29,10 +30,15 @@ import {
 } from '@/lib/quiet-current/arrival-cache';
 import { realTimeLabel } from '@/lib/quiet-current/presentation';
 import { taskColumnKeyForName, type TaskColumnKey } from '@/lib/tasks/columns';
-import { buildDayPlanCandidates } from '@/lib/day-plan/candidates';
+import {
+  buildDayPlanCandidates,
+  orderArrivalCandidatesByTier,
+  selectArrivalCandidateTasks,
+} from '@/lib/day-plan/candidates';
 import {
   combineSurfaceErrors,
   firstContinuingItem,
+  formatArrivalDueDate,
   helpfulProjectLabel,
   reorderDayPlanItems,
   selectBoardExecutionPresentation,
@@ -53,7 +59,25 @@ import { OpenInClaudeCode, RunStatusChip } from './ClaudeRunIndicators';
 import ExecutionConfigPanel from './ExecutionConfigPanel';
 import CurrentCanvas, { type CurrentPoint, type Tributary } from './CurrentCanvas';
 import TaskDetail from './TaskDetail';
+import {
+  confirmTaskRecurrence,
+  listRecurringTemplates,
+} from '@/lib/data/recurrence';
+import { getRuntimeMode } from '@/lib/runtime/mode';
+import type { RecurringTemplate } from '@/lib/tasks/recurrence';
+import RhythmManager, { cadenceDisplay } from './RhythmManager';
 import useDayRitual from './useDayRitual';
+import useTaskSessionRuns from './useTaskSessionRuns';
+import {
+  TaskSessionLauncher,
+  TaskSessionPanel,
+} from './TaskSessionLauncher';
+import {
+  TASK_SESSION_STATUS_LABELS,
+  type LaunchTaskSessionInput,
+  type TaskSessionRun,
+} from '@/lib/task-sessions/types';
+import CoveReadinessStrip from './CoveReadinessStrip';
 
 type TaskStatus = ArrivalTaskStatus;
 type ColumnData = ArrivalColumn;
@@ -112,10 +136,29 @@ function defaultPlanningModel(item: DayPlanItem): 'fable' {
   return 'fable';
 }
 
+function taskSessionInput(
+  planId: string,
+  item: DayPlanItem,
+): Omit<LaunchTaskSessionInput, 'owner'> {
+  return {
+    taskId: item.taskId,
+    dayPlanId: planId,
+    itemId: item.id,
+    promptSnapshot: {
+      title: item.title,
+      detail: item.outcome || item.title,
+      outcome: item.outcome,
+      definitionOfDone: item.definitionOfDone,
+      project: item.project,
+      dueAt: item.dueAt,
+    },
+  };
+}
+
 const JARVIS_HELD_TAG = 'jarvis-held';
 const BLOCKED_TAG = 'blocked';
-const FOCUS_KEY = 'forge.quiet-current.focus';
-const NOTES_KEY = 'forge.quiet-current.notes';
+const FOCUS_KEY = 'cove.quiet-current.focus';
+const NOTES_KEY = 'cove.quiet-current.notes';
 
 // The hoisted DayRitualLayer stays mounted across ritual views; these stable ids let
 // each view's heading label the dialog and receive focus after a content swap.
@@ -134,7 +177,11 @@ function hasTag(task: TaskData, tag: string): boolean {
 }
 
 function isEmailDigest(task: TaskData): boolean {
-  return hasTag(task, 'email') && task.title.trim().startsWith('Emails:');
+  return hasTag(task, 'email-current');
+}
+
+function isRecurringTask(task: TaskData): boolean {
+  return hasTag(task, 'recurring');
 }
 
 function withTag(tags: string[], tag: string): string[] {
@@ -233,6 +280,9 @@ function normalizeRestTask(task: RestTask): TaskData {
     dueAt: task.due_at ?? undefined,
     tags,
     status: task.status,
+    proposedRecurrenceCadence: task.proposed_recurrence_cadence ?? undefined,
+    recurringTemplateId: task.recurring_template_id ?? undefined,
+    occurrenceLocalDate: task.occurrence_local_date ?? undefined,
     blocked: hasNormalizedTag(tags, BLOCKED_TAG),
     position: task.position,
     createdAt: toEpoch(task.created_at),
@@ -243,7 +293,7 @@ function normalizeRestTask(task: RestTask): TaskData {
 function getGreeting(hour: number): string {
   if (hour < 12) return "Good morning. Let’s build something meaningful.";
   if (hour < 17) return 'Good afternoon. Keep the current clear.';
-  return 'Good evening. Let the day settle.';
+  return 'Good evening. Bring the day to a close.';
 }
 
 function getDayProgress(date: Date): number {
@@ -433,7 +483,7 @@ function RestTodayView({ onOpenAllWork }: TodayViewProps) {
       }
 
       if (columnsResult.status === 'rejected' || tasksResult.status === 'rejected') {
-        setError("Some data didn't refresh — retrying…");
+        setError("Some data didn't refresh. Retrying…");
       } else {
         setError(undefined);
       }
@@ -634,7 +684,15 @@ function TodayExperience({
   deleteTask,
   onOpenAllWork,
 }: TodayExperienceProps) {
+  const localMode = getRuntimeMode() === 'local';
+  const taskSessions = useTaskSessionRuns(
+    localMode ? tasks.map((task) => task._id) : [],
+  );
   const [suggestions, setSuggestions] = useState<WorkSuggestion[]>([]);
+  const [briefPickedTasks, setBriefPickedTasks] = useState<
+    Array<{ taskId: string; whyToday: string }>
+  >([]);
+  const [rhythmTemplates, setRhythmTemplates] = useState<RecurringTemplate[]>([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(true);
   const [surfaceError, setSurfaceError] = useState<string>();
   const [settlementNote, setSettlementNote] = useState('');
@@ -703,9 +761,17 @@ function TodayExperience({
   const jarvisTasks = useMemo(
     () =>
       openTasks
-        .filter((task) => hasTag(task, JARVIS_HELD_TAG) || isEmailDigest(task))
-        .sort((left, right) => left.position - right.position),
-    [openTasks],
+        .filter(
+          (task) =>
+            hasTag(task, JARVIS_HELD_TAG) ||
+            isEmailDigest(task) ||
+            (localMode && isRecurringTask(task)),
+        )
+        .sort((left, right) =>
+          Number(isRecurringTask(right)) - Number(isRecurringTask(left)) ||
+          left.position - right.position
+        ),
+    [localMode, openTasks],
   );
 
   const commitments = useMemo(() => {
@@ -717,25 +783,36 @@ function TodayExperience({
         (task) =>
           activeColumnIds.has(task.columnId) &&
           !hasTag(task, JARVIS_HELD_TAG) &&
-          !isEmailDigest(task),
+          !isEmailDigest(task) &&
+          (!localMode || !isRecurringTask(task)),
       )
       .sort((left, right) => {
         const leftFlight = left.columnId === inFlightColumn?._id ? 0 : 1;
         const rightFlight = right.columnId === inFlightColumn?._id ? 0 : 1;
         return leftFlight - rightFlight || left.position - right.position;
       });
-  }, [inFlightColumn?._id, openTasks, todayColumn?._id]);
+  }, [inFlightColumn?._id, localMode, openTasks, todayColumn?._id]);
 
   const dayPlanCandidates = useMemo(() => {
     const refreshedAt = candidateEvidence?.refreshedAt ?? new Date(0).toISOString();
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
     const localDate = localDateInTimezone(new Date(), timezone);
-    // A pool of up to ten deterministic candidates: the Morning Brief overlay
-    // ranks within this pool server-side, and the plan still keeps three.
-    return buildDayPlanCandidates({
+    const candidateTasks = selectArrivalCandidateTasks(openTasks, {
       localDate,
       timezone,
-      tasks: commitments.map((task) => ({
+      todayColumnId: todayColumn?._id,
+      inFlightColumnId: inFlightColumn?._id,
+      localMode,
+      preferredTaskIds: briefPickedTasks.map((picked) => picked.taskId),
+      maximum: 10,
+    });
+    const briefPickedIds = new Set(briefPickedTasks.map((picked) => picked.taskId));
+    // A pool of up to ten deterministic candidates: the Morning Brief overlay
+    // ranks within this pool server-side, and the plan still keeps three.
+    const candidates = buildDayPlanCandidates({
+      localDate,
+      timezone,
+      tasks: candidateTasks.map((task) => ({
         id: task._id,
         title: task.title,
         description: task.description,
@@ -743,20 +820,48 @@ function TodayExperience({
         priority: task.priority,
         dueAt: task.dueAt,
         position: task.position,
-        column: task.columnId === inFlightColumn?._id ? 'in_flight' : 'today',
+        column: task.columnId === inFlightColumn?._id
+          ? 'in_flight'
+          : task.columnId === todayColumn?._id
+            ? 'today'
+            : 'due_backlog',
         status: task.status ?? 'open',
         updatedAt: task.updatedAt > 0 ? new Date(task.updatedAt).toISOString() : refreshedAt,
         refreshedAt,
         freshness: candidateEvidence?.freshness ?? 'stale',
         project: task.tags[0],
+        briefPicked: briefPickedIds.has(task._id),
       })),
     }, 10);
-  }, [candidateEvidence, commitments, inFlightColumn?._id]);
+    const tierByTaskId = new Map(
+      candidateTasks.map((task, index) => [task._id, index]),
+    );
+    return orderArrivalCandidatesByTier(candidates, tierByTaskId);
+  }, [
+    candidateEvidence,
+    briefPickedTasks,
+    inFlightColumn?._id,
+    localMode,
+    openTasks,
+    todayColumn?._id,
+  ]);
+
+  const onBriefPicksChange = useCallback(async (
+    picks: ReadonlyArray<{ taskId: string; whyToday: string }>,
+    briefReady: boolean,
+  ) => {
+    setBriefPickedTasks((current) => {
+      const next = [...picks];
+      return JSON.stringify(current) === JSON.stringify(next) ? current : next;
+    });
+    if (briefReady) await retry().catch(() => undefined);
+  }, [retry]);
 
   const dayRitual = useDayRitual({
     enabled: !loading && Boolean(todayColumn && doneColumn),
     candidates: dayPlanCandidates,
     candidatesReady: candidateEvidence?.freshness === 'current',
+    onBriefPicksChange,
   });
   const ritualView: OverlayRitualView | undefined =
     dayRitual.view === 'arrival' ||
@@ -792,6 +897,10 @@ function TodayExperience({
   const detailTask = detailTaskId
     ? tasks.find((task) => task._id === detailTaskId) ?? null
     : null;
+  const cadenceByTemplateId = useMemo(
+    () => new Map(rhythmTemplates.map((template) => [template.id, template.cadence])),
+    [rhythmTemplates],
+  );
   const activeSuggestions = suggestions
     .filter((suggestion) => suggestion.state === 'proposed' || suggestion.state === 'refined')
     .sort((left, right) => {
@@ -810,15 +919,28 @@ function TodayExperience({
       setSuggestions(snapshot.suggestions);
       setSurfaceError(undefined);
     } catch {
-      setSurfaceError("Cove couldn't refresh Jarvis suggestions. This doesn't touch your committed tasks.");
+      setSurfaceError("Cove couldn't refresh its suggestions. This doesn't touch your committed tasks.");
     } finally {
       setSuggestionsLoading(false);
     }
   }, []);
 
+  const loadRhythms = useCallback(async () => {
+    if (!localMode) return;
+    try {
+      setRhythmTemplates(await listRecurringTemplates());
+    } catch {
+      setSurfaceError("Cove couldn't refresh rhythms. Your task current is unchanged.");
+    }
+  }, [localMode]);
+
   useEffect(() => {
     void loadSuggestions();
   }, [loadSuggestions]);
+
+  useEffect(() => {
+    void loadRhythms();
+  }, [loadRhythms]);
 
   useEffect(() => {
     const interval = window.setInterval(() => setNow(new Date()), 30000);
@@ -946,7 +1068,7 @@ function TodayExperience({
       await dayRitual.openSettlement();
     } catch (nextError) {
       setSurfaceError(
-        nextError instanceof Error ? nextError.message : "Cove couldn't open Day Settlement.",
+        nextError instanceof Error ? nextError.message : "Cove couldn't start closing your day.",
       );
     }
   }, [closeTransientSurfaces, dayRitual]);
@@ -997,7 +1119,7 @@ function TodayExperience({
           taskStateById.get(reconciliation.taskId),
           step.nextState,
         )) {
-          throw new Error('Cove could not verify the task reconciliation result.');
+          throw new Error('Cove could not confirm the task update.');
         }
         await dayRitual.acknowledgeReconciliation(reconciliation.id);
       }
@@ -1075,6 +1197,7 @@ function TodayExperience({
     setSurfaceError(undefined);
     try {
       const result = await dayRitual.commitSettlement(completedHumanTaskIds, settlementNote);
+      await retry();
       setSettlementNote('');
       const reconciliations = result.pendingReconciliations ?? [];
       await reconcileDayPlanActions(reconciliations);
@@ -1097,7 +1220,7 @@ function TodayExperience({
           : "Cove couldn't finish reconciling the closed day.",
       );
     }
-  }, [candidateEvidence?.freshness, dayRitual, notStartedColumn, reconcileDayPlanActions, settlementNote]);
+  }, [candidateEvidence?.freshness, dayRitual, notStartedColumn, reconcileDayPlanActions, retry, settlementNote]);
 
   useEffect(() => {
     if (
@@ -1261,7 +1384,11 @@ function TodayExperience({
       ? tasks.find((task) => task._id === suggestion.targetTaskId)
       : undefined;
     if (
-      (suggestion.kind === 'returned_work' || suggestion.kind === 'observed_progress') &&
+      (
+        suggestion.kind === 'returned_work' ||
+        suggestion.kind === 'observed_progress' ||
+        suggestion.kind === 'stale_task'
+      ) &&
       !targetTask
     ) {
       setSurfaceError('The task this suggestion refers to no longer exists.');
@@ -1303,6 +1430,12 @@ function TodayExperience({
           await updateTask(targetTask._id, { status: 'done' });
         }
         focusTask(targetTask._id, 'observed_progress');
+      } else if (targetTask && suggestion.kind === 'stale_task') {
+        resolvedTaskId = targetTask._id;
+        if (source === 'explicit_accept') {
+          await updateTask(targetTask._id, {});
+        }
+        focusTask(targetTask._id, 'stale_task');
       } else {
         resolvedTaskId = await createTask({
           columnId: todayColumn._id,
@@ -1344,6 +1477,8 @@ function TodayExperience({
               ? source === 'explicit_accept'
                 ? 'Marked task done'
                 : 'Opened task'
+              : suggestion.kind === 'stale_task'
+                ? 'Kept task'
               : 'Added to your current',
         run: async () => {
           await reopenSuggestion(
@@ -1485,7 +1620,7 @@ function TodayExperience({
       const nextTask = commitments.find((candidate) => candidate._id !== task._id);
       setFocusedTaskId(nextTask?._id ?? null);
       showUndo({
-        message: 'Held for Jarvis',
+        message: 'Held by Cove',
         run: async () => {
           await updateTask(task._id, { tags: task.tags });
           focusTask(task._id, 'pluck_back');
@@ -1493,7 +1628,7 @@ function TodayExperience({
         },
       });
     } catch {
-      setSurfaceError("Cove couldn't finish moving that task to the Jarvis shelf. Refresh the current to confirm its state, then try again.");
+      setSurfaceError("Cove couldn't finish holding that task. Refresh the current to confirm its state, then try again.");
     }
   }
 
@@ -1539,10 +1674,25 @@ function TodayExperience({
 
   async function deleteDetail() {
     if (!detailTask) return;
+    const archived = detailTask;
     try {
       await deleteTask(detailTask._id);
+      if (localMode) {
+        showUndo({
+          message: 'Moved to Recently deleted',
+          run: async () => {
+            await restoreRestTask(archived._id);
+            await retry();
+            setUndo(null);
+          },
+        });
+      }
     } catch (error) {
-      setSurfaceError("Cove couldn't confirm that deletion. Refresh All Work to check the task, then try again.");
+      setSurfaceError(
+        localMode
+          ? "Cove couldn't move that task to Recently deleted. Refresh All Work to check it, then try again."
+          : "Cove couldn't delete that task. Refresh All Work to check it, then try again.",
+      );
       throw error;
     }
   }
@@ -1655,7 +1805,7 @@ function TodayExperience({
         definitionOfDone: item.definitionOfDone,
         project: helpfulProjectLabel(item.project),
         deadline: item.dueAt
-          ? new Date(item.dueAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+          ? formatArrivalDueDate(item.dueAt)
           : undefined,
       };
     }),
@@ -1709,8 +1859,26 @@ function TodayExperience({
     doneColumn?._id,
     tasks,
   ]);
+  const boardSessionByTaskId = useMemo(() => {
+    const map = new Map<string, {
+      item: DayPlanItem;
+      run?: TaskSessionRun;
+    }>();
+    if (!localMode || !dayRitual.plan) return map;
+    for (const item of dayRitual.plan.items) {
+      if (item.owner !== 'claude' && item.owner !== 'together') continue;
+      map.set(item.taskId, {
+        item,
+        run: taskSessions.latestByTaskId.get(item.taskId),
+      });
+    }
+    return map;
+  }, [dayRitual.plan, localMode, taskSessions.latestByTaskId]);
   const focusedBoardExecution = focusedTask
     ? boardExecutionByTaskId.get(focusedTask._id)
+    : undefined;
+  const focusedBoardSession = focusedTask
+    ? boardSessionByTaskId.get(focusedTask._id)
     : undefined;
   const kickoffBoardExecution = (
     execution: NonNullable<typeof focusedBoardExecution>,
@@ -1771,6 +1939,9 @@ function TodayExperience({
       return {
         id: item.taskId,
         title: item.title,
+        sessionStatus: localMode
+          ? taskSessions.latestByTaskId.get(item.taskId)?.status
+          : undefined,
         detail: task && task.updatedAt > 0 &&
           (task.status === 'done' || task.columnId === doneColumn?._id)
           ? `Completed ${new Date(task.updatedAt).toLocaleDateString('en-US', {
@@ -1783,14 +1954,25 @@ function TodayExperience({
     });
   const unresolvedForSettlement = orderedPlanItems
     .filter((item) => item.decision === 'accepted')
-    .map((item) => ({ item, title: item.title, outcome: item.outcome }));
+    .map((item) => ({
+      item,
+      title: item.title,
+      outcome: item.outcome,
+      sessionStatus: localMode
+        ? taskSessions.latestByTaskId.get(item.taskId)?.status
+        : undefined,
+    }));
   const settlementDecisions = Object.fromEntries(
     orderedPlanItems.map((item) => [item.id, item.settlementDecision?.disposition]),
   );
   const proposedTomorrow = firstContinuingItem(orderedPlanItems, settlementDecisions);
   const visibleSurfaceError = combineSurfaceErrors(
     dayRitual.ritualOpen ? undefined : dayRitual.error,
-    dayRitual.ritualOpen ? undefined : dayRitual.executionError,
+    dayRitual.ritualOpen
+      ? undefined
+      : localMode
+        ? taskSessions.error
+        : dayRitual.executionError,
     surfaceError,
   );
 
@@ -1875,6 +2057,21 @@ function TodayExperience({
             <p className="current-today-label">Today</p>
             <time className="current-time" dateTime={now.toISOString()}>{timeLabel}</time>
             <p className="current-greeting">{greeting}</p>
+            {dayRitual.weekendGate && (
+              <div className="mt-4 flex flex-wrap items-center gap-3">
+                <p className="text-sm text-muted-foreground">
+                  It&apos;s {dayRitual.weekendGate.weekday}. Cove plans weekdays.
+                </p>
+                <button
+                  type="button"
+                  className="current-capture-toggle"
+                  disabled={dayRitual.planningWeekend}
+                  onClick={() => void dayRitual.planWeekendAnyway()}
+                >
+                  {dayRitual.planningWeekend ? 'Planning…' : 'Plan today anyway'}
+                </button>
+              </div>
+            )}
             <div className="mt-4 flex flex-wrap items-center gap-2">
               <button
                 type="button"
@@ -1906,11 +2103,12 @@ function TodayExperience({
                   autoFocus
                   value={capture}
                   onChange={(event) => setCapture(event.target.value)}
-                  placeholder="Add the work Jarvis could not know."
+                  placeholder="Add work Cove could not know."
                 />
                 <button type="submit" disabled={!capture.trim() || capturing}>Add</button>
               </form>
             )}
+            <CoveReadinessStrip />
             {visibleSurfaceError && (
               <p role="alert" className="current-surface-error">{visibleSurfaceError}</p>
             )}
@@ -1919,10 +2117,10 @@ function TodayExperience({
                 {dayRitual.startReceipt ?? dayRitual.settlementReceipt}
               </p>
             )}
-            {dayRitual.plan?.state === 'active' &&
+            {!localMode && dayRitual.plan?.state === 'active' &&
               dayRitual.executionState?.workerAvailable === false && (
               <p role="status" className="current-worker-warning">
-                Claude&apos;s background runner looks offline — runs will wait until it&apos;s back.
+                Claude&apos;s background runner looks offline. Work will wait until it is back.
               </p>
             )}
             {error && (
@@ -1992,10 +2190,15 @@ function TodayExperience({
                   onClick={() => setFocusExpanded((current) => !current)}
                 >
                   <span className="current-now-kicker">
-                    {focusedIsWithJarvis ? 'Held for Jarvis' : focusedIsBrief ? 'Email brief' : 'Now'}
+                    {focusedIsWithJarvis ? 'Held by Cove' : focusedIsBrief ? 'Email needs you' : 'Now'}
                     {focusedTask.blocked ? ' · Waiting' : ''}
                     {focusedIsOutsideToday && !focusedIsWithJarvis && !focusedIsBrief ? ' · Outside today' : ''}
-                    {focusedBoardExecution?.run && focusedBoardExecution.presentation.statusLabel && (
+                    {localMode && focusedBoardSession?.run && (
+                      <span className="ml-2 align-middle">
+                        {TASK_SESSION_STATUS_LABELS[focusedBoardSession.run.status]}
+                      </span>
+                    )}
+                    {!localMode && focusedBoardExecution?.run && focusedBoardExecution.presentation.statusLabel && (
                       <RunStatusChip
                         status={focusedBoardExecution.run.status}
                         label={focusedBoardExecution.presentation.statusLabel}
@@ -2021,7 +2224,19 @@ function TodayExperience({
                 </button>
               </div>
 
-              {focusedBoardExecution &&
+              {localMode && focusedBoardSession && dayRitual.plan && (
+                <div className="current-hero-execution" aria-label={`Claude session for ${focusedTask.title}`}>
+                  <TaskSessionLauncher
+                    input={taskSessionInput(dayRitual.plan.id, focusedBoardSession.item)}
+                    run={focusedBoardSession.run}
+                    busy={taskSessions.launchingTaskIds.has(focusedTask._id)}
+                    preferredOwner={focusedBoardSession.item.owner === 'together' ? 'together' : 'claude'}
+                    onLaunch={taskSessions.launch}
+                  />
+                </div>
+              )}
+
+              {!localMode && focusedBoardExecution &&
                 (focusedBoardExecution.item.owner === 'claude' ||
                   focusedBoardExecution.item.owner === 'together') && (
                 <div className="current-hero-execution" aria-label={`Claude planning for ${focusedTask.title}`}>
@@ -2047,7 +2262,7 @@ function TodayExperience({
                     focusedBoardExecution.presentation.action === 'restart' ? (
                     <div className="flex max-w-sm flex-col items-center gap-2 text-center">
                       <p className="text-[11px] leading-relaxed text-muted-foreground">
-                        Claude&apos;s session reference is missing — restart planning to reopen it.
+                        Claude&apos;s session link is missing. Restart planning to reopen it.
                       </p>
                       <button
                         type="button"
@@ -2116,15 +2331,25 @@ function TodayExperience({
                     <dl>
                       <div><dt>Priority</dt><dd className="capitalize">{focusedTask.priority}</dd></div>
                       <div><dt>Due</dt><dd>{focusedTask.dueDate ? new Date(`${focusedTask.dueDate}T00:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : 'Open'}</dd></div>
-                      <div><dt>State</dt><dd>{focusedIsWithJarvis ? 'Held for Jarvis' : 'Committed'}</dd></div>
+                      <div><dt>State</dt><dd>{focusedIsWithJarvis ? 'Held by Cove' : 'Committed'}</dd></div>
                     </dl>
                   </div>
                   <div className="current-focus-actions">
                     <button type="button" onClick={() => setDetailTaskId(focusedTask._id)}>Edit details</button>
-                    {!focusedIsWithJarvis && <button type="button" onClick={() => void handToJarvis(focusedTask)}>Hold for Jarvis</button>}
+                    {!focusedIsWithJarvis && <button type="button" onClick={() => void handToJarvis(focusedTask)}>Hold for Cove</button>}
                     <button type="button" onClick={openSearch}>Find other work <kbd>⌘K</kbd></button>
                   </div>
-                  {focusedBoardExecution &&
+                  {localMode && focusedBoardSession && dayRitual.plan && (
+                    <TaskSessionPanel
+                      input={taskSessionInput(dayRitual.plan.id, focusedBoardSession.item)}
+                      run={focusedBoardSession.run}
+                      busy={taskSessions.launchingTaskIds.has(focusedTask._id)}
+                      preferredOwner={focusedBoardSession.item.owner === 'together' ? 'together' : 'claude'}
+                      error={taskSessions.error}
+                      onLaunch={taskSessions.launch}
+                    />
+                  )}
+                  {!localMode && focusedBoardExecution &&
                     (focusedBoardExecution.item.owner === 'claude' ||
                       focusedBoardExecution.item.owner === 'together') && (
                     <ExecutionConfigPanel
@@ -2158,6 +2383,7 @@ function TodayExperience({
           {downstreamLayout.map(({ task, x, y, side }, index) => {
             const time = realTimeLabel(task.dueAt);
             const execution = boardExecutionByTaskId.get(task._id);
+            const session = boardSessionByTaskId.get(task._id);
             return (
               <article
                 key={task._id}
@@ -2177,7 +2403,19 @@ function TodayExperience({
                   <button type="button" className="current-node-title" onClick={() => focusTask(task._id, 'pointer')}>
                     <strong>{task.title}</strong>
                   </button>
-                  {execution && (execution.needsSetup || (
+                  {localMode && session && dayRitual.plan && (
+                    <div className="current-node-execution">
+                      <TaskSessionLauncher
+                        compact
+                        input={taskSessionInput(dayRitual.plan.id, session.item)}
+                        run={session.run}
+                        busy={taskSessions.launchingTaskIds.has(task._id)}
+                        preferredOwner={session.item.owner === 'together' ? 'together' : 'claude'}
+                        onLaunch={taskSessions.launch}
+                      />
+                    </div>
+                  )}
+                  {!localMode && execution && (execution.needsSetup || (
                     execution.run && execution.presentation.statusLabel
                   )) && (
                     <div className="current-node-execution">
@@ -2239,32 +2477,55 @@ function TodayExperience({
 
           <aside className="current-jarvis-current" aria-labelledby="jarvis-lane-title">
             <div className="current-jarvis-heading">
-              <span>Second current</span>
-              <h2 id="jarvis-lane-title">Jarvis shelf</h2>
+              <span>Work held for you</span>
+              <h2 id="jarvis-lane-title">Cove shelf</h2>
+              {localMode && (
+                <RhythmManager
+                  templates={rhythmTemplates}
+                  onChanged={async () => {
+                    await Promise.all([loadRhythms(), retry()]);
+                  }}
+                />
+              )}
               <i aria-hidden="true" />
             </div>
             <div className="current-jarvis-nodes">
               {jarvisTasks.length > 0 ? jarvisTasks.slice(0, 3).map((task) => (
                 <article key={task._id} className={focusedTaskId === task._id ? 'is-focused' : ''}>
                   <button type="button" onClick={() => {
-                    if (boardExecutionByTaskId.get(task._id)?.needsSetup) {
+                    if (!localMode && boardExecutionByTaskId.get(task._id)?.needsSetup) {
                       openExecutionSetup(task._id);
                     } else if (isEmailDigest(task)) {
                       setDetailTaskId(task._id);
+                    } else if (isRecurringTask(task)) {
+                      void completeTask(task);
                     } else {
                       focusTask(task._id, 'jarvis_current');
                     }
                   }}>
-                    <span>{isEmailDigest(task) ? 'Email brief ready' : 'Held for Jarvis'}</span>
+                    <span>
+                      {isEmailDigest(task)
+                        ? 'Email needs you'
+                        : isRecurringTask(task)
+                          ? `${cadenceDisplay(
+                              cadenceByTemplateId.get(task.recurringTemplateId ?? '') ?? '',
+                            )} · tap to check off`
+                          : 'Held by Cove'}
+                    </span>
                     <strong>{task.title}</strong>
-                    {boardExecutionByTaskId.get(task._id)?.run && (
+                    {localMode && boardSessionByTaskId.get(task._id)?.run && (
+                      <span className="mt-1 self-start text-[0.6875rem] font-medium">
+                        {TASK_SESSION_STATUS_LABELS[boardSessionByTaskId.get(task._id)!.run!.status]}
+                      </span>
+                    )}
+                    {!localMode && boardExecutionByTaskId.get(task._id)?.run && (
                       <RunStatusChip
                         status={boardExecutionByTaskId.get(task._id)!.run!.status}
                         label={boardExecutionByTaskId.get(task._id)!.presentation.statusLabel}
                         className="mt-1 self-start"
                       />
                     )}
-                    {boardExecutionByTaskId.get(task._id)?.needsSetup && (
+                    {!localMode && boardExecutionByTaskId.get(task._id)?.needsSetup && (
                       <span className="mt-1 w-fit rounded-full border border-border/70 bg-muted/60 px-2 py-1 text-[0.6875rem] font-medium normal-case tracking-normal">
                         Needs setup to start
                       </span>
@@ -2315,11 +2576,21 @@ function TodayExperience({
                   ) : (
                     <>
                       {suggestion.description && <p>{suggestion.description}</p>}
-                      {suggestion.kind === 'returned_work' && suggestion.reviewMaterial && <details className="quiet-returned-work"><summary>Read Jarvis&apos;s work</summary><pre>{suggestion.reviewMaterial}</pre></details>}
+                      {suggestion.kind === 'returned_work' && suggestion.reviewMaterial && <details className="quiet-returned-work"><summary>Read Cove&apos;s work</summary><pre>{suggestion.reviewMaterial}</pre></details>}
                       <small>Source: {suggestion.source}</small>
                       <div className="current-tributary-actions">
-                        <button type="button" onClick={() => void commitSuggestion(suggestion, 'explicit_accept')} className="quiet-pencil-action is-primary">{suggestion.kind === 'observed_progress' ? 'Mark done' : 'Accept'}</button>
-                        <button type="button" onClick={() => void commitSuggestion(suggestion, 'began_work')} className="quiet-pencil-action">{suggestion.kind === 'observed_progress' ? 'Open task' : 'Begin'}</button>
+                        <button type="button" onClick={() => void commitSuggestion(suggestion, 'explicit_accept')} className="quiet-pencil-action is-primary">
+                          {suggestion.kind === 'observed_progress'
+                            ? 'Mark done'
+                            : suggestion.kind === 'stale_task'
+                              ? 'Keep it'
+                              : 'Accept'}
+                        </button>
+                        <button type="button" onClick={() => void commitSuggestion(suggestion, 'began_work')} className="quiet-pencil-action">
+                          {suggestion.kind === 'observed_progress' || suggestion.kind === 'stale_task'
+                            ? 'Open task'
+                            : 'Begin'}
+                        </button>
                         <button type="button" onClick={() => { setEditingSuggestionId(suggestion.id); setSuggestionDraft({ title: suggestion.title, description: suggestion.description }); }} className="quiet-pencil-action">Edit</button>
                         {!suggestion.resurfacedFromDeferredAt && (
                           <button type="button" onClick={() => void deferSuggestion(suggestion)} className="quiet-pencil-action">Later</button>
@@ -2399,7 +2670,7 @@ function TodayExperience({
                   >
                     <span className="min-w-0 flex-1 truncate text-left">{task.title}</span>
                     <span className="text-[10px] text-muted-foreground">
-                      {withJarvis ? 'Held for Jarvis' : brief ? 'Email brief' : inCurrent ? 'In current' : 'Outside today'}
+                      {withJarvis ? 'Held by Cove' : brief ? 'Email needs you' : inCurrent ? 'In current' : 'Outside today'}
                     </span>
                   </button>
                 );
@@ -2419,6 +2690,12 @@ function TodayExperience({
           onDeleted={() => setDetailTaskId(null)}
           onSaveTask={saveDetail}
           onDeleteTask={deleteDetail}
+          onConfirmRecurrence={localMode
+            ? async (cadence) => {
+                await confirmTaskRecurrence(detailTask._id, cadence);
+                await retry();
+              }
+            : undefined}
         />
       )}
       </div>
@@ -2449,6 +2726,8 @@ function TodayExperience({
                 recommendation={recommendation}
                 brief={dayRitual.morningBrief}
                 briefGeneration={dayRitual.briefGeneration}
+                briefAttachTimedOut={dayRitual.briefAttachTimedOut}
+                arrivalInteracted={dayRitual.arrivalInteracted}
                 onForceBrief={() => void dayRitual.forceBrief()}
                 forcingBrief={dayRitual.forcingBrief}
                 recap={morningRecap}
@@ -2460,7 +2739,7 @@ function TodayExperience({
                   : 'Using the latest verified task evidence'}
                 expandedItemId={expandedArrivalItemId}
                 busy={dayRitual.busy}
-                error={dayRitual.error}
+                error={combineSurfaceErrors(dayRitual.error, surfaceError)}
                 titleId={RITUAL_TITLE_IDS.arrival}
                 descriptionId={RITUAL_DESCRIPTION_IDS.arrival}
                 escapeRef={arrivalEscapeRef}
@@ -2477,7 +2756,6 @@ function TodayExperience({
                   if (position >= 0) await dayRitual.reorder(activeId, position, title);
                 }}
                 onDismiss={dayRitual.dismissItem}
-                onSalesAction={dayRitual.markBriefSalesAction}
                 onAddSuggestion={dayRitual.addItem}
                 onSnooze={() => dayRitual.snooze().catch(() => undefined)}
                 onSkip={() => dayRitual.skip().catch(() => undefined)}
@@ -2499,7 +2777,7 @@ function TodayExperience({
                 proposedTomorrowTitle={proposedTomorrow?.title}
                 savingItemIds={dayRitual.savingItemIds}
                 closing={dayRitual.busy}
-                error={dayRitual.error}
+                error={combineSurfaceErrors(dayRitual.error, surfaceError)}
                 note={settlementNote}
                 canDefer={Boolean(notStartedColumn)}
                 titleId={RITUAL_TITLE_IDS.settlement}

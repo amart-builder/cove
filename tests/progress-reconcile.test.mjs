@@ -4,6 +4,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -11,17 +12,27 @@ import path from "node:path";
 import test from "node:test";
 import Database from "better-sqlite3";
 import { createDayPlanStore } from "../src/lib/day-plan/store.ts";
+import { openLocalDatabase } from "../src/lib/local/database.ts";
 import {
+  discoverTranscriptFiles,
+  evidenceFor,
+  evidenceText,
+  extractTranscriptWrapup,
   fetchOpenProjectTasks,
   groupRecentPings,
+  hasOpenProjectTaskDueToday,
   hasNewProjectEvidence,
   mergeProgressHeartbeat,
   parseProgressOutput,
+  prepareProgressAnalysisInput,
+  progressPrompt,
   projectFromCwd,
   readPingFiles,
+  redactTranscriptText,
   resolvePingProject,
   runProgressReconcile,
   shouldProcessProject,
+  transcriptDirectoryForCwd,
   validateProgress,
 } from "../scripts/cove-progress-reconcile.mjs";
 import {
@@ -36,13 +47,18 @@ import {
   setQuietCurrentNowForTests,
   setQuietCurrentStorePathForTests,
 } from "../src/lib/quiet-current/store.ts";
+import { claimLaneOwnership } from "../scripts/lib/cove-lane-ownership.mjs";
 
 const NOW = new Date("2026-07-27T21:30:00.000Z");
+const MACHINE_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+const OWNER_ID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+const OTHER_ID = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+const MACHINE = { id: MACHINE_ID, hostname: "test-mac.local" };
 
 function fixture(t) {
   const dir = path.join(
     os.tmpdir(),
-    `forge-progress-${process.pid}-${Date.now()}-${Math.random()}`,
+    `cove-progress-${process.pid}-${Date.now()}-${Math.random()}`,
   );
   mkdirSync(dir, { recursive: true });
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -60,6 +76,75 @@ function ping(project, minute, host = "mbp") {
   };
 }
 
+test("a non-owner progress reconciler stands down before reading work", async (t) => {
+  const dataDir = fixture(t);
+  const ownerIdentity = { id: OWNER_ID, hostname: "owner-mac.local" };
+  const otherIdentity = { id: OTHER_ID, hostname: "other-mac.local" };
+  claimLaneOwnership({
+    dataDir,
+    lane: "progress",
+    identity: ownerIdentity,
+  });
+  let ownerPingReads = 0;
+  const ownerResult = await runProgressReconcile({
+    dataDir,
+    machineIdentity: { id: OWNER_ID, hostname: "owner-mac.lan" },
+    dryRun: true,
+    now: () => NOW,
+    readPings: () => {
+      ownerPingReads += 1;
+      return [];
+    },
+  });
+  assert.equal(ownerResult.summary.standing_down, false);
+  assert.equal(ownerPingReads, 1);
+  const heartbeatPath = path.join(dataDir, "intake", "heartbeats.json");
+  mergeProgressHeartbeat(heartbeatPath, {
+    last_run_at: NOW.toISOString(),
+    projects_active: 2,
+    digests_written: 1,
+    suggestions_filed: 1,
+    skipped_no_new_evidence: 0,
+    malformed_ping_lines: 0,
+    errors: 1,
+  }, ownerIdentity);
+  let pingReads = 0;
+  const result = await runProgressReconcile({
+    dataDir,
+    machineIdentity: otherIdentity,
+    now: () => NOW,
+    readPings: () => {
+      pingReads += 1;
+      return [];
+    },
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.summary.standing_down, true);
+  assert.equal(result.summary.standing_down_owner, "owner-mac.local");
+  assert.equal(pingReads, 0);
+  const heartbeat = JSON.parse(readFileSync(
+    heartbeatPath,
+    "utf8",
+  ));
+  assert.equal(
+    heartbeat.machines[OWNER_ID].progress_reconcile.errors,
+    1,
+  );
+  assert.equal(
+    heartbeat.machines[OTHER_ID].progress_reconcile.owner_id,
+    OWNER_ID,
+  );
+  assert.deepEqual(
+    Object.keys(heartbeat.machines[OTHER_ID].progress_reconcile).sort(),
+    [
+      "observed_at",
+      "owner_hostname_at_claim",
+      "owner_id",
+      "standing_down",
+    ],
+  );
+});
+
 test("cwd project mapping tolerates both machines, nesting, and non-project paths", () => {
   assert.equal(
     projectFromCwd("/Users/operator/Atlas/Projects/catalyst/src/app"),
@@ -67,27 +152,333 @@ test("cwd project mapping tolerates both machines, nesting, and non-project path
   );
   assert.equal(
     projectFromCwd(
-      "/Users/operator/Atlas/Projects/astack/forge/scripts",
+      "/Users/operator/Atlas/Projects/astack/cove/scripts",
+      {
+        existsImpl: (candidate) =>
+          candidate.endsWith("/Atlas/Projects/astack/cove/.git"),
+      },
     ),
-    "forge",
+    "cove",
   );
   assert.equal(projectFromCwd("/Users/operator/Atlas/brain"), "Atlas");
   assert.equal(projectFromCwd("/tmp"), "Atlas");
 });
 
+test("Claude transcript directory encoding matches absolute cwd punctuation", (t) => {
+  const dir = fixture(t);
+  const projectsDir = path.join(dir, ".claude", "projects");
+  assert.equal(
+    transcriptDirectoryForCwd(
+      "/Users/operator/Atlas/Projects/astack/cove",
+      { projectsDir },
+    ),
+    path.join(projectsDir, "-Users-operator-Atlas-Projects-astack-cove"),
+  );
+  assert.equal(
+    transcriptDirectoryForCwd(
+      "/Users/operator/Atlas/Projects/astack/cove/",
+      { projectsDir },
+    ),
+    path.join(projectsDir, "-Users-operator-Atlas-Projects-astack-cove-"),
+  );
+  assert.equal(
+    transcriptDirectoryForCwd("/opt/client-work/repo", { projectsDir }),
+    path.join(projectsDir, "-opt-client-work-repo"),
+  );
+  assert.equal(
+    transcriptDirectoryForCwd(
+      "/Users/operator/Atlas/.claude/worktrees/article-drafts/.render",
+      { projectsDir },
+    ),
+    path.join(
+      projectsDir,
+      "-Users-operator-Atlas--claude-worktrees-article-drafts--render",
+    ),
+  );
+  assert.equal(transcriptDirectoryForCwd("relative/repo", { projectsDir }), undefined);
+});
+
+test("transcript discovery uses raw cwd directories, the 24-hour window, and newest three", (t) => {
+  const dir = fixture(t);
+  const projectsDir = path.join(dir, ".claude", "projects");
+  const cwd = "/Users/operator/Atlas/Projects/astack/cove";
+  const transcriptDir = transcriptDirectoryForCwd(cwd, { projectsDir });
+  mkdirSync(transcriptDir, { recursive: true });
+  const files = [
+    ["old.jsonl", NOW.getTime() - 25 * 60 * 60_000],
+    ["one.jsonl", NOW.getTime() - 4_000],
+    ["two.jsonl", NOW.getTime() - 3_000],
+    ["three.jsonl", NOW.getTime() - 2_000],
+    ["four.jsonl", NOW.getTime() - 1_000],
+  ];
+  for (const [name, timestamp] of files) {
+    const file = path.join(transcriptDir, name);
+    writeFileSync(file, "{}\n");
+    const date = new Date(timestamp);
+    utimesSync(file, date, date);
+  }
+  writeFileSync(path.join(transcriptDir, "ignore.txt"), "{}\n");
+  assert.deepEqual(
+    discoverTranscriptFiles(
+      { pings: [{ cwd }, { cwd }, { cwd: "relative/repo" }] },
+      {
+        projectsDir,
+        windowStart: new Date(NOW.getTime() - 24 * 60 * 60_000),
+        windowEnd: NOW,
+      },
+    ).map((file) => path.basename(file)),
+    ["four.jsonl", "three.jsonl", "two.jsonl"],
+  );
+});
+
+test("tail extraction takes the last textual assistant message and ignores later line types", (t) => {
+  const dir = fixture(t);
+  const file = path.join(dir, "mixed.jsonl");
+  const lines = [
+    { type: "user", timestamp: "2026-07-27T20:00:00.000Z", message: { content: "Build it" } },
+    { type: "system", timestamp: "2026-07-27T20:00:01.000Z", message: "system" },
+    { type: "attachment", timestamp: "2026-07-27T20:00:02.000Z" },
+    {
+      type: "assistant",
+      timestamp: "2026-07-27T20:30:00.000Z",
+      message: {
+        content: [
+          { type: "thinking", thinking: "hidden" },
+          { type: "text", text: "Implemented the route. " },
+          { type: "tool_use", name: "Bash", input: { command: "npm test" } },
+          { type: "text", text: "Verified 12 tests." },
+        ],
+      },
+    },
+    { type: "mode", timestamp: "2026-07-27T20:30:01.000Z", mode: "plan" },
+  ];
+  writeFileSync(
+    file,
+    `${lines.map((line) => JSON.stringify(line)).join("\n")}\n{"type":`,
+  );
+  assert.deepEqual(extractTranscriptWrapup(file), {
+    session_file: "mixed.jsonl",
+    started_at: "2026-07-27T20:00:00.000Z",
+    ended_at: "2026-07-27T20:30:00.000Z",
+    text: "Implemented the route. Verified 12 tests.",
+  });
+});
+
+test("tail extraction skips a final API error and uses the earlier assistant wrap-up", (t) => {
+  const dir = fixture(t);
+  const file = path.join(dir, "transport-error.jsonl");
+  writeFileSync(
+    file,
+    [
+      JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-07-27T20:30:00.000Z",
+        message: { content: "Implemented the route and verified 12 tests." },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        timestamp: "2026-07-27T20:31:00.000Z",
+        message: { content: "API Error: 529 Overloaded. Please retry later." },
+      }),
+    ].join("\n"),
+  );
+  assert.deepEqual(extractTranscriptWrapup(file), {
+    session_file: "transport-error.jsonl",
+    started_at: "2026-07-27T20:30:00.000Z",
+    ended_at: "2026-07-27T20:30:00.000Z",
+    text: "Implemented the route and verified 12 tests.",
+  });
+});
+
+test("tail extraction skips transcripts without assistant text", (t) => {
+  const dir = fixture(t);
+  const file = path.join(dir, "no-assistant.jsonl");
+  writeFileSync(
+    file,
+    [
+      JSON.stringify({ type: "user", timestamp: NOW.toISOString() }),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use" }] } }),
+      JSON.stringify({ type: "mode", mode: "plan" }),
+    ].join("\n"),
+  );
+  assert.equal(extractTranscriptWrapup(file), undefined);
+});
+
+test("tail extraction caps long assistant text by keeping its ending", (t) => {
+  const dir = fixture(t);
+  const file = path.join(dir, "long.jsonl");
+  const text = `discard-this-opening-${"bounded words ".repeat(140)}wrapup-ending`;
+  writeFileSync(
+    file,
+    `${JSON.stringify({
+      type: "assistant",
+      timestamp: NOW.toISOString(),
+      message: { content: text },
+    })}\n`,
+  );
+  const wrapup = extractTranscriptWrapup(file);
+  assert.equal(wrapup.text.length, 1_500);
+  assert.equal(wrapup.text, text.slice(-1_500));
+  assert.equal(wrapup.text.includes("discard-this-opening"), false);
+  assert.equal(wrapup.text.endsWith("wrapup-ending"), true);
+});
+
+test("tail extraction redacts before slicing an oversized assistant message", (t) => {
+  const dir = fixture(t);
+  const file = path.join(dir, "boundary-secret.jsonl");
+  const text = `FOO_TOKEN=longsecretvalue${"x".repeat(1_490)}`;
+  writeFileSync(
+    file,
+    `${JSON.stringify({
+      type: "assistant",
+      timestamp: NOW.toISOString(),
+      message: { content: text },
+    })}\n`,
+  );
+  const wrapup = extractTranscriptWrapup(file);
+  assert.equal(wrapup.text, redactTranscriptText(text).slice(-1_500));
+  assert.equal(wrapup.text.includes("longsecretvalue"), false);
+});
+
+test("transcript redaction covers every secret pattern and leaves clean text unchanged", () => {
+  // The AWS fixture is assembled at runtime so the repo's secret scanner does not
+  // flag this synthetic sample as a real leaked key.
+  const fakeAwsKey = ["AK", "IA", "1234567890ABCDEF"].join("");
+  const cases = [
+    ["sk-1234567890abcdef", "[redacted]"],
+    ["ghp_" + "12345678901234567890", "[redacted]"],
+    ["gho_" + "12345678901234567890", "[redacted]"],
+    [fakeAwsKey, "[redacted]"],
+    ["xoxb-" + "1234567890", "[redacted]"],
+    ["Bearer abcdefghijklmnop", "[redacted]"],
+    [
+      "-----BEGIN RSA " + "PRIVATE KEY-----\nprivate\n-----END RSA PRIVATE KEY-----",
+      "[redacted]",
+    ],
+    ["password=abcdefgh", "password=[redacted]"],
+    ["api_key: abcdefgh", "api_key: [redacted]"],
+    ["TELEGRAM_BOT_TOKEN=123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ", "TELEGRAM_BOT_TOKEN=[redacted]"],
+    ["TELEGRAM_BOT_TOKEN: 123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ", "TELEGRAM_BOT_TOKEN: [redacted]"],
+    ["\"TELEGRAM_BOT_TOKEN\": \"123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ\"", "\"TELEGRAM_BOT_TOKEN\": [redacted]"],
+    ["COVE_API_KEY = \"abcdefghijklmno\"", "COVE_API_KEY = [redacted]"],
+    ["service_secret='abcdefghijklmno'", "service_secret=[redacted]"],
+    ["A".repeat(48), "[redacted]"],
+  ];
+  for (const [input, expected] of cases) {
+    assert.equal(redactTranscriptText(input), expected);
+  }
+  const fileEvidence =
+    "Read /Users/operator/Atlas/Projects/astack/cove/src/lib/day-plan/brief-sources.ts and patched it.";
+  assert.equal(redactTranscriptText(fileEvidence), fileEvidence);
+  // Slash-bearing secrets still redact even though "/" is excluded from the opaque-run class.
+  const webhook =
+    "posted via https://hooks.slack.com/" + "services/T0AAAAAAA/B1BBBBBBB/xLmQ9wErTyUiOpAsDfGhJkZx today";
+  assert.ok(!webhook.includes("[redacted]"));
+  assert.ok(redactTranscriptText(webhook).includes("[redacted]"));
+  assert.ok(!redactTranscriptText(webhook).includes("xLmQ9wErTyUiOpAsDfGhJkZx"));
+  assert.equal(redactTranscriptText("Z".repeat(48)), "[redacted]");
+  const clean = "Implemented the project digest and verified twelve tests.";
+  assert.equal(redactTranscriptText(clean), clean);
+});
+
+test("progress prompts redact task titles and descriptions", () => {
+  const prompt = progressPrompt({
+    project: "Cove",
+    evidenceText: "The implementation is ready.",
+    tasks: [{
+      id: "task-1",
+      title: "Rotate FOO_TOKEN=longsecretvalue",
+      description: "The current value is FOO_TOKEN=longsecretvalue.",
+    }],
+  });
+  assert.equal(prompt.includes("longsecretvalue"), false);
+  assert.match(prompt, /FOO_TOKEN=\[redacted\]/);
+});
+
+test("rendered evidence contains transcript wrap-up text verbatim", () => {
+  const wrapup = "Implemented the route.\nVerified the held-out failure case.";
+  const rendered = evidenceText({
+    ping_count: 2,
+    session_span: "start to end",
+    ping_events: [],
+    git_log: [],
+    current_state: "",
+    session_wrapups: [{
+      session_file: "session.jsonl",
+      started_at: "start",
+      ended_at: "end",
+      text: wrapup,
+    }],
+  });
+  assert.match(
+    rendered,
+    /SESSION WRAP-UPS \(assistant self-reports, redacted\)/,
+  );
+  assert.equal(rendered.includes(wrapup), true);
+  assert.equal(rendered.includes("Verified the held-out failure case."), true);
+});
+
+test("Git, STATUS, and wrap-up evidence are redacted before model analysis", () => {
+  const evidence = evidenceFor(
+    {
+      pings: [],
+      firstAt: "2026-07-29T10:00:00.000Z",
+      lastAt: "2026-07-29T11:00:00.000Z",
+    },
+    {
+      lines: ["abc Configure TELEGRAM_BOT_TOKEN=123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ"],
+      head: "abc",
+    },
+    "Current State: COVE_API_KEY=abcdefghijklmno",
+    "fingerprint",
+    [{ session_file: "session.jsonl", text: "service_secret=abcdefghijklmno" }],
+  );
+  assert.equal(evidence.git_log[0].includes("123456789"), false);
+  assert.equal(evidence.current_state.includes("abcdefghijklmno"), false);
+  assert.equal(evidence.session_wrapups[0].text.includes("abcdefghijklmno"), false);
+  assert.match(evidenceText(evidence), /\[redacted\]/);
+});
+
+test("prompt budget drops transcript wrap-ups oldest first", () => {
+  const evidence = {
+    ping_count: 2,
+    session_span: "start to end",
+    ping_events: [],
+    git_log: [],
+    current_state: "s".repeat(55_000),
+    session_wrapups: [
+      { session_file: "newest.jsonl", text: `newest-${"n".repeat(1_493)}` },
+      { session_file: "middle.jsonl", text: `middle-${"m".repeat(1_493)}` },
+      { session_file: "oldest.jsonl", text: `oldest-${"o".repeat(1_493)}` },
+    ],
+  };
+  const prepared = prepareProgressAnalysisInput({
+    project: "cove",
+    tasks: [],
+    evidence,
+  });
+  assert.ok(prepared.prompt.length <= 60_000);
+  assert.deepEqual(
+    prepared.evidence.session_wrapups.map((wrapup) => wrapup.session_file),
+    ["newest.jsonl", "middle.jsonl"],
+  );
+  assert.equal(prepared.evidence.wrapups_dropped_for_budget, 1);
+  assert.equal(prepared.prompt.includes("oldest.jsonl"), false);
+});
+
 test("cwd mapping selects the deepest bounded git repo and rejects hostile segments", (t) => {
   const root = fixture(t);
-  mkdirSync(path.join(root, "Projects", "astack", "forge", ".git"), {
+  mkdirSync(path.join(root, "Projects", "astack", "cove", ".git"), {
     recursive: true,
   });
   assert.deepEqual(
     resolvePingProject(
-      "/Users/operator/Atlas/Projects/astack/forge/src",
+      "/Users/operator/Atlas/Projects/astack/cove/src",
       { atlasRoot: root },
     ),
     {
-      project: "forge",
-      projectDir: path.join(root, "Projects", "astack", "forge"),
+      project: "cove",
+      projectDir: path.join(root, "Projects", "astack", "cove"),
     },
   );
   assert.equal(
@@ -158,7 +549,7 @@ test("ping reader ignores conflicts and old files while counting malformed lines
   const dir = fixture(t);
   writeFileSync(
     path.join(dir, "mbp-2026-07-27.jsonl"),
-    `${JSON.stringify(ping("forge", 10))}\nnot-json\n`,
+    `${JSON.stringify(ping("cove", 10))}\nnot-json\n`,
   );
   writeFileSync(
     path.join(dir, "mbp.sync-conflict-1-2026-07-27.jsonl"),
@@ -170,25 +561,25 @@ test("ping reader ignores conflicts and old files while counting malformed lines
   );
   const result = readPingFiles(dir, { now: NOW });
   assert.equal(result.pings.length, 1);
-  assert.equal(result.pings[0].session_id, "mbp-forge-10");
+  assert.equal(result.pings[0].session_id, "mbp-cove-10");
   assert.equal(result.malformed, 1);
 });
 
 test("Supabase task fetch maps and bounds only the fields the model needs", async () => {
   let requested;
-  const tasks = await fetchOpenProjectTasks("forge", {
+  const tasks = await fetchOpenProjectTasks("cove", {
     supabase: {
       url: "https://example.supabase.co",
       key: "secret",
-      table: "forge_tasks",
+      table: "cove_tasks",
     },
     fetchImpl: async (url) => {
       requested = String(url);
       return new Response(JSON.stringify([{
         id: "task-1",
-        title: "T".repeat(350),
-        description: "D".repeat(2500),
-        project: "forge",
+        title: "Task ".repeat(70),
+        description: "Details ".repeat(313),
+        project: "cove",
         status: "open",
         due_at: NOW.toISOString(),
         priority: "high",
@@ -197,16 +588,108 @@ test("Supabase task fetch maps and bounds only the fields the model needs", asyn
       }]));
     },
   });
-  assert.match(requested, /forge_tasks/);
-  assert.match(requested, /project=eq(?:%2E|\.)forge/);
+  assert.match(requested, /cove_tasks/);
+  assert.match(requested, /project=eq(?:%2E|\.)cove/);
   assert.equal(tasks[0].title.length, 300);
   assert.equal(tasks[0].description.length, 2000);
   assert.deepEqual(tasks[0].tags, ["one", "two"]);
 });
 
+test("task fetches redact secrets before title and description slicing", async (t) => {
+  const boundaryTitle = `${"safe ".repeat(57)}FOO_TOKEN=longsecretvalue`;
+  const boundaryDescription = `${"safe ".repeat(397)}FOO_TOKEN=longsecretvalue`;
+  const supabaseTasks = await fetchOpenProjectTasks("cove", {
+    supabase: {
+      url: "https://example.supabase.co",
+      key: "secret",
+      table: "cove_tasks",
+    },
+    fetchImpl: async () => new Response(JSON.stringify([{
+      id: "supabase-boundary-task",
+      title: boundaryTitle,
+      description: boundaryDescription,
+      project: "cove",
+      status: "open",
+      priority: "medium",
+      tags: [],
+    }])),
+  });
+
+  const dir = fixture(t);
+  const dbPath = path.join(dir, "cove.db");
+  const db = openLocalDatabase(dbPath);
+  try {
+    db.prepare(
+      `INSERT INTO tasks
+         (id, title, description, project, status, priority, tags,
+          position, created_at, updated_at)
+       VALUES (?, ?, ?, 'cove', 'open', 'medium', '[]', 0, ?, ?)`,
+    ).run(
+      "local-boundary-task",
+      boundaryTitle,
+      boundaryDescription,
+      NOW.toISOString(),
+      NOW.toISOString(),
+    );
+  } finally {
+    db.close();
+  }
+  const localTasks = await fetchOpenProjectTasks("cove", {
+    dbPath,
+    dataDir: dir,
+    env: {},
+  });
+
+  for (const task of [supabaseTasks[0], localTasks[0]]) {
+    assert.equal(task.title.includes("FOO_TOKEN=longs"), false);
+    assert.equal(task.description.includes("FOO_TOKEN=longs"), false);
+    assert.match(task.title, /FOO_TOKEN=\[red/);
+    assert.match(task.description, /FOO_TOKEN=\[red/);
+  }
+});
+
+test("local progress reconciliation reads open project tasks from Cove SQLite", async (t) => {
+  const dir = fixture(t);
+  const dbPath = path.join(dir, "cove.db");
+  const db = openLocalDatabase(dbPath);
+  try {
+    db.prepare(
+      `INSERT INTO tasks
+         (id, title, description, project, status, priority, due_at, tags,
+          position, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'open', 'high', ?, ?, 0, ?, ?)`,
+    ).run(
+      "local-progress-task",
+      "Ship Cove hardening",
+      "Verify the local task source.",
+      "Cove",
+      "2026-07-31",
+      JSON.stringify(["release"]),
+      NOW.toISOString(),
+      NOW.toISOString(),
+    );
+  } finally {
+    db.close();
+  }
+
+  const tasks = await fetchOpenProjectTasks("cove", { dbPath, dataDir: dir, env: {} });
+  assert.equal(tasks.length, 1);
+  assert.equal(tasks[0].id, "local-progress-task");
+  assert.deepEqual(tasks[0].tags, ["release"]);
+  assert.equal(
+    await hasOpenProjectTaskDueToday(
+      "Cove",
+      "2026-07-31",
+      "America/Los_Angeles",
+      { dbPath, dataDir: dir, env: {} },
+    ),
+    true,
+  );
+});
+
 test("new evidence requires a new ping timestamp or changed git head", () => {
   const group = {
-    pings: [ping("forge", 10), ping("forge", 20)],
+    pings: [ping("cove", 10), ping("cove", 20)],
   };
   const prior = {
     evidence: {
@@ -218,7 +701,7 @@ test("new evidence requires a new ping timestamp or changed git head", () => {
   assert.equal(hasNewProjectEvidence(group, "new-head", prior), true);
   assert.equal(
     hasNewProjectEvidence(
-      { pings: [...group.pings, ping("forge", 25)] },
+      { pings: [...group.pings, ping("cove", 25)] },
       "same-head",
       prior,
     ),
@@ -230,7 +713,7 @@ test("noise floor keeps two-ping projects and one-ping projects due today", () =
   const groups = groupRecentPings([
     ping("catalyst", 10),
     ping("catalyst", 20),
-    ping("forge", 15),
+    ping("cove", 15),
   ], NOW);
   assert.equal(
     shouldProcessProject(
@@ -243,7 +726,7 @@ test("noise floor keeps two-ping projects and one-ping projects due today", () =
   );
   assert.equal(
     shouldProcessProject(
-      groups.get("forge"),
+      groups.get("cove"),
       [{ due_at: "2026-07-28T03:30:00.000Z" }],
       "2026-07-27",
       "America/Los_Angeles",
@@ -252,7 +735,7 @@ test("noise floor keeps two-ping projects and one-ping projects due today", () =
   );
   assert.equal(
     shouldProcessProject(
-      groups.get("forge"),
+      groups.get("cove"),
       [{ due_at: "2026-07-29T03:30:00.000Z" }],
       "2026-07-27",
       "America/Los_Angeles",
@@ -311,13 +794,13 @@ test("session digest retention keeps the latest 20 rows per project", (t) => {
     store.recordSessionDigest({
       id: `digest-${index}`,
       runAt: new Date(NOW.getTime() + index * 1_000).toISOString(),
-      project: "forge",
+      project: "cove",
       summary: `Run ${index}`,
       perTask: [],
       evidence: { index },
     });
   }
-  const rows = store.listSessionDigests({ project: "forge", limit: 100 });
+  const rows = store.listSessionDigests({ project: "cove", limit: 100 });
   assert.equal(rows.length, 20);
   assert.equal(rows[0].id, "digest-24");
   assert.equal(rows.at(-1).id, "digest-5");
@@ -328,7 +811,7 @@ test("digest relay is write-once and readable by a machine without the Mini stor
   const digest = {
     id: "progress-0123456789abcdef0123456789abcdef",
     runAt: NOW.toISOString(),
-    project: "forge",
+    project: "cove",
     summary: "Cove moved forward.",
     perTask: [],
     evidence: { fingerprint: "fingerprint-1" },
@@ -429,19 +912,23 @@ test("heartbeat merge preserves other watcher keys", (t) => {
     last_run_at: NOW.toISOString(),
     projects_active: 2,
     errors: 0,
-  });
+  }, MACHINE);
   const heartbeat = JSON.parse(readFileSync(file, "utf8"));
   assert.equal(
     heartbeat.meeting_watch.last_run_at,
     "2026-07-27T20:00:00.000Z",
   );
-  assert.equal(heartbeat.progress_reconcile.projects_active, 2);
+  assert.equal(
+    heartbeat.machines[MACHINE_ID].progress_reconcile.projects_active,
+    2,
+  );
 });
 
 test("dry-run performs analysis but writes no store, pencil, state, or heartbeat", async (t) => {
   const dir = fixture(t);
   let analyzed = 0;
   const result = await runProgressReconcile({
+    machineIdentity: MACHINE,
     dryRun: true,
     dataDir: dir,
     statePath: path.join(dir, "state.json"),
@@ -485,12 +972,42 @@ test("dry-run performs analysis but writes no store, pencil, state, or heartbeat
   assert.equal(existsSync(path.join(dir, "day-plan.db")), false);
 });
 
+test("transcript stage errors fall back to the existing project evidence", async (t) => {
+  const dir = fixture(t);
+  const stderr = [];
+  const result = await runProgressReconcile({
+    machineIdentity: MACHINE,
+    dryRun: true,
+    dataDir: dir,
+    now: () => NOW,
+    readPings: () => [ping("cove", 10), ping("cove", 20)],
+    fetchTasks: async () => [],
+    gitEvidence: async () => ({ lines: [], head: "head-1" }),
+    readCurrentState: () => "",
+    collectSessionWrapups: () => {
+      throw new Error("unreadable transcript directory");
+    },
+    stderrWrite: (line) => stderr.push(line),
+    analyzeProject: async (input) => {
+      assert.deepEqual(input.evidence.session_wrapups, []);
+      assert.match(input.evidenceText, /SESSION WRAP-UPS[\s\S]*None found\./);
+      return { project_summary: "Ping-only fallback.", tasks: [] };
+    },
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.summary.errors, 0);
+  assert.equal(result.summary.projects.length, 1);
+  assert.equal(stderr.length, 1);
+  assert.match(stderr[0], /cove transcript evidence skipped: unreadable transcript directory\n$/);
+});
+
 test("one project failure does not freeze another project's cursor", async (t) => {
   const dir = fixture(t);
   const digests = [];
   const heartbeatPath = path.join(dir, "intake", "heartbeats.json");
   const statePath = path.join(dir, "state.json");
   const result = await runProgressReconcile({
+    machineIdentity: MACHINE,
     dataDir: dir,
     statePath,
     heartbeatPath,
@@ -535,17 +1052,19 @@ test("one project failure does not freeze another project's cursor", async (t) =
     NOW.toISOString(),
   );
   assert.equal(
-    JSON.parse(readFileSync(heartbeatPath, "utf8")).progress_reconcile.errors,
+    JSON.parse(readFileSync(heartbeatPath, "utf8"))
+      .machines[MACHINE_ID].progress_reconcile.errors,
     1,
   );
 });
 
 test("unchanged evidence skips Claude and the full task fetch", async (t) => {
   const dir = fixture(t);
-  const pings = [ping("forge", 10), ping("forge", 20)];
+  const pings = [ping("cove", 10), ping("cove", 20)];
   let taskFetches = 0;
   let analyses = 0;
   const result = await runProgressReconcile({
+    machineIdentity: MACHINE,
     dryRun: true,
     dataDir: dir,
     now: () => NOW,
@@ -575,10 +1094,11 @@ test("noise-floor rejection happens before the full task fetch", async (t) => {
   const dir = fixture(t);
   let fullFetches = 0;
   const result = await runProgressReconcile({
+    machineIdentity: MACHINE,
     dryRun: true,
     dataDir: dir,
     now: () => NOW,
-    readPings: () => [ping("forge", 10)],
+    readPings: () => [ping("cove", 10)],
     hasDueToday: async () => false,
     fetchTasks: async () => {
       fullFetches += 1;

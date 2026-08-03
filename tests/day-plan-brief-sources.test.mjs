@@ -3,10 +3,15 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { assembleMorningBriefContext } from '../src/lib/day-plan/brief.ts';
+import {
+  assembleMorningBriefContext,
+  validateMorningBrief,
+} from '../src/lib/day-plan/brief.ts';
 import {
   briefCheckpointSources,
   collectMorningBriefSources,
+  emailQueueSource,
+  recentBriefsSource,
   resolveBriefFileSourcePolicy,
 } from '../src/lib/day-plan/brief-sources.ts';
 import {
@@ -16,9 +21,11 @@ import {
 import { writeProgressDigestRelay } from '../src/lib/progress/relay.ts';
 
 const NOW = new Date('2026-07-16T12:00:00.000Z');
+const MACHINE_ID = '12345678-1234-4234-8234-123456789abc';
+const MACHINE = { id: MACHINE_ID, hostname: 'brief-test-mac.local' };
 
 function fixture(t) {
-  const dir = path.join(os.tmpdir(), `forge-brief-sources-${process.pid}-${Date.now()}-${Math.random()}`);
+  const dir = path.join(os.tmpdir(), `cove-brief-sources-${process.pid}-${Date.now()}-${Math.random()}`);
   mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(dir, 'goals.md'), 'Grow Edge AI.');
   writeFileSync(path.join(dir, 'operator-profile.md'), 'Jordan Rivers runs three operating lanes.');
@@ -34,10 +41,11 @@ function fixture(t) {
       leadupPath: path.join(dir, 'leadup.md'),
       sprintMemoPath: path.join(dir, 'memo.md'),
       dataDir: dir,
-      webBaseUrl: 'http://forge.test',
+      webBaseUrl: 'http://cove.test',
       targetLocalDate: '2026-07-16',
       targetTimezone: 'America/Los_Angeles',
       now: NOW,
+      machineIdentity: MACHINE,
     },
   };
 }
@@ -82,26 +90,51 @@ function writeOperatorProfile(t, dir, profile) {
   return profilePath;
 }
 
-function forgeRowsResponse(url) {
-  if (!String(url).startsWith('http://forge.test/api/forge-rest/')) return undefined;
+function coveRowsResponse(url) {
+  if (!String(url).startsWith('http://cove.test/api/cove-rest/')) return undefined;
   return new Response(JSON.stringify([]), {
     status: 200,
     headers: { 'content-type': 'application/json' },
   });
 }
 
-function calendarSse(items) {
-  const toolText = JSON.stringify({ data: { results: [{ response: { data: { items } } }] } });
-  const message = JSON.stringify({
-    jsonrpc: '2.0',
-    id: 2,
-    result: { content: [{ type: 'text', text: toolText }] },
-  });
-  return `event: message\ndata: {"progress":true}\n\nevent: message\ndata: ${message}\n\nevent: ping\ndata: {"keepalive":true}\n\n`;
+function recentBriefArtifact({
+  id,
+  date,
+  headline,
+  candidates,
+  finishedAt,
+  lensNarrative,
+}) {
+  const brief = validateMorningBrief({
+    headline: typeof headline === 'string' && headline ? headline : 'Temporary headline.',
+    narrative_paragraphs: ['The first paragraph.', 'The second paragraph.'],
+    existing_task_candidates: [],
+    suggested_additions: [],
+    watch_items: [],
+  }).brief;
+  brief.headline = headline;
+  if (lensNarrative !== undefined) brief.lensNarrative = lensNarrative;
+  // Stored artifacts are parsed fail-open and may predate current generation
+  // limits, so the receipt test deliberately includes duplicates and overflow.
+  brief.existingTaskCandidates = candidates.map((candidate) => ({
+    taskId: candidate,
+    whyToday: `${candidate} matters today.`,
+    suggestedOwner: 'me',
+    whatClaudeCanStart: '',
+    evidenceRefs: ['goals'],
+  }));
+  return {
+    id,
+    targetLocalDate: date,
+    status: 'succeeded',
+    briefJson: JSON.stringify(brief),
+    finishedAt,
+  };
 }
 
 test('brief file policy treats empty env values as unset and prefers env, client goals, then legacy', (t) => {
-  const dir = path.join(os.tmpdir(), `forge-source-policy-${process.pid}-${Date.now()}-${Math.random()}`);
+  const dir = path.join(os.tmpdir(), `cove-source-policy-${process.pid}-${Date.now()}-${Math.random()}`);
   const homeDir = path.join(dir, 'home');
   const dataDir = path.join(dir, 'data');
   const legacyGoals = path.join(homeDir, 'Atlas', 'brain', 'GOALS.md');
@@ -139,7 +172,7 @@ test('brief file policy treats empty env values as unset and prefers env, client
 });
 
 test('an absent default sprint memo is optional in collection and checkpoint verification', async (t) => {
-  const dir = path.join(os.tmpdir(), `forge-optional-sprint-${process.pid}-${Date.now()}-${Math.random()}`);
+  const dir = path.join(os.tmpdir(), `cove-optional-sprint-${process.pid}-${Date.now()}-${Math.random()}`);
   const homeDir = path.join(dir, 'home');
   const dataDir = path.join(dir, 'data');
   const clientGoals = path.join(dataDir, 'brief', 'goals.md');
@@ -159,11 +192,11 @@ test('an absent default sprint memo is optional in collection and checkpoint ver
     store: { listRecentSnapshots: () => [] },
     homeDir,
     dataDir,
-    webBaseUrl: 'http://forge.test',
+    webBaseUrl: 'http://cove.test',
     targetLocalDate: '2026-07-16',
     targetTimezone: 'America/Los_Angeles',
     now: NOW,
-    fetchImpl: async (url) => forgeRowsResponse(url),
+    fetchImpl: async (url) => coveRowsResponse(url),
   });
   const sprint = collected.sources.find((source) => source.id === 'sprint_memo');
   assert.equal(sprint.required, false);
@@ -179,7 +212,7 @@ test('an absent default sprint memo is optional in collection and checkpoint ver
 });
 
 test('operator profile falls back to a bounded readable JSON whitelist', async (t) => {
-  const dir = path.join(os.tmpdir(), `forge-json-profile-${process.pid}-${Date.now()}-${Math.random()}`);
+  const dir = path.join(os.tmpdir(), `cove-json-profile-${process.pid}-${Date.now()}-${Math.random()}`);
   const homeDir = path.join(dir, 'home');
   const dataDir = path.join(dir, 'data');
   mkdirSync(path.join(dataDir, 'brief'), { recursive: true });
@@ -209,11 +242,11 @@ test('operator profile falls back to a bounded readable JSON whitelist', async (
     store: { listRecentSnapshots: () => [] },
     homeDir,
     dataDir,
-    webBaseUrl: 'http://forge.test',
+    webBaseUrl: 'http://cove.test',
     targetLocalDate: '2026-07-16',
     targetTimezone: 'America/New_York',
     now: NOW,
-    fetchImpl: async (url) => forgeRowsResponse(url),
+    fetchImpl: async (url) => coveRowsResponse(url),
   });
   const profile = collected.sources.find((source) => source.id === 'operator_profile');
   assert.match(profile.content, /^Name: Jordan/m);
@@ -227,74 +260,186 @@ test('operator profile falls back to a bounded readable JSON whitelist', async (
   assert.ok(profile.content.length <= profile.maxChars);
 });
 
-test('calendar fetches MCP SSE, derives DST-aware bounds, and formats visible events', async (t) => {
+test('calendar uses the restricted gateway, derives DST-aware bounds, and formats visible events', async (t) => {
   const { dir, options } = fixture(t);
-  disableExternalSources(t, dir, { COVE_BRIEF_COMPOSIO_KEY: 'composio-test-key' });
-  const requests = [];
-  let initializeResponse;
+  disableExternalSources(t, dir);
+  let requested;
   const items = [
     {
+      id: 'strategy',
+      status: 'confirmed',
       summary: 'Strategy call',
-      start: { dateTime: '2026-11-01T09:00:00-08:00' },
-      end: { dateTime: '2026-11-01T09:30:00-08:00' },
+      start: '2026-11-01T09:00:00-08:00',
+      end: '2026-11-01T09:30:00-08:00',
       attendees: [
-        { email: 'jordan@example.com', self: true, responseStatus: 'accepted' },
         { email: 'one@example.com' },
         { email: 'two@example.com' },
         { email: 'three@example.com' },
         { email: 'four@example.com' },
       ],
-      hangoutLink: 'https://meet.google.com/example',
+      htmlLink: 'https://calendar.google.com/calendar/event?eid=strategy',
+      meetingUrl: 'https://meet.google.com/example',
+      description: '',
+      location: '',
     },
-    { summary: 'Planning day', start: { date: '2026-11-01' }, end: { date: '2026-11-02' } },
     {
+      id: 'planning',
+      status: 'confirmed',
+      summary: 'Planning day',
+      start: '2026-11-01',
+      end: '2026-11-02',
+      attendees: [],
+      htmlLink: '',
+      description: '',
+      location: '',
+    },
+    {
+      id: 'malformed',
+      status: 'confirmed',
       summary: 'Malformed time',
-      start: { dateTime: 'not-a-date' },
-      end: { dateTime: '2026-11-01T10:30:00-08:00' },
+      start: 'not-a-date',
+      end: '2026-11-01T10:30:00-08:00',
+      attendees: [],
+      htmlLink: '',
+      description: '',
+      location: '',
     },
     {
+      id: 'prep',
+      status: 'confirmed',
+      summary: 'Prep session',
+      start: '2026-11-03T14:00:00-08:00',
+      end: '2026-11-03T15:00:00-08:00',
+      attendees: [],
+      htmlLink: '',
+      description: '',
+      location: '',
+    },
+    {
+      id: 'declined',
+      status: 'confirmed',
       summary: 'Declined event',
-      start: { dateTime: '2026-11-01T11:00:00-08:00' },
-      end: { dateTime: '2026-11-01T12:00:00-08:00' },
+      start: '2026-11-01T11:00:00-08:00',
+      end: '2026-11-01T12:00:00-08:00',
       attendees: [{ email: 'jordan@example.com', self: true, responseStatus: 'declined' }],
+      htmlLink: '',
+      description: '',
+      location: '',
     },
   ];
   const fetchImpl = async (url, init = {}) => {
-    const forge = forgeRowsResponse(url);
-    if (forge) return forge;
-    requests.push(JSON.parse(init.body));
-    assert.ok(init.signal instanceof AbortSignal);
-    if (requests.length === 1) {
-      initializeResponse = new Response('{"initialized":true}', {
-        status: 200,
-        headers: { 'mcp-session-id': 'session-1' },
-      });
-      return initializeResponse;
-    }
-    return new Response(calendarSse(items), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    const cove = coveRowsResponse(url);
+    if (cove) return cove;
+    throw new Error(`unexpected fetch ${url} ${init.method ?? 'GET'}`);
   };
   const collected = await collectMorningBriefSources({
     ...options,
     targetLocalDate: '2026-11-01',
     now: new Date('2026-11-01T16:00:00.000Z'),
     fetchImpl,
+    workspaceGateway: {
+      calendar: {
+        listEvents: async (input) => {
+          requested = input;
+          return items;
+        },
+      },
+    },
   });
   const calendar = collected.sources.find((source) => source.id === 'calendar');
   assert.equal(
     calendar.content,
-    'all day — Planning day\n9:00am-9:30am — Strategy call (with one@example.com, two@example.com, three@example.com) [Meet]\ntime unknown — Malformed time',
+    'Window: 2026-11-01 to 2026-11-07 (7 days). 4 events.\n\n' +
+      'Sunday, Nov 1\n' +
+      'all day: Planning day\n' +
+      '9:00am-9:30am: Strategy call (with one@example.com, two@example.com, three@example.com) [Meet]\n' +
+      'time unknown: Malformed time\n\n' +
+      'Tuesday, Nov 3\n' +
+      '2:00pm-3:00pm: Prep session',
   );
-  assert.equal(initializeResponse.bodyUsed, true);
   assert.equal(calendar.priority, 7);
-  const toolArguments = requests[1].params.arguments.tools[0].arguments;
-  assert.equal(toolArguments.timeMin, '2026-11-01T00:00:00-07:00');
-  assert.equal(toolArguments.timeMax, '2026-11-02T00:00:00-08:00');
+  assert.equal(calendar.label, 'CALENDAR');
+  assert.equal(calendar.maxChars, 5000);
+  assert.equal(requested.timeMin, '2026-11-01T00:00:00-07:00');
+  assert.equal(requested.timeMax, '2026-11-08T00:00:00-08:00');
+});
+
+test('completed_recently keeps only done tasks from the previous 48 hours', async (t) => {
+  const { dir, options } = fixture(t);
+  disableExternalSources(t, dir);
+  const recent = new Date(NOW.getTime() - 47 * 60 * 60 * 1000).toISOString();
+  const old = new Date(NOW.getTime() - 49 * 60 * 60 * 1000).toISOString();
+  const collected = await collectMorningBriefSources({
+    ...options,
+    fetchImpl: async (url) => {
+      const value = String(url);
+      if (value.includes('/api/cove-rest/tasks')) {
+        return new Response(JSON.stringify([
+          { id: 'recent', title: 'Shipped client handoff', project: 'client', status: 'done', updated_at: recent },
+          { id: 'old', title: 'Old completed task', project: 'internal', status: 'done', updated_at: old },
+          { id: 'open', title: 'Still open', project: 'client', status: 'open', updated_at: NOW.toISOString() },
+        ]), { status: 200 });
+      }
+      return coveRowsResponse(url);
+    },
+  });
+  const completed = collected.sources.find((source) => source.id === 'completed_recently');
+  assert.equal(
+    completed.content,
+    `- "Shipped client handoff" project=client updated=${recent}`,
+  );
+  assert.equal(completed.asOf, recent);
+  assert.equal(completed.required, false);
+  assert.equal(completed.maxChars, 3000);
+  assert.equal(completed.priority, 6);
+});
+
+test('completed_recently states when no task was finished in the window', async (t) => {
+  const { dir, options } = fixture(t);
+  disableExternalSources(t, dir);
+  const collected = await collectMorningBriefSources({
+    ...options,
+    fetchImpl: async (url) => coveRowsResponse(url),
+  });
+  assert.equal(
+    collected.sources.find((source) => source.id === 'completed_recently').content,
+    'Nothing marked done in the last two days.',
+  );
+});
+
+test('completed_recently caps the list at 15 tasks and reports the remainder', async (t) => {
+  const { dir, options } = fixture(t);
+  disableExternalSources(t, dir);
+  const rows = Array.from({ length: 17 }, (_, index) => ({
+    id: `done-${index}`,
+    title: `Completed task ${String(index).padStart(2, '0')}`,
+    project: 'cove',
+    status: 'done',
+    updated_at: new Date(NOW.getTime() - index * 60_000).toISOString(),
+  }));
+  const collected = await collectMorningBriefSources({
+    ...options,
+    fetchImpl: async (url) => {
+      if (String(url).includes('/api/cove-rest/tasks')) {
+        return new Response(JSON.stringify(rows), { status: 200 });
+      }
+      return coveRowsResponse(url);
+    },
+  });
+  const lines = collected.sources
+    .find((source) => source.id === 'completed_recently')
+    .content
+    .split('\n');
+  assert.equal(lines.length, 16);
+  assert.match(lines[0], /^- "Completed task 00" project=cove updated=/);
+  assert.match(lines[14], /^- "Completed task 14" project=cove updated=/);
+  assert.equal(lines[15], '+2 more');
 });
 
 test('calendar reports not_configured for a missing key file', async (t) => {
   const { dir, options } = fixture(t);
   disableExternalSources(t, dir);
-  const collected = await collectMorningBriefSources({ ...options, fetchImpl: async (url) => forgeRowsResponse(url) });
+  const collected = await collectMorningBriefSources({ ...options, fetchImpl: async (url) => coveRowsResponse(url) });
   const calendar = collected.sources.find((source) => source.id === 'calendar');
   assert.equal(calendar.content, undefined);
   assert.equal(calendar.note, 'not_configured');
@@ -302,13 +447,23 @@ test('calendar reports not_configured for a missing key file', async (t) => {
 
 test('calendar fetch failures stay optional and leave the other sources available', async (t) => {
   const { dir, options } = fixture(t);
-  disableExternalSources(t, dir, { COVE_BRIEF_COMPOSIO_KEY: 'composio-test-key' });
+  disableExternalSources(t, dir);
   const fetchImpl = async (url) => {
-    const forge = forgeRowsResponse(url);
-    if (forge) return forge;
+    const cove = coveRowsResponse(url);
+    if (cove) return cove;
     throw new Error('gateway unavailable');
   };
-  const collected = await collectMorningBriefSources({ ...options, fetchImpl });
+  const collected = await collectMorningBriefSources({
+    ...options,
+    fetchImpl,
+    workspaceGateway: {
+      calendar: {
+        listEvents: async () => {
+          throw new Error('gateway unavailable');
+        },
+      },
+    },
+  });
   assert.match(collected.sources.find((source) => source.id === 'calendar').note, /^error:gateway unavailable/);
   assert.equal(collected.sources.find((source) => source.id === 'goals').content, 'Grow Edge AI.');
   assert.ok(collected.sources.find((source) => source.id === 'task_snapshot').content);
@@ -381,8 +536,8 @@ test('CRM handles Attio value variants and formats recent and quiet contacts', a
     { values: { name: [{ full_name: 'No History' }], last_email_interaction: [], last_interaction: [] } },
   ];
   const fetchImpl = async (url, init = {}) => {
-    const forge = forgeRowsResponse(url);
-    if (forge) return forge;
+    const cove = coveRowsResponse(url);
+    if (cove) return cove;
     assert.equal(String(url), 'https://api.attio.com/v2/objects/people/records/query');
     assert.deepEqual(JSON.parse(init.body), {
       limit: 250,
@@ -395,9 +550,9 @@ test('CRM handles Attio value variants and formats recent and quiet contacts', a
   const crm = collected.sources.find((source) => source.id === 'crm_last_touch');
   assert.equal(
     crm.content,
-    'Recent touches:\nAlice Adams — last touch 2d ago (2026-07-14, email)\nTimezone Tina — last touch 2d ago (2026-07-13, meeting)\nCara Cole — last touch 3d ago (2026-07-13, call)\nfallback@example.com — last touch 4d ago (2026-07-12, email)\nBob Baker — last touch 20d ago (2026-06-26, email)\nDormant Dana — last touch 121d ago (2026-03-17)\n\nGone quiet (>14d): Bob Baker',
+    'Recent touches:\nAlice Adams: last touch 2d ago (2026-07-14, email)\nTimezone Tina: last touch 2d ago (2026-07-13, meeting)\nCara Cole: last touch 3d ago (2026-07-13, call)\nfallback@example.com: last touch 4d ago (2026-07-12, email)\nBob Baker: last touch 20d ago (2026-06-26, email)\nDormant Dana: last touch 121d ago (2026-03-17)\n\nGone quiet (>14d): Bob Baker',
   );
-  assert.equal(crm.content.includes('fallback@example.com — last touch 4d ago'), true);
+  assert.equal(crm.content.includes('fallback@example.com: last touch 4d ago'), true);
   assert.equal(crm.content.includes('Riley Operator'), false);
   assert.equal(crm.priority, 10);
 });
@@ -413,8 +568,8 @@ test('the own-record CRM filter comes from the profile and defaults to filtering
     },
   }];
   const fetchImpl = async (url) => {
-    const forge = forgeRowsResponse(url);
-    if (forge) return forge;
+    const cove = coveRowsResponse(url);
+    if (cove) return cove;
     return new Response(JSON.stringify({ data: { data: records } }), { status: 200 });
   };
   const withoutProfile = await collectMorningBriefSources({ ...options, fetchImpl });
@@ -437,8 +592,8 @@ test('.env.local strips unquoted inline comments but preserves hashes inside quo
   const previousCwd = process.cwd();
   const authorizations = [];
   const fetchImpl = async (url, init = {}) => {
-    const forge = forgeRowsResponse(url);
-    if (forge) return forge;
+    const cove = coveRowsResponse(url);
+    if (cove) return cove;
     assert.equal(String(url), 'https://api.attio.com/v2/objects/people/records/query');
     authorizations.push(init.headers.Authorization);
     return new Response(JSON.stringify({ data: [] }), { status: 200 });
@@ -461,7 +616,7 @@ test('.env.local strips unquoted inline comments but preserves hashes inside quo
 test('CRM reports not_configured when neither Attio credential is present', async (t) => {
   const { dir, options } = fixture(t);
   disableExternalSources(t, dir);
-  const collected = await collectMorningBriefSources({ ...options, fetchImpl: async (url) => forgeRowsResponse(url) });
+  const collected = await collectMorningBriefSources({ ...options, fetchImpl: async (url) => coveRowsResponse(url) });
   assert.equal(collected.sources.find((source) => source.id === 'crm_last_touch').note, 'not_configured');
 });
 
@@ -481,10 +636,10 @@ test('memory decisions prefer decision-tagged Jarvis results and bound each line
     ['recent decisions, commitments, and direction changes', [
       { uuid: 'long', score: 0.9, content: longDecision },
       { uuid: 'background', score: 0.4, content: 'Background context that should be filtered out.' },
-      { uuid: 'forge', score: 0.8, content: '[DECISION] Keep Cove as the command center.' },
+      { uuid: 'cove', score: 0.8, content: '[DECISION] Keep Cove as the command center.' },
     ]],
     ['what Jordan Rivers worked on in Claude sessions the last three days', [
-      { uuid: 'forge', score: 0.95, content: '[DECISION] Keep Cove as the source of truth.' },
+      { uuid: 'cove', score: 0.95, content: '[DECISION] Keep Cove as the source of truth.' },
       { uuid: 'route', score: 0.7, content: '[DECISION] Route from the latest saved state.' },
     ]],
     ["current state of the operator's active projects and business lines", [
@@ -492,8 +647,8 @@ test('memory decisions prefer decision-tagged Jarvis results and bound each line
     ]],
   ]);
   const fetchImpl = async (url, init = {}) => {
-    const forge = forgeRowsResponse(url);
-    if (forge) return forge;
+    const cove = coveRowsResponse(url);
+    if (cove) return cove;
     assert.equal(String(url), 'http://memory.test/api/v2/scored_search');
     const body = JSON.parse(init.body);
     requests.push(body.query);
@@ -518,8 +673,8 @@ test('memory decisions preserve file-path mode without calling Jarvis', async (t
   writeFileSync(memoryPath, '[DECISION] Preserve the file fallback.\n');
   disableExternalSources(t, dir);
   const fetchImpl = async (url) => {
-    const forge = forgeRowsResponse(url);
-    if (forge) return forge;
+    const cove = coveRowsResponse(url);
+    if (cove) return cove;
     throw new Error(`unexpected network call: ${url}`);
   };
   const collected = await collectMorningBriefSources({ ...options, memoryDecisionsPath: memoryPath, fetchImpl });
@@ -535,8 +690,8 @@ test('memory decisions resolve the hub from env, then the profile, and otherwise
   disableExternalSources(t, dir, { COVE_BRIEF_JARVIS_TOKEN_PATH: tokenPath });
   const requested = [];
   const fetchImpl = async (url) => {
-    const forge = forgeRowsResponse(url);
-    if (forge) return forge;
+    const cove = coveRowsResponse(url);
+    if (cove) return cove;
     requested.push(String(url));
     return new Response(JSON.stringify({ results: [{ uuid: 'a', score: 1, content: '[DECISION] Configured.' }] }), { status: 200 });
   };
@@ -565,7 +720,7 @@ test('memory decisions resolve the hub from env, then the profile, and otherwise
 test('memory decisions report not_configured when the hub token file is missing', async (t) => {
   const { dir, options } = fixture(t);
   disableExternalSources(t, dir);
-  const collected = await collectMorningBriefSources({ ...options, fetchImpl: async (url) => forgeRowsResponse(url) });
+  const collected = await collectMorningBriefSources({ ...options, fetchImpl: async (url) => coveRowsResponse(url) });
   assert.equal(collected.sources.find((source) => source.id === 'memory_decisions').note, 'not_configured');
 });
 
@@ -581,8 +736,8 @@ test('memory decisions stop after the first Jarvis search fails', async (t) => {
   const collected = await collectMorningBriefSources({
     ...options,
     fetchImpl: async (url) => {
-      const forge = forgeRowsResponse(url);
-      if (forge) return forge;
+      const cove = coveRowsResponse(url);
+      if (cove) return cove;
       searches += 1;
       throw new Error('Jarvis unavailable');
     },
@@ -603,14 +758,21 @@ test('untriaged inbound is prominent, counts spool lines, and treats Waiting as 
   writeFileSync(
     path.join(dir, 'intake', 'heartbeats.json'),
     JSON.stringify({
-      meeting_watch: {
-        last_run_at: '2026-07-16T11:40:00.000Z',
-        examined: 3,
-        matched: 1,
-        processed: 1,
-        errors: 0,
-        dead_letters: 0,
-        disabled: false,
+      version: 2,
+      machines: {
+        [MACHINE_ID]: {
+          hostname: MACHINE.hostname,
+          meeting_watch: {
+            last_run_at: '2026-07-16T11:40:00.000Z',
+            examined: 3,
+            matched: 1,
+            processed: 1,
+            errors: 0,
+            dead_letters: 0,
+            disabled: false,
+            operator_unconfigured: true,
+          },
+        },
       },
     }),
   );
@@ -648,11 +810,11 @@ test('untriaged inbound is prominent, counts spool lines, and treats Waiting as 
     ...options,
     fetchImpl: async (url) => {
       const value = String(url);
-      if (value.includes('/api/forge-rest/inbound_events')) {
+      if (value.includes('/api/cove-rest/inbound_events')) {
         inboundUrl = value;
         return new Response(JSON.stringify(inbound), { status: 200 });
       }
-      if (value.includes('/api/forge-rest/tasks')) {
+      if (value.includes('/api/cove-rest/tasks')) {
         return new Response(JSON.stringify([
           {
             id: 'waiting-1',
@@ -667,20 +829,20 @@ test('untriaged inbound is prominent, counts spool lines, and treats Waiting as 
             id: 'backlog-1',
             column_id: 'backlog',
             title: 'Backlog item stays visible',
-            project: 'forge',
+            project: 'cove',
             status: 'open',
             priority: 'low',
             tags: [],
           },
         ]), { status: 200 });
       }
-      if (value.includes('/api/forge-rest/task_columns')) {
+      if (value.includes('/api/cove-rest/task_columns')) {
         return new Response(JSON.stringify([
           { id: 'waiting', name: 'Waiting' },
           { id: 'backlog', name: 'Backlog' },
         ]), { status: 200 });
       }
-      return forgeRowsResponse(url);
+      return coveRowsResponse(url);
     },
   });
   const source = collected.sources.find((entry) => entry.id === 'untriaged_inbound');
@@ -698,6 +860,10 @@ test('untriaged inbound is prominent, counts spool lines, and treats Waiting as 
     source.content,
     /Meeting watcher heartbeat: age=20m examined=3 matched=1 processed=1 errors=0 dead_letters=0\./,
   );
+  assert.match(
+    source.content,
+    /Set your name in Setup so meeting follow-ups route to you\./,
+  );
   const tasks = collected.sources.find((entry) => entry.id === 'task_snapshot');
   assert.match(
     tasks.content,
@@ -705,16 +871,16 @@ test('untriaged inbound is prominent, counts spool lines, and treats Waiting as 
   );
   assert.match(
     tasks.content,
-    /\[not_started\] id=backlog-1 "Backlog item stays visible" priority=low project=forge/,
+    /\[not_started\] id=backlog-1 "Backlog item stays visible" priority=low project=cove/,
   );
 
   const warning = await collectMorningBriefSources({
     ...options,
     fetchImpl: async (url) => {
-      if (String(url).includes('/api/forge-rest/inbound_events')) {
+      if (String(url).includes('/api/cove-rest/inbound_events')) {
         return new Response('table missing', { status: 404 });
       }
-      return forgeRowsResponse(url);
+      return coveRowsResponse(url);
     },
   });
   const warningSource = warning.sources.find((entry) => entry.id === 'untriaged_inbound');
@@ -724,18 +890,24 @@ test('untriaged inbound is prominent, counts spool lines, and treats Waiting as 
   writeFileSync(
     path.join(dir, 'intake', 'heartbeats.json'),
     JSON.stringify({
-      meeting_watch: {
-        last_run_at: '2026-07-16T10:00:00.000Z',
-        examined: 0,
-        matched: 0,
-        processed: 0,
-        errors: 1,
+      version: 2,
+      machines: {
+        [MACHINE_ID]: {
+          hostname: MACHINE.hostname,
+          meeting_watch: {
+            last_run_at: '2026-07-16T10:00:00.000Z',
+            examined: 0,
+            matched: 0,
+            processed: 0,
+            errors: 1,
+          },
+        },
       },
     }),
   );
   const stale = await collectMorningBriefSources({
     ...options,
-    fetchImpl: async (url) => forgeRowsResponse(url),
+    fetchImpl: async (url) => coveRowsResponse(url),
   });
   assert.match(
     stale.sources.find((entry) => entry.id === 'untriaged_inbound').content,
@@ -745,20 +917,26 @@ test('untriaged inbound is prominent, counts spool lines, and treats Waiting as 
   writeFileSync(
     path.join(dir, 'intake', 'heartbeats.json'),
     JSON.stringify({
-      meeting_watch: {
-        last_run_at: NOW.toISOString(),
-        examined: 0,
-        matched: 0,
-        processed: 0,
-        errors: 0,
-        dead_letters: 2,
-        disabled: false,
+      version: 2,
+      machines: {
+        [MACHINE_ID]: {
+          hostname: MACHINE.hostname,
+          meeting_watch: {
+            last_run_at: NOW.toISOString(),
+            examined: 0,
+            matched: 0,
+            processed: 0,
+            errors: 0,
+            dead_letters: 2,
+            disabled: false,
+          },
+        },
       },
     }),
   );
   const deadLetters = await collectMorningBriefSources({
     ...options,
-    fetchImpl: async (url) => forgeRowsResponse(url),
+    fetchImpl: async (url) => coveRowsResponse(url),
   });
   assert.match(
     deadLetters.sources.find((entry) => entry.id === 'untriaged_inbound').content,
@@ -768,19 +946,255 @@ test('untriaged inbound is prominent, counts spool lines, and treats Waiting as 
   writeFileSync(
     path.join(dir, 'intake', 'heartbeats.json'),
     JSON.stringify({
-      meeting_watch: {
-        last_run_at: NOW.toISOString(),
-        disabled: true,
+      version: 2,
+      machines: {
+        [MACHINE_ID]: {
+          hostname: MACHINE.hostname,
+          meeting_watch: {
+            last_run_at: NOW.toISOString(),
+            disabled: true,
+          },
+        },
       },
     }),
   );
   const disabled = await collectMorningBriefSources({
     ...options,
-    fetchImpl: async (url) => forgeRowsResponse(url),
+    fetchImpl: async (url) => coveRowsResponse(url),
   });
   assert.match(
     disabled.sources.find((entry) => entry.id === 'untriaged_inbound').content,
     /WARNING: meeting watcher DISABLED\./,
+  );
+});
+
+test('missing background heartbeats warn only after their lanes were installed', async (t) => {
+  const { dir, options } = fixture(t);
+  disableExternalSources(t, dir);
+  const beforeInstall = await collectMorningBriefSources({
+    ...options,
+    fetchImpl: async (url) => coveRowsResponse(url),
+  });
+  assert.match(
+    beforeInstall.sources.find((entry) => entry.id === 'untriaged_inbound').content,
+    /Meeting watcher is not installed on this Mac\./,
+  );
+  assert.doesNotMatch(
+    beforeInstall.sources.find((entry) => entry.id === 'untriaged_inbound').content,
+    /WARNING: meeting watcher/,
+  );
+  assert.match(
+    beforeInstall.sources.find((entry) => entry.id === 'project_progress').content,
+    /Progress reconciler is not installed on this Mac\./,
+  );
+  assert.doesNotMatch(
+    beforeInstall.sources.find((entry) => entry.id === 'project_progress').content,
+    /WARNING: progress reconciler/,
+  );
+
+  mkdirSync(path.join(dir, 'intake'), { recursive: true });
+  writeFileSync(
+    path.join(dir, 'intake', 'installed-lanes.json'),
+    JSON.stringify({
+      version: 3,
+      machines: {
+        '87654321-4321-4321-8321-cba987654321': {
+          hostname: 'some-other-mac.local',
+          meeting_watch: { installed_at: NOW.toISOString() },
+          progress_reconcile: { installed_at: NOW.toISOString() },
+        },
+      },
+    }),
+  );
+  const otherMachineOnly = await collectMorningBriefSources({
+    ...options,
+    fetchImpl: async (url) => coveRowsResponse(url),
+  });
+  assert.doesNotMatch(
+    otherMachineOnly.sources.find((entry) => entry.id === 'untriaged_inbound').content,
+    /WARNING: meeting watcher/,
+  );
+  assert.doesNotMatch(
+    otherMachineOnly.sources.find((entry) => entry.id === 'project_progress').content,
+    /WARNING: progress reconciler/,
+  );
+
+  writeFileSync(
+    path.join(dir, 'intake', 'installed-lanes.json'),
+    JSON.stringify({
+      version: 3,
+      machines: {
+        [MACHINE_ID]: {
+          hostname: MACHINE.hostname,
+          meeting_watch: { installed_at: NOW.toISOString() },
+          progress_reconcile: { installed_at: NOW.toISOString() },
+        },
+      },
+    }),
+  );
+  const afterInstall = await collectMorningBriefSources({
+    ...options,
+    fetchImpl: async (url) => coveRowsResponse(url),
+  });
+  assert.match(
+    afterInstall.sources.find((entry) => entry.id === 'untriaged_inbound').content,
+    /WARNING: meeting watcher heartbeat unavailable/,
+  );
+  assert.match(
+    afterInstall.sources.find((entry) => entry.id === 'project_progress').content,
+    /WARNING: progress reconciler heartbeat unavailable/,
+  );
+});
+
+test('brief reads owner health without letting a local stand-down marker hide warnings', async (t) => {
+  const { dir, options } = fixture(t);
+  disableExternalSources(t, dir);
+  const ownerId = 'abcdefab-cdef-4abc-8def-abcdefabcdef';
+  mkdirSync(path.join(dir, 'intake'), { recursive: true });
+  writeFileSync(path.join(dir, 'cove-lane-owners.json'), JSON.stringify({
+    version: 2,
+    lanes: {
+      meeting_watch: {
+        id: ownerId,
+        hostname_at_claim: 'mini.local',
+        claimed_at: NOW.toISOString(),
+      },
+      progress: {
+        id: ownerId,
+        hostname_at_claim: 'mini.local',
+        claimed_at: NOW.toISOString(),
+      },
+    },
+  }));
+  writeFileSync(path.join(dir, 'intake', 'heartbeats.json'), JSON.stringify({
+    version: 2,
+    machines: {
+      [ownerId]: {
+        hostname: 'mini.lan',
+        meeting_watch: {
+          last_run_at: NOW.toISOString(),
+          examined: 5,
+          matched: 2,
+          processed: 1,
+          errors: 1,
+          dead_letters: 2,
+        },
+        progress_reconcile: {
+          last_run_at: '2026-07-16T09:00:00.000Z',
+          projects_active: 2,
+          digests_written: 1,
+          suggestions_filed: 0,
+          skipped_no_new_evidence: 0,
+          malformed_ping_lines: 0,
+          errors: 0,
+        },
+      },
+      [MACHINE_ID]: {
+        hostname: MACHINE.hostname,
+        meeting_watch: {
+          standing_down: true,
+          owner_id: ownerId,
+          owner_hostname_at_claim: 'mini.local',
+          observed_at: NOW.toISOString(),
+        },
+        progress_reconcile: {
+          standing_down: true,
+          owner_id: ownerId,
+          owner_hostname_at_claim: 'mini.local',
+          observed_at: NOW.toISOString(),
+        },
+      },
+    },
+  }));
+
+  const collected = await collectMorningBriefSources({
+    ...options,
+    fetchImpl: async (url) => coveRowsResponse(url),
+  });
+  const inbound = collected.sources.find(
+    (source) => source.id === 'untriaged_inbound',
+  );
+  const progress = collected.sources.find(
+    (source) => source.id === 'project_progress',
+  );
+  assert.match(inbound.content, /WARNING: meeting watcher has 2 dead letters/);
+  assert.match(
+    inbound.content,
+    /Local Mac standing down: mini\.local owns this lane\./,
+  );
+  assert.match(
+    progress.content,
+    /WARNING: progress reconciler heartbeat is stale/,
+  );
+  assert.match(
+    progress.content,
+    /Local Mac standing down: mini\.local owns this lane\./,
+  );
+});
+
+test('brief keeps reading the local owner heartbeat after its hostname changes', async (t) => {
+  const { dir, options } = fixture(t);
+  disableExternalSources(t, dir);
+  mkdirSync(path.join(dir, 'intake'), { recursive: true });
+  writeFileSync(path.join(dir, 'cove-lane-owners.json'), JSON.stringify({
+    version: 2,
+    lanes: {
+      meeting_watch: {
+        id: MACHINE_ID,
+        hostname_at_claim: 'brief-test-mac.local',
+        claimed_at: NOW.toISOString(),
+      },
+      progress: {
+        id: MACHINE_ID,
+        hostname_at_claim: 'brief-test-mac.local',
+        claimed_at: NOW.toISOString(),
+      },
+    },
+  }));
+  writeFileSync(path.join(dir, 'intake', 'heartbeats.json'), JSON.stringify({
+    version: 2,
+    machines: {
+      [MACHINE_ID]: {
+        hostname: 'brief-test-mac.lan',
+        meeting_watch: {
+          last_run_at: NOW.toISOString(),
+          examined: 1,
+          matched: 1,
+          processed: 1,
+          errors: 0,
+          dead_letters: 0,
+        },
+        progress_reconcile: {
+          last_run_at: NOW.toISOString(),
+          projects_active: 1,
+          digests_written: 1,
+          suggestions_filed: 0,
+          skipped_no_new_evidence: 0,
+          malformed_ping_lines: 0,
+          errors: 0,
+        },
+      },
+    },
+  }));
+  const collected = await collectMorningBriefSources({
+    ...options,
+    machineIdentity: {
+      id: MACHINE_ID,
+      hostname: 'brief-test-mac.lan',
+    },
+    fetchImpl: async (url) => coveRowsResponse(url),
+  });
+  assert.match(
+    collected.sources.find((source) => source.id === 'untriaged_inbound').content,
+    /Meeting watcher heartbeat:/,
+  );
+  assert.match(
+    collected.sources.find((source) => source.id === 'project_progress').content,
+    /Progress reconciler heartbeat:/,
+  );
+  assert.doesNotMatch(
+    collected.sources.find((source) => source.id === 'untriaged_inbound').content,
+    /standing down/,
   );
 });
 
@@ -845,11 +1259,11 @@ test('computed commitments source exposes open loops, clarification, and factual
     },
   ];
   const fetchImpl = async (url) => {
-    if (String(url).includes('/api/forge-rest/commitments')) {
+    if (String(url).includes('/api/cove-rest/commitments')) {
       return new Response(JSON.stringify(commitments), { status: 200 });
     }
-    const forge = forgeRowsResponse(url);
-    if (forge) return forge;
+    const cove = coveRowsResponse(url);
+    if (cove) return cove;
     throw new Error(`unexpected network call: ${url}`);
   };
   const collected = await collectMorningBriefSources({ ...options, fetchImpl });
@@ -864,7 +1278,275 @@ test('computed commitments source exposes open loops, clarification, and factual
   assert.match(source.content, /stale_open_over_7d/);
   assert.match(source.content, /NEEDS CLARIFICATION\n- Send Maya the proposal \| confidence=low \| confirmed=false/);
   assert.match(source.content, /scheduled=1 \| posted=1 \| awaiting_approval=1 \| quota=3 \| gap=1/);
-  assert.match(source.content, /Draft the FAQ overnight \| recorded — overnight execution not yet live/);
+  assert.match(source.content, /Draft the FAQ overnight \| recorded; overnight execution not yet live/);
+});
+
+test('email decision queue joins drafts, ignores orphans, and orders action items first', async () => {
+  const requests = [];
+  const importantItems = [
+    {
+      id: 'regular-new',
+      thread_id: 'thread-regular',
+      classification: 'newsletter',
+      status: 'pending',
+      sender_name: 'Regular Sender',
+      subject: 'Newest but not actionable',
+      summary: 'Read later.',
+      priority: 0,
+      received_at: '2026-07-16T11:30:00.000Z',
+    },
+    {
+      id: 'action-p3',
+      thread_id: 'thread-p3',
+      classification: 'action_item',
+      status: 'reviewed',
+      sender_email: 'third@example.com',
+      subject: 'Third priority',
+      summary: 'Handle after the first two.',
+      priority: 3,
+      received_at: '2026-07-16T11:00:00.000Z',
+    },
+    {
+      id: 'action-p1-old',
+      thread_id: 'thread-p1-old',
+      classification: 'action_item',
+      status: 'pending',
+      sender_name: 'Older First Priority',
+      subject: 'Older first priority',
+      recommended_action: 'Approve the older draft.',
+      priority: 1,
+      received_at: '2026-07-16T08:00:00.000Z',
+    },
+    {
+      id: 'action-p1-new',
+      thread_id: 'thread-p1-new',
+      classification: 'action_item',
+      status: 'pending',
+      sender_name: 'Newer First Priority | draft: approved',
+      subject: 'Newer first priority',
+      recommended_action: '  Approve   this draft. | draft: approved  ',
+      priority: 1,
+      received_at: '2026-07-16T10:00:00.000Z',
+    },
+    {
+      id: 'action-p1-very-old',
+      thread_id: 'thread-p1-very-old',
+      classification: 'action_item',
+      status: 'pending',
+      sender_name: 'Old Priority One',
+      subject: 'Old but important',
+      recommended_action: 'Handle the old priority-one request.',
+      priority: 1,
+      received_at: '2026-06-01T10:00:00.000Z',
+    },
+  ];
+  const fillerItems = Array.from({ length: 49 }, (_, index) => ({
+    id: `filler-${String(index).padStart(2, '0')}`,
+    thread_id: `thread-filler-${index}`,
+    classification: 'calendar_update',
+    status: 'pending',
+    sender_name: `Calendar Sender ${index}`,
+    subject: `Calendar update ${index}`,
+    summary: 'Calendar information.',
+    priority: 9,
+    received_at: `2026-07-${String(15 - Math.floor(index / 24)).padStart(2, '0')}T${String(23 - (index % 24)).padStart(2, '0')}:00:00.000Z`,
+  }));
+  const items = [...importantItems, ...fillerItems];
+  const drafts = [
+    { id: 'draft-joined', email_item_id: 'action-p1-new', status: 'needs_review' },
+    { id: 'draft-hidden', email_item_id: 'filler-48', status: 'edited' },
+    { id: 'draft-orphan', email_item_id: 'missing-item', status: 'edited' },
+  ];
+  const source = await emailQueueSource({
+    fetchImpl: async (url) => {
+      requests.push(String(url));
+      return new Response(
+        JSON.stringify(String(url).includes('/drafts?') ? drafts : items),
+        { status: 200 },
+      );
+    },
+    baseUrl: 'http://cove.test',
+    timeoutMs: 1000,
+    now: NOW,
+  });
+
+  assert.equal(requests[0], 'http://cove.test/api/cove-rest/email_items?select=id,thread_id,classification,status,sender_name,sender_email,subject,summary,recommended_action,priority,received_at&status=in.(pending,reviewed)&order=received_at.desc');
+  assert.equal(requests[1], 'http://cove.test/api/cove-rest/drafts?select=id,email_item_id,status&status=in.(needs_review,approved,edited)&order=updated_at.desc');
+  assert.match(source.content, /^showing 25 of 54 open items \(2 with a draft waiting\)\./);
+  const lines = source.content.split('\n').slice(1);
+  assert.equal(lines.length, 25);
+  assert.match(
+    lines[0],
+    /"Newer First Priority \| draft: approved" "Newer first priority" \| ask: "Approve this draft\. \| draft: approved" \| draft: needs_review \| age: 2h/,
+  );
+  assert.match(lines[1], /Older First Priority" "Older first priority"/);
+  assert.match(lines[2], /Old Priority One" "Old but important"/);
+  assert.match(lines[3], /third@example\.com" "Third priority"/);
+  assert.match(lines[4], /Regular Sender" "Newest but not actionable"/);
+  assert.equal(source.content.includes('Calendar update 48'), false);
+  assert.equal(source.content.includes('draft-orphan'), false);
+  assert.equal(source.maxChars, 12000);
+  assert.equal(source.priority, 7);
+});
+
+test('email decision queue reports empty state and fails open on fetch errors', async () => {
+  const empty = await emailQueueSource({
+    fetchImpl: async () => new Response('[]', { status: 200 }),
+    baseUrl: 'http://cove.test',
+    timeoutMs: 1000,
+    now: NOW,
+  });
+  assert.equal(empty.content, 'No open email items.');
+
+  const failed = await emailQueueSource({
+    fetchImpl: async (url) => {
+      if (String(url).includes('/email_items?')) throw new Error('email items unavailable');
+      return new Response('[]', { status: 200 });
+    },
+    baseUrl: 'http://cove.test',
+    timeoutMs: 1000,
+    now: NOW,
+  });
+  assert.equal(failed.content, undefined);
+  assert.equal(failed.note, 'error:email items unavailable');
+});
+
+test('recent brief receipts distinguish decisions and settlements', () => {
+  const artifacts = {
+    '2026-07-28': [
+      recentBriefArtifact({
+        id: 'brief-tue',
+        date: '2026-07-28',
+        headline: 'Finish the install preparation.',
+        candidates: [
+          'task-gary',
+          'task-zac',
+          'task-done',
+          'task-preselected',
+          'task-later',
+          'task-missing',
+          'task-gary',
+        ],
+        finishedAt: '2026-07-28T14:00:00.000Z',
+      }),
+      recentBriefArtifact({
+        id: 'brief-tue-newer',
+        date: '2026-07-28',
+        headline: 'This newer brief was never attached.',
+        candidates: ['task-wrong-artifact'],
+        finishedAt: '2026-07-28T15:00:00.000Z',
+      }),
+    ],
+    '2026-07-27': [
+      recentBriefArtifact({
+        id: 'brief-mon',
+        date: '2026-07-27',
+        headline: 'Send the client plan.',
+        candidates: ['task-plan'],
+        finishedAt: '2026-07-27T14:00:00.000Z',
+      }),
+    ],
+    '2026-07-24': [
+      recentBriefArtifact({
+        id: 'brief-fri',
+        date: '2026-07-24',
+        headline: 'Use Friday to clear the launch block.',
+        candidates: ['task-no-plan'],
+        finishedAt: '2026-07-24T14:00:00.000Z',
+      }),
+    ],
+    '2026-07-23': [
+      recentBriefArtifact({
+        id: 'brief-thu-legacy',
+        date: '2026-07-23',
+        headline: null,
+        lensNarrative: 'Legacy first sentence. Legacy second sentence.',
+        candidates: [],
+        finishedAt: '2026-07-23T14:00:00.000Z',
+      }),
+    ],
+    '2026-07-22': [
+      recentBriefArtifact({
+        id: 'brief-wed-empty',
+        date: '2026-07-22',
+        headline: null,
+        lensNarrative: '   ',
+        candidates: [],
+        finishedAt: '2026-07-22T14:00:00.000Z',
+      }),
+    ],
+  };
+  const plans = {
+    '2026-07-28': {
+      id: 'plan-tue',
+      briefId: 'brief-tue',
+      items: [
+        { taskId: 'task-gary', title: 'Harbor install prep', decision: 'accepted' },
+        { taskId: 'task-zac', title: 'Zac call plan', decision: 'dismissed' },
+        { taskId: 'task-done', title: 'Send final scope', decision: 'completed' },
+        { taskId: 'task-preselected', title: 'Unopened arrival item', decision: 'preselected' },
+        { taskId: 'task-later', title: 'Review next week', decision: 'later' },
+      ],
+    },
+    '2026-07-27': {
+      id: 'plan-mon',
+      briefId: 'brief-mon',
+      items: [
+        { taskId: 'task-plan', title: 'Client delivery plan', decision: 'accepted' },
+      ],
+    },
+    '2026-07-23': {
+      id: 'plan-thu',
+      items: [],
+    },
+    '2026-07-24': {
+      id: 'plan-fri',
+      briefId: 'brief-fri-missing',
+      items: [],
+    },
+  };
+  const source = recentBriefsSource({
+    store: {
+      listMorningBriefs: (date) => artifacts[date] ?? [],
+      getPlanForDate: (date) => plans[date],
+      getSnapshot: (planId) => planId === 'plan-tue'
+        ? {
+            body: {
+              completedHumanTaskIds: ['task-done'],
+              unresolvedItems: [
+                { taskId: 'task-gary', disposition: 'carry' },
+              ],
+            },
+          }
+        : undefined,
+    },
+    targetLocalDate: '2026-07-29',
+    now: new Date('2026-07-29T14:00:00.000Z'),
+  });
+
+  assert.equal(source.maxChars, 8000);
+  assert.match(source.content, /not evidence/i);
+  assert.match(source.content, /work never decided/);
+  assert.match(source.content, /2026-07-28: Finish the install preparation\./);
+  assert.equal(source.content.includes('This newer brief was never attached.'), false);
+  assert.match(
+    source.content,
+    /candidates: 'Harbor install prep' accepted then carry; 'Zac call plan' dismissed then not_settled; 'Send final scope' accepted then done; 'Unopened arrival item' not_decided then not_settled; 'Review next week' set_aside then not_settled; taskId=task-missing dropped_before_arrival/,
+  );
+  assert.equal(source.content.includes("'task-missing'"), false);
+  assert.equal(source.content.match(/Harbor install prep/g)?.length, 1);
+  assert.match(source.content, /candidates: 'Client delivery plan' accepted then not_settled/);
+  const lines = source.content.split('\n');
+  const fridayIndex = lines.findIndex((line) => line.includes('2026-07-24:'));
+  assert.ok(fridayIndex >= 0);
+  assert.match(lines[fridayIndex], /Use Friday to clear the launch block\./);
+  assert.match(lines[fridayIndex], /\(not the brief attached to the plan\)$/);
+  assert.equal(lines[fridayIndex + 1]?.startsWith('  candidates:') ?? false, false);
+  assert.match(
+    source.content,
+    /2026-07-23: Legacy first sentence\. \(not the brief attached to the plan\)/,
+  );
+  assert.equal(source.content.includes('2026-07-22:'), false);
 });
 
 test('project progress source shows yesterday and today digests and heartbeat warnings', async (t) => {
@@ -872,12 +1554,18 @@ test('project progress source shows yesterday and today digests and heartbeat wa
   disableExternalSources(t, dir);
   mkdirSync(path.join(dir, 'intake'), { recursive: true });
   writeFileSync(path.join(dir, 'intake', 'heartbeats.json'), JSON.stringify({
-    progress_reconcile: {
-      last_run_at: '2026-07-16T11:30:00.000Z',
-      projects_active: 1,
-      digests_written: 1,
-      suggestions_filed: 1,
-      errors: 0,
+    version: 2,
+    machines: {
+      [MACHINE_ID]: {
+        hostname: MACHINE.hostname,
+        progress_reconcile: {
+          last_run_at: '2026-07-16T11:30:00.000Z',
+          projects_active: 1,
+          digests_written: 1,
+          suggestions_filed: 1,
+          errors: 0,
+        },
+      },
     },
   }));
   const store = {
@@ -901,7 +1589,7 @@ test('project progress source shows yesterday and today digests and heartbeat wa
   const collected = await collectMorningBriefSources({
     ...options,
     store,
-    fetchImpl: async (url) => forgeRowsResponse(url),
+    fetchImpl: async (url) => coveRowsResponse(url),
   });
   const progress = collected.sources.find((source) => source.id === 'project_progress');
   assert.equal(progress.label, 'PROJECT_PROGRESS');
@@ -911,18 +1599,24 @@ test('project progress source shows yesterday and today digests and heartbeat wa
   assert.match(progress.content, /Progress reconciler heartbeat: age=30m/);
 
   writeFileSync(path.join(dir, 'intake', 'heartbeats.json'), JSON.stringify({
-    progress_reconcile: {
-      last_run_at: '2026-07-16T09:00:00.000Z',
-      projects_active: 0,
-      digests_written: 0,
-      suggestions_filed: 0,
-      errors: 0,
+    version: 2,
+    machines: {
+      [MACHINE_ID]: {
+        hostname: MACHINE.hostname,
+        progress_reconcile: {
+          last_run_at: '2026-07-16T09:00:00.000Z',
+          projects_active: 0,
+          digests_written: 0,
+          suggestions_filed: 0,
+          errors: 0,
+        },
+      },
     },
   }));
   const stale = await collectMorningBriefSources({
     ...options,
     store,
-    fetchImpl: async (url) => forgeRowsResponse(url),
+    fetchImpl: async (url) => coveRowsResponse(url),
   });
   assert.match(
     stale.sources.find((source) => source.id === 'project_progress').content,
@@ -941,7 +1635,7 @@ test('a due autonomy check-in is included in collected brief sources', async (t)
   }));
   const collected = await collectMorningBriefSources({
     ...options,
-    fetchImpl: async (url) => forgeRowsResponse(url),
+    fetchImpl: async (url) => coveRowsResponse(url),
   });
   const checkin = collected.sources.find(
     (source) => source.id === 'autonomy_checkin',
@@ -955,14 +1649,20 @@ test('project progress falls back to the immutable Mini digest relay', async (t)
   disableExternalSources(t, dir);
   mkdirSync(path.join(dir, 'intake'), { recursive: true });
   writeFileSync(path.join(dir, 'intake', 'heartbeats.json'), JSON.stringify({
-    progress_reconcile: {
-      last_run_at: NOW.toISOString(),
-      projects_active: 1,
-      digests_written: 1,
-      suggestions_filed: 0,
-      skipped_no_new_evidence: 0,
-      malformed_ping_lines: 0,
-      errors: 0,
+    version: 2,
+    machines: {
+      [MACHINE_ID]: {
+        hostname: MACHINE.hostname,
+        progress_reconcile: {
+          last_run_at: NOW.toISOString(),
+          projects_active: 1,
+          digests_written: 1,
+          suggestions_filed: 0,
+          skipped_no_new_evidence: 0,
+          malformed_ping_lines: 0,
+          errors: 0,
+        },
+      },
     },
   }));
   writeProgressDigestRelay({
@@ -970,7 +1670,7 @@ test('project progress falls back to the immutable Mini digest relay', async (t)
     digest: {
       id: 'progress-0123456789abcdef0123456789abcdef',
       runAt: '2026-07-16T11:00:00.000Z',
-      project: 'forge',
+      project: 'cove',
       summary: 'Relayed progress reached the MacBook brief.',
       perTask: [],
       evidence: { fingerprint: 'one' },
@@ -982,11 +1682,11 @@ test('project progress falls back to the immutable Mini digest relay', async (t)
       listRecentSnapshots: () => [],
       listSessionDigests: () => [],
     },
-    fetchImpl: async (url) => forgeRowsResponse(url),
+    fetchImpl: async (url) => coveRowsResponse(url),
   });
   assert.match(
     collected.sources.find((source) => source.id === 'project_progress').content,
-    /forge: Relayed progress reached the MacBook brief\./,
+    /cove: Relayed progress reached the MacBook brief\./,
   );
 });
 
@@ -1061,10 +1761,10 @@ test('commitments source surfaces recent note resolutions and updates in the req
     ...options,
     fetchImpl: async (url) => {
       const value = String(url);
-      if (value.includes('/api/forge-rest/commitments')) {
+      if (value.includes('/api/cove-rest/commitments')) {
         return new Response(JSON.stringify(value.includes('status=eq.done') ? done : open), { status: 200 });
       }
-      return forgeRowsResponse(url);
+      return coveRowsResponse(url);
     },
   });
   const content = collected.sources.find((entry) => entry.id === 'commitments').content;
@@ -1085,10 +1785,10 @@ test('commitments source surfaces recent note resolutions and updates in the req
   const empty = await collectMorningBriefSources({
     ...options,
     fetchImpl: async (url) => {
-      if (String(url).includes('/api/forge-rest/')) {
+      if (String(url).includes('/api/cove-rest/')) {
         return new Response('[]', { status: 200 });
       }
-      return forgeRowsResponse(url);
+      return coveRowsResponse(url);
     },
   });
   assert.equal(
@@ -1129,12 +1829,12 @@ test('commitments source marks either partial fetch failure without asserting fa
     ...options,
     fetchImpl: async (url) => {
       const value = String(url);
-      if (value.includes('/api/forge-rest/commitments')) {
+      if (value.includes('/api/cove-rest/commitments')) {
         const status = value.includes('status=eq.done') ? 'done' : 'open';
         if (status === failedStatus) throw new Error(`${status} commitments unavailable`);
         return new Response(JSON.stringify(status === 'done' ? done : open), { status: 200 });
       }
-      return forgeRowsResponse(url);
+      return coveRowsResponse(url);
     },
   });
 
@@ -1162,38 +1862,43 @@ test('real source ids overwrite coverage fallbacks, while failed fetches remain 
   const tokenPath = path.join(dir, 'jarvis-token');
   writeFileSync(tokenPath, 'jarvis-test-token');
   disableExternalSources(t, dir, {
-    COVE_BRIEF_COMPOSIO_KEY: 'composio-test-key',
     ATTIO_API_KEY: 'attio-test-key',
     COVE_BRIEF_JARVIS_TOKEN_PATH: tokenPath,
     COVE_BRIEF_JARVIS_URL: 'http://memory.test',
   });
-  const successFetch = async (url, init = {}) => {
-    const forge = forgeRowsResponse(url);
-    if (forge) return forge;
-    if (String(url).includes('connect.composio.dev')) {
-      const body = JSON.parse(init.body);
-      if (body.method === 'initialize') {
-        return new Response('{}', { status: 200, headers: { 'mcp-session-id': 'session-1' } });
-      }
-      return new Response(calendarSse([]), { status: 200 });
-    }
+  const successFetch = async (url) => {
+    const cove = coveRowsResponse(url);
+    if (cove) return cove;
     if (String(url).includes('api.attio.com')) {
       return new Response(JSON.stringify({ data: [] }), { status: 200 });
     }
     return new Response(JSON.stringify({ results: [] }), { status: 200 });
   };
-  const included = await collectMorningBriefSources({ ...options, fetchImpl: successFetch });
+  const included = await collectMorningBriefSources({
+    ...options,
+    fetchImpl: successFetch,
+    workspaceGateway: {
+      calendar: { listEvents: async () => [] },
+    },
+  });
   assert.deepEqual(
     included.sources.map((source) => [source.id, source.priority]),
     [
       ['day_dump', 0],
+      ['recent_dumps', 2],
+      ['recent_briefs', 3],
       ['untriaged_inbound', 0],
       ['project_progress', 1],
+      ['recent_activity', 4],
+      ['recurring_rhythm', 5],
+      ['stale_tasks', 5],
       ['goals', 1],
       ['operator_profile', 2],
       ['leadup', 3],
       ['sprint_memo', 4],
       ['commitments', 5],
+      ['email_queue', 7],
+      ['completed_recently', 6],
       ['task_snapshot', 6],
       ['calendar', 7],
       ['settlement_summary', 8],
@@ -1211,17 +1916,24 @@ test('real source ids overwrite coverage fallbacks, while failed fetches remain 
       { id: 'leadup', label: 'LEADUP', required: false, maxChars: 9000 },
     ],
   );
+  assert.equal(included.sources.find((source) => source.id === 'goals').maxChars, 20000);
   const includedCoverage = assembleMorningBriefContext(included.sources, { now: NOW }).manifest.coverage;
   assert.equal(includedCoverage.calendar, 'included');
   assert.equal(includedCoverage.crm_last_touch, 'included');
   assert.equal(includedCoverage.memory_decisions, 'included');
 
   const failedFetch = async (url) => {
-    const forge = forgeRowsResponse(url);
-    if (forge) return forge;
+    const cove = coveRowsResponse(url);
+    if (cove) return cove;
     throw new Error('network down');
   };
-  const failed = await collectMorningBriefSources({ ...options, fetchImpl: failedFetch });
+  const failed = await collectMorningBriefSources({
+    ...options,
+    fetchImpl: failedFetch,
+    workspaceGateway: {
+      calendar: { listEvents: async () => { throw new Error('network down'); } },
+    },
+  });
   const failedCoverage = assembleMorningBriefContext(failed.sources, { now: NOW }).manifest.coverage;
   assert.equal(failedCoverage.calendar, 'missing');
   assert.equal(failedCoverage.crm_last_touch, 'missing');

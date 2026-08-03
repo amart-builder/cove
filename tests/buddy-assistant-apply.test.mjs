@@ -8,6 +8,10 @@ import {
   POST,
   deterministicCreateId,
 } from '../src/app/api/day-plan/assistant-apply/route.ts';
+import {
+  BUDDY_STORE_API_VERSION,
+  createBuddyStore,
+} from '../src/lib/buddy/store.ts';
 import { buildDayPlanCandidates } from '../src/lib/day-plan/candidates.ts';
 import {
   DayPlanInvalidTransition,
@@ -18,10 +22,10 @@ import { getQuietCurrentCsrfToken } from '../src/lib/quiet-current/store.ts';
 import { getEvent } from '../src/lib/intake/inbox.ts';
 
 function setupAssistantApply(t) {
-  const root = path.join(os.tmpdir(), `forge-buddy-atomicity-${process.pid}-${Date.now()}-${Math.random()}`);
+  const root = path.join(os.tmpdir(), `cove-buddy-atomicity-${process.pid}-${Date.now()}-${Math.random()}`);
   mkdirSync(root, { recursive: true });
   const store = createDayPlanStore({
-    dbPath: path.join(root, 'forge.db'),
+    dbPath: path.join(root, 'cove.db'),
     now: () => new Date('2026-07-15T16:00:00.000Z'),
   });
   t.after(() => {
@@ -58,19 +62,19 @@ function setupAssistantApply(t) {
 }
 
 test('assistant-apply enforces access and CSRF, applies valid ops, and returns conflicts', async (t) => {
-  const root = path.join(os.tmpdir(), `forge-buddy-apply-${process.pid}-${Date.now()}`);
+  const root = path.join(os.tmpdir(), `cove-buddy-apply-${process.pid}-${Date.now()}`);
   mkdirSync(root, { recursive: true });
-  const store = createDayPlanStore({ dbPath: path.join(root, 'forge.db') });
-  const previousStore = globalThis.__forgeDayPlanStore;
+  const store = createDayPlanStore({ dbPath: path.join(root, 'cove.db') });
+  const previousStore = globalThis.__coveDayPlanStore;
   const previousMode = process.env.COVE_DAY_PLAN_ACCESS_MODE;
   const previousQuietFile = process.env.COVE_QUIET_CURRENT_FILE;
   const quietFile = `buddy-apply-${process.pid}-${Date.now()}.json`;
-  globalThis.__forgeDayPlanStore = store;
+  globalThis.__coveDayPlanStore = store;
   process.env.COVE_DAY_PLAN_ACCESS_MODE = 'loopback';
   process.env.COVE_QUIET_CURRENT_FILE = quietFile;
   t.after(() => {
-    if (previousStore === undefined) delete globalThis.__forgeDayPlanStore;
-    else globalThis.__forgeDayPlanStore = previousStore;
+    if (previousStore === undefined) delete globalThis.__coveDayPlanStore;
+    else globalThis.__coveDayPlanStore = previousStore;
     if (previousMode === undefined) delete process.env.COVE_DAY_PLAN_ACCESS_MODE;
     else process.env.COVE_DAY_PLAN_ACCESS_MODE = previousMode;
     if (previousQuietFile === undefined) delete process.env.COVE_QUIET_CURRENT_FILE;
@@ -112,7 +116,7 @@ test('assistant-apply enforces access and CSRF, applies valid ops, and returns c
     method: 'POST',
     headers: {
       host: 'localhost:3200', origin: 'http://localhost:3200', 'content-type': 'application/json',
-      'x-forge-csrf': getQuietCurrentCsrfToken(),
+      'x-cove-csrf': getQuietCurrentCsrfToken(),
     },
     body: JSON.stringify(body),
   });
@@ -193,33 +197,291 @@ test('assistant apply creates, completes, updates, and reprioritizes task-backed
     'new work enters through inbound_events instead of the legacy task mutation writer',
   );
   assert.equal(result.turn.state, 'applied');
+
+  const active = store.mutateDayPlan({
+    planId: result.plan.id,
+    expectedVersion: result.plan.version,
+    mutationId: 'start:active-replan',
+    action: 'start_day',
+  }).plan;
+  assert.throws(
+    () => store.applyAssistantOperations({
+      expectedVersion: active.version,
+      operations: [{
+        operation: 'set_owner',
+        itemId: retainedItem.id,
+        owner: 'together',
+      }],
+    }),
+    (error) =>
+      error instanceof DayPlanInvalidTransition &&
+      error.message === 'Arrival items can change only while arrival is open.',
+  );
+});
+
+test('active-plan apply requires an exact finished Buddy preview and consumes it once', async (t) => {
+  const { root, store, plan: arrivalPlan } = setupAssistantApply(t);
+  const dbPath = path.join(root, 'cove.db');
+  const buddyStore = createBuddyStore({ dbPath });
+  let plan = store.mutateDayPlan({
+    planId: arrivalPlan.id,
+    expectedVersion: arrivalPlan.version,
+    mutationId: 'start:proof-required',
+    action: 'start_day',
+  }).plan;
+  const operations = [{
+    operation: 'set_owner',
+    itemId: plan.items[0].id,
+    owner: 'together',
+  }];
+  const proposedReceipts = {
+    changes: [],
+    pendingDeletes: [],
+    replan: {
+      status: 'proposed',
+      expectedVersion: plan.version,
+      assistantText: 'I can move this to Together.',
+      operations,
+      preview: [],
+    },
+  };
+  const turn = buddyStore.claimTurn({
+    userText: 'reshuffle my afternoon',
+    pageContext: { view: 'today' },
+    model: 'sonnet',
+    effort: 'medium',
+    routerReason: 'Day replan preview',
+  });
+  buddyStore.finishTurn(turn.id, {
+    state: 'succeeded',
+    assistant_text: proposedReceipts.replan.assistantText,
+    receipts_json: JSON.stringify(proposedReceipts),
+  });
+
+  const previousDayStore = globalThis.__coveDayPlanStore;
+  const previousBuddyStore = globalThis.__coveBuddyStore;
+  const previousBuddyVersion = globalThis.__coveBuddyStoreVersion;
+  const previousRuntime = process.env.NEXT_PUBLIC_COVE_RUNTIME;
+  const previousMode = process.env.COVE_DAY_PLAN_ACCESS_MODE;
+  const previousQuietFile = process.env.COVE_QUIET_CURRENT_FILE;
+  const quietFile = `buddy-proof-${process.pid}-${Date.now()}.json`;
+  globalThis.__coveDayPlanStore = store;
+  globalThis.__coveBuddyStore = buddyStore;
+  globalThis.__coveBuddyStoreVersion = BUDDY_STORE_API_VERSION;
+  process.env.NEXT_PUBLIC_COVE_RUNTIME = 'local';
+  process.env.COVE_DAY_PLAN_ACCESS_MODE = 'loopback';
+  process.env.COVE_QUIET_CURRENT_FILE = quietFile;
+  t.after(() => {
+    if (previousDayStore === undefined) delete globalThis.__coveDayPlanStore;
+    else globalThis.__coveDayPlanStore = previousDayStore;
+    if (previousBuddyStore === undefined) delete globalThis.__coveBuddyStore;
+    else globalThis.__coveBuddyStore = previousBuddyStore;
+    if (previousBuddyVersion === undefined) delete globalThis.__coveBuddyStoreVersion;
+    else globalThis.__coveBuddyStoreVersion = previousBuddyVersion;
+    if (previousRuntime === undefined) delete process.env.NEXT_PUBLIC_COVE_RUNTIME;
+    else process.env.NEXT_PUBLIC_COVE_RUNTIME = previousRuntime;
+    if (previousMode === undefined) delete process.env.COVE_DAY_PLAN_ACCESS_MODE;
+    else process.env.COVE_DAY_PLAN_ACCESS_MODE = previousMode;
+    if (previousQuietFile === undefined) delete process.env.COVE_QUIET_CURRENT_FILE;
+    else process.env.COVE_QUIET_CURRENT_FILE = previousQuietFile;
+    buddyStore.close();
+    rmSync(path.join(process.cwd(), 'data', quietFile), { force: true });
+    rmSync(path.join(process.cwd(), 'data', `${quietFile}.token`), { force: true });
+  });
+
+  const request = (extraHeaders = {}, bodyOperations = operations) =>
+    new NextRequest('http://localhost:3200/api/day-plan/assistant-apply', {
+      method: 'POST',
+      headers: {
+        host: 'localhost:3200',
+        origin: 'http://localhost:3200',
+        'content-type': 'application/json',
+        'x-cove-csrf': getQuietCurrentCsrfToken(),
+        ...extraHeaders,
+      },
+      body: JSON.stringify({
+        expectedVersion: plan.version,
+        operations: bodyOperations,
+      }),
+    });
+
+  const toolPath = await POST(request());
+  assert.equal(toolPath.status, 400);
+  assert.deepEqual(await toolPath.json(), {
+    error: 'Arrival items can change only while arrival is open.',
+  });
+  assert.equal(store.getPlan(plan.id).version, plan.version);
+
+  process.env.NEXT_PUBLIC_COVE_RUNTIME = 'supabase';
+  const nonLocal = await POST(request({ 'x-cove-buddy-turn': turn.id }));
+  assert.equal(nonLocal.status, 400);
+  assert.deepEqual(await nonLocal.json(), {
+    error: 'Arrival items can change only while arrival is open.',
+  });
+  process.env.NEXT_PUBLIC_COVE_RUNTIME = 'local';
+
+  const mismatch = await POST(request(
+    { 'x-cove-buddy-turn': turn.id },
+    [{ ...operations[0], owner: 'claude' }],
+  ));
+  assert.equal(mismatch.status, 400);
+  assert.equal(
+    JSON.parse(buddyStore.getTurn(turn.id).receipts_json).replan.status,
+    'proposed',
+  );
+
+  const applied = await POST(request({ 'x-cove-buddy-turn': turn.id }));
+  assert.equal(applied.status, 200);
+  const appliedBody = await applied.json();
+  assert.equal(appliedBody.plan.state, 'active');
+  assert.equal(appliedBody.plan.items[0].owner, 'together');
+  assert.equal(appliedBody.receipts.replan.status, 'applied');
+  assert.equal(
+    JSON.parse(buddyStore.getTurn(turn.id).receipts_json).replan.status,
+    'applied',
+  );
+
+  const replay = await POST(request({ 'x-cove-buddy-turn': turn.id }));
+  assert.equal(replay.status, 409);
+});
+
+test('a mid-day created item is accepted and survives settlement', (t) => {
+  const { root, store, plan: arrivalPlan } = setupAssistantApply(t);
+  const buddyStore = createBuddyStore({ dbPath: path.join(root, 'cove.db') });
+  t.after(() => buddyStore.close());
+  const previousRuntime = process.env.NEXT_PUBLIC_COVE_RUNTIME;
+  process.env.NEXT_PUBLIC_COVE_RUNTIME = 'local';
+  t.after(() => {
+    if (previousRuntime === undefined) delete process.env.NEXT_PUBLIC_COVE_RUNTIME;
+    else process.env.NEXT_PUBLIC_COVE_RUNTIME = previousRuntime;
+  });
+  let plan = store.mutateDayPlan({
+    planId: arrivalPlan.id,
+    expectedVersion: arrivalPlan.version,
+    mutationId: 'start:midday-create',
+    action: 'start_day',
+  }).plan;
+  const operations = [{
+    operation: 'create_item',
+    clientId: 'urgent-follow-up',
+    title: 'Handle the urgent follow-up',
+    outcome: 'Resolve the new client issue today.',
+    position: 0,
+  }];
+  const proposed = {
+    changes: [],
+    pendingDeletes: [],
+    replan: {
+      status: 'proposed',
+      expectedVersion: plan.version,
+      assistantText: 'I can add the urgent follow-up.',
+      operations,
+      preview: [],
+    },
+  };
+  const applied = {
+    ...proposed,
+    changes: [{
+      table: 'day_plan',
+      action: 'insert',
+      id: 'urgent-created-id',
+      summary: "Added 'Handle the urgent follow-up' to today",
+    }],
+    replan: {
+      ...proposed.replan,
+      status: 'applied',
+      appliedChanges: [{
+        table: 'day_plan',
+        action: 'insert',
+        id: 'urgent-created-id',
+        summary: "Added 'Handle the urgent follow-up' to today",
+      }],
+    },
+  };
+  const turn = buddyStore.claimTurn({
+    userText: 'new urgent thing, reshuffle my afternoon',
+    pageContext: { view: 'today' },
+    model: 'sonnet',
+    effort: 'medium',
+    routerReason: 'Day replan preview',
+  });
+  buddyStore.finishTurn(turn.id, {
+    state: 'succeeded',
+    assistant_text: proposed.replan.assistantText,
+    receipts_json: JSON.stringify(proposed),
+  });
+  plan = store.applyAssistantOperations({
+    expectedVersion: plan.version,
+    operations,
+    createdItemIds: ['urgent-created-id'],
+    replanReceiptProof: {
+      turnId: turn.id,
+      expectedReceiptsJson: JSON.stringify(proposed),
+      appliedReceiptsJson: JSON.stringify(applied),
+    },
+  }).plan;
+  const created = plan.items.find((item) => item.id === 'urgent-created-id');
+  assert.equal(created.decision, 'accepted');
+  assert.equal(created.whyToday, 'Added during a mid-day replan.');
+
+  const originalTaskIds = plan.items
+    .filter((item) => item.id !== created.id)
+    .map((item) => item.taskId);
+  plan = store.mutateDayPlan({
+    planId: plan.id,
+    expectedVersion: plan.version,
+    mutationId: 'settlement-start:midday-create',
+    action: 'settlement_start',
+    completedHumanTaskIds: originalTaskIds,
+  }).plan;
+  plan = store.mutateDayPlan({
+    planId: plan.id,
+    expectedVersion: plan.version,
+    mutationId: 'settlement-decide:midday-create',
+    action: 'settlement_decide',
+    itemId: created.id,
+    disposition: 'carry',
+  }).plan;
+  const committed = store.mutateDayPlan({
+    planId: plan.id,
+    expectedVersion: plan.version,
+    mutationId: 'settlement-commit:midday-create',
+    action: 'settlement_commit',
+    completedHumanTaskIds: originalTaskIds,
+  });
+  assert.equal(
+    committed.snapshot.body.unresolvedItems.some(
+      (item) => item.dayPlanItemId === created.id && item.disposition === 'carry',
+    ),
+    true,
+  );
 });
 
 test('assistant create_item records the deterministic plan item in inbound_events', async (t) => {
   const { root, store, plan } = setupAssistantApply(t);
-  const previousStore = globalThis.__forgeDayPlanStore;
-  const previousDb = globalThis.__forgeDb;
+  const previousStore = globalThis.__coveDayPlanStore;
+  const previousDb = globalThis.__coveDb;
   const previousDbPath = process.env.COVE_DB_PATH;
-  const previousRuntime = process.env.NEXT_PUBLIC_FORGE_RUNTIME;
+  const previousRuntime = process.env.NEXT_PUBLIC_COVE_RUNTIME;
   const previousMode = process.env.COVE_DAY_PLAN_ACCESS_MODE;
   const previousQuietFile = process.env.COVE_QUIET_CURRENT_FILE;
   const inboxPath = path.join(root, 'inbox.db');
   const quietFile = `buddy-intake-${process.pid}-${Date.now()}.json`;
-  globalThis.__forgeDayPlanStore = store;
-  delete globalThis.__forgeDb;
+  globalThis.__coveDayPlanStore = store;
+  delete globalThis.__coveDb;
   process.env.COVE_DB_PATH = inboxPath;
-  process.env.NEXT_PUBLIC_FORGE_RUNTIME = 'local';
+  process.env.NEXT_PUBLIC_COVE_RUNTIME = 'local';
   process.env.COVE_DAY_PLAN_ACCESS_MODE = 'loopback';
   process.env.COVE_QUIET_CURRENT_FILE = quietFile;
   const previousFetch = globalThis.fetch;
   const tasks = new Map();
   globalThis.fetch = async (url, init = {}) => {
     const value = String(url);
-    if (value.includes('/api/forge-rest/tasks?')) {
+    if (value.includes('/api/cove-rest/tasks?')) {
       const id = new URL(value).searchParams.get('id')?.replace(/^eq\./, '');
       return new Response(JSON.stringify(id && tasks.has(id) ? [tasks.get(id)] : []));
     }
-    if (value.includes('/api/forge-rest/task_columns')) {
+    if (value.includes('/api/cove-rest/task_columns')) {
       return new Response(JSON.stringify([
         { id: 'not-started', name: 'Not Started', position: 0 },
         { id: 'today', name: 'Must happen today', position: 1 },
@@ -228,7 +490,7 @@ test('assistant create_item records the deterministic plan item in inbound_event
     if (value.endsWith('/api/day-plan')) {
       return new Response('{"csrfToken":"task-writer-token"}');
     }
-    if (value.endsWith('/api/forge-rest/tasks') && init.method === 'POST') {
+    if (value.endsWith('/api/cove-rest/tasks') && init.method === 'POST') {
       const task = JSON.parse(init.body);
       tasks.set(task.id, task);
       return new Response(JSON.stringify([task]), { status: 201 });
@@ -237,15 +499,15 @@ test('assistant create_item records the deterministic plan item in inbound_event
   };
   t.after(() => {
     globalThis.fetch = previousFetch;
-    globalThis.__forgeDb?.close();
-    if (previousDb === undefined) delete globalThis.__forgeDb;
-    else globalThis.__forgeDb = previousDb;
-    if (previousStore === undefined) delete globalThis.__forgeDayPlanStore;
-    else globalThis.__forgeDayPlanStore = previousStore;
+    globalThis.__coveDb?.close();
+    if (previousDb === undefined) delete globalThis.__coveDb;
+    else globalThis.__coveDb = previousDb;
+    if (previousStore === undefined) delete globalThis.__coveDayPlanStore;
+    else globalThis.__coveDayPlanStore = previousStore;
     if (previousDbPath === undefined) delete process.env.COVE_DB_PATH;
     else process.env.COVE_DB_PATH = previousDbPath;
-    if (previousRuntime === undefined) delete process.env.NEXT_PUBLIC_FORGE_RUNTIME;
-    else process.env.NEXT_PUBLIC_FORGE_RUNTIME = previousRuntime;
+    if (previousRuntime === undefined) delete process.env.NEXT_PUBLIC_COVE_RUNTIME;
+    else process.env.NEXT_PUBLIC_COVE_RUNTIME = previousRuntime;
     if (previousMode === undefined) delete process.env.COVE_DAY_PLAN_ACCESS_MODE;
     else process.env.COVE_DAY_PLAN_ACCESS_MODE = previousMode;
     if (previousQuietFile === undefined) delete process.env.COVE_QUIET_CURRENT_FILE;
@@ -261,7 +523,7 @@ test('assistant create_item records the deterministic plan item in inbound_event
         host: 'localhost:3200',
         origin: 'http://localhost:3200',
         'content-type': 'application/json',
-        'x-forge-csrf': getQuietCurrentCsrfToken(),
+        'x-cove-csrf': getQuietCurrentCsrfToken(),
       },
       body: JSON.stringify({
         expectedVersion: plan.version,
@@ -270,7 +532,7 @@ test('assistant create_item records the deterministic plan item in inbound_event
           clientId: 'capture-one',
           title: 'Prepare the client kickoff',
           outcome: 'Make the kickoff ready for Jordan Rivers to review.',
-          project: 'forge',
+          project: 'cove',
           priority: 'high',
           position: 0,
         }],
@@ -299,7 +561,7 @@ test('assistant create_item records the deterministic plan item in inbound_event
         host: 'localhost:3200',
         origin: 'http://localhost:3200',
         'content-type': 'application/json',
-        'x-forge-csrf': getQuietCurrentCsrfToken(),
+        'x-cove-csrf': getQuietCurrentCsrfToken(),
       },
       body: JSON.stringify({
         expectedVersion: body.plan.version,
@@ -333,7 +595,7 @@ test('assistant create_item records the deterministic plan item in inbound_event
         host: 'localhost:3200',
         origin: 'http://localhost:3200',
         'content-type': 'application/json',
-        'x-forge-csrf': getQuietCurrentCsrfToken(),
+        'x-cove-csrf': getQuietCurrentCsrfToken(),
       },
       body: JSON.stringify({
         expectedVersion: editedBody.plan.version,
@@ -356,17 +618,17 @@ test('assistant create_item records the deterministic plan item in inbound_event
 
 test('assistant apply dismisses captured events when the plan write loses a race', async (t) => {
   const { root, store, plan } = setupAssistantApply(t);
-  const previousStore = globalThis.__forgeDayPlanStore;
-  const previousDb = globalThis.__forgeDb;
+  const previousStore = globalThis.__coveDayPlanStore;
+  const previousDb = globalThis.__coveDb;
   const previousDbPath = process.env.COVE_DB_PATH;
-  const previousRuntime = process.env.NEXT_PUBLIC_FORGE_RUNTIME;
+  const previousRuntime = process.env.NEXT_PUBLIC_COVE_RUNTIME;
   const previousMode = process.env.COVE_DAY_PLAN_ACCESS_MODE;
   const previousQuietFile = process.env.COVE_QUIET_CURRENT_FILE;
   const quietFile = `buddy-race-${process.pid}-${Date.now()}.json`;
-  globalThis.__forgeDayPlanStore = store;
-  delete globalThis.__forgeDb;
+  globalThis.__coveDayPlanStore = store;
+  delete globalThis.__coveDb;
   process.env.COVE_DB_PATH = path.join(root, 'race-inbox.db');
-  process.env.NEXT_PUBLIC_FORGE_RUNTIME = 'local';
+  process.env.NEXT_PUBLIC_COVE_RUNTIME = 'local';
   process.env.COVE_DAY_PLAN_ACCESS_MODE = 'loopback';
   process.env.COVE_QUIET_CURRENT_FILE = quietFile;
   const originalApply = store.applyAssistantOperations;
@@ -375,15 +637,15 @@ test('assistant apply dismisses captured events when the plan write loses a race
   };
   t.after(() => {
     store.applyAssistantOperations = originalApply;
-    globalThis.__forgeDb?.close();
-    if (previousDb === undefined) delete globalThis.__forgeDb;
-    else globalThis.__forgeDb = previousDb;
-    if (previousStore === undefined) delete globalThis.__forgeDayPlanStore;
-    else globalThis.__forgeDayPlanStore = previousStore;
+    globalThis.__coveDb?.close();
+    if (previousDb === undefined) delete globalThis.__coveDb;
+    else globalThis.__coveDb = previousDb;
+    if (previousStore === undefined) delete globalThis.__coveDayPlanStore;
+    else globalThis.__coveDayPlanStore = previousStore;
     if (previousDbPath === undefined) delete process.env.COVE_DB_PATH;
     else process.env.COVE_DB_PATH = previousDbPath;
-    if (previousRuntime === undefined) delete process.env.NEXT_PUBLIC_FORGE_RUNTIME;
-    else process.env.NEXT_PUBLIC_FORGE_RUNTIME = previousRuntime;
+    if (previousRuntime === undefined) delete process.env.NEXT_PUBLIC_COVE_RUNTIME;
+    else process.env.NEXT_PUBLIC_COVE_RUNTIME = previousRuntime;
     if (previousMode === undefined) delete process.env.COVE_DAY_PLAN_ACCESS_MODE;
     else process.env.COVE_DAY_PLAN_ACCESS_MODE = previousMode;
     if (previousQuietFile === undefined) delete process.env.COVE_QUIET_CURRENT_FILE;
@@ -399,7 +661,7 @@ test('assistant apply dismisses captured events when the plan write loses a race
         host: 'localhost:3200',
         origin: 'http://localhost:3200',
         'content-type': 'application/json',
-        'x-forge-csrf': getQuietCurrentCsrfToken(),
+        'x-cove-csrf': getQuietCurrentCsrfToken(),
       },
       body: JSON.stringify({
         expectedVersion: plan.version,
