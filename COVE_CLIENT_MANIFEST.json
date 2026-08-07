@@ -1,10 +1,10 @@
 {
   "version": 1,
   "product": "Cove",
-  "source_sha": "d1551532a5876c6925d62ad157fa89692f6c5ca7",
+  "source_sha": "2d1479b75458cbd51f1dd4497bbfeb341e9bc830",
   "source_worktree_dirty": false,
   "allow_dirty": false,
-  "exported_at": "2026-08-07T08:55:24.454Z",
+  "exported_at": "2026-08-07T14:51:29.752Z",
   "file_count": 421,
   "files": [
     {
@@ -34,8 +34,8 @@
     },
     {
       "path": "AGENTS.md",
-      "bytes": 2019,
-      "sha256": "3686c782d3cfc5fda1b96265cd71a1aafa606eec58d17417e9a797a5334b98de"
+      "bytes": 2723,
+      "sha256": "e84ad0374f2fa703d4a16b7eb56b6f79adfd80d542480d8df0e1b15d361645b1"
     },
     {
       "path": "AGENT_CONTRACT.md",
@@ -79,8 +79,8 @@
     },
     {
       "path": "README.md",
-      "bytes": 7425,
-      "sha256": "249f41ad62ac6dc3b9397549f0d9b35df5af52dc18de8af66323a201f67edb8e"
+      "bytes": 8619,
+      "sha256": "289de4b327c9d32380ba22e90caa003ad418205e364178d855f5407db7031dc3"
     },
     {
       "path": "SECURITY_AND_INTEGRATIONS.md",
@@ -89,8 +89,8 @@
     },
     {
       "path": "SETUP.md",
-      "bytes": 25855,
-      "sha256": "cc6eae8cff136442517d2abe14e5491dbe6ec1613c9b6096e9e44fe5e6034c1b"
+      "bytes": 31542,
+      "sha256": "e0e0ace29b3bfc7889c157509daa212e86d7d1088016fab442612b5f50e9038c"
     },
     {
       "path": "buddy/.gitignore",
@@ -1709,8 +1709,8 @@
     },
     {
       "path": "tests/codebase-documentation.test.mjs",
-      "bytes": 6247,
-      "sha256": "703611b9eb4b4b09099f61e8689ce0ca356650cd9fbcf4506deaaf8d16499d11"
+      "bytes": 7408,
+      "sha256": "0a67a11d3ad33b77d9588b655fa7cd2e03e12b724cdd96d0ac26d9a0ebd67ee0"
     },
     {
       "path": "tests/cove-arrival-schedule.test.mjs",
