@@ -1,11 +1,11 @@
 {
   "version": 1,
   "product": "Cove",
-  "source_sha": "c2c5ccd05208f812e9e820217338f2a29b2fd69e",
+  "source_sha": "52d94ed38fcfa27518e875caf57eaebb3417e3b9",
   "source_worktree_dirty": false,
   "allow_dirty": false,
-  "exported_at": "2026-08-07T17:39:04.102Z",
-  "file_count": 421,
+  "exported_at": "2026-08-07T18:51:33.724Z",
+  "file_count": 436,
   "files": [
     {
       "path": ".claude/skills/cove-morning-brief/SKILL.md",
@@ -54,8 +54,8 @@
     },
     {
       "path": "CODEBASE_GUIDE.md",
-      "bytes": 26027,
-      "sha256": "cccc9c18c39c74df771ab556f297de85d983026433f563410754cbfe201a3168"
+      "bytes": 26497,
+      "sha256": "57ffceba9f8a54ebfa2bea3d9608e145933c126603d8fd30ecf4ce3852889d4c"
     },
     {
       "path": "CONFIGURATION.md",
@@ -79,8 +79,8 @@
     },
     {
       "path": "README.md",
-      "bytes": 9428,
-      "sha256": "cc6b02be2771e8ab183ad7dbc8675b876e9a9b26af1c653008d5fcf25c40f689"
+      "bytes": 9561,
+      "sha256": "4008fc8c4ebe69f438dba7b9b3a465d505a1b6b6f977350efda4f3aec00891c0"
     },
     {
       "path": "SECURITY_AND_INTEGRATIONS.md",
@@ -89,8 +89,8 @@
     },
     {
       "path": "SETUP.md",
-      "bytes": 40583,
-      "sha256": "e0806c6e7638de4086d21200215b74b7e9452893f263713b5371d0282766be9a"
+      "bytes": 41778,
+      "sha256": "b244e961035f5891dc2ecad7aa8542da6ea907e1cc06b5111d6cde1476c67b15"
     },
     {
       "path": "buddy/.gitignore",
@@ -258,6 +258,11 @@
       "sha256": "17a349f287f4f980f91a57a11b05c51504a52699f7114a57bebe4f0fc051e27d"
     },
     {
+      "path": "public/cove-notification-icon.png",
+      "bytes": 788670,
+      "sha256": "ec9336d14f5ea0bf547edc2543ebb583863b5c64aa26e9f26fdea2ea23279423"
+    },
+    {
       "path": "public/file.svg",
       "bytes": 391,
       "sha256": "2b67812c325c199a02536cdbeea0c593a72f707d323b72ee3e08dbab06753bd4"
@@ -383,9 +388,14 @@
       "sha256": "11741f9851147b45c4a21b6b290d551660f45f874f390f1855fdc87a1da46a81"
     },
     {
+      "path": "scripts/cove-notifier.swift",
+      "bytes": 5030,
+      "sha256": "79a4247585e9d4d760f932b7da70636d8b3dc84355f8443b038519741a2cdb41"
+    },
+    {
       "path": "scripts/cove-notify.mjs",
-      "bytes": 4353,
-      "sha256": "cc0ceb54a77880615f49fb4814107e8ce8d7843c8c9d19d1fc928bbe31b8280f"
+      "bytes": 4467,
+      "sha256": "953c9bca61ccb4e9acd5ec57b0f3bb326dbe986671d37f10199596fcd356ab7c"
     },
     {
       "path": "scripts/cove-progress-reconcile.mjs",
@@ -399,8 +409,8 @@
     },
     {
       "path": "scripts/cove-reminders.mjs",
-      "bytes": 21022,
-      "sha256": "03c1e9f9caf4ead5c9535299c757c28512c41ba8da06e5504dd53e93134d2d2f"
+      "bytes": 21280,
+      "sha256": "5458a6812ef0670fcd9473275ec7280375d345f0adef741ea858fbc27ae6517f"
     },
     {
       "path": "scripts/cove-restore-backup.sh",
@@ -424,8 +434,8 @@
     },
     {
       "path": "scripts/cove-verify.mjs",
-      "bytes": 1502,
-      "sha256": "e35af8bd46c728079687a6563e9f7f83aa77c9fcdfbc9400e0d98e691bd6621b"
+      "bytes": 1751,
+      "sha256": "a7f91869f4c66693ad60c7dc2fc5802fa553640873813ebdacd06879e6cb47fb"
     },
     {
       "path": "scripts/cove-voice-samples.ts",
@@ -444,13 +454,18 @@
     },
     {
       "path": "scripts/install-cove-local.sh",
-      "bytes": 35762,
-      "sha256": "798965f0984a16edfccfcb448375a89a64dbf082d8da3c6462d842c2fa83a83b"
+      "bytes": 40099,
+      "sha256": "7fecd3a121790af42ef882c7423204ac5539cddf838d6569922438162526b071"
     },
     {
       "path": "scripts/install-cove-voice.sh",
       "bytes": 2655,
       "sha256": "e4678a6db141736b9a55315e76e8df33fbd547fc85e055dc68a1e14474d7a27d"
+    },
+    {
+      "path": "scripts/launchd/CoveNotifications-Info.plist",
+      "bytes": 974,
+      "sha256": "9cf32425ead23b00984feadf81dcd6263c92c121908ce8bdd15886ab04b7913d"
     },
     {
       "path": "scripts/launchd/com.cove.meeting-watch.plist",
@@ -578,24 +593,44 @@
       "sha256": "2a9a5f8d63d159be6258178e54c0e5d206a6a1f0edd68b884a98e27d046efe3b"
     },
     {
-      "path": "src/app/api/buddy/session/route.ts",
+      "path": "src/app/api/buddy/session/implementation.ts",
       "bytes": 2343,
       "sha256": "7aaab560a0259bd9b7bd01db8f7a37f0c097c8aa523da16947b765843a96d6d2"
     },
     {
-      "path": "src/app/api/buddy/spawn-session/route.ts",
+      "path": "src/app/api/buddy/session/route.ts",
+      "bytes": 120,
+      "sha256": "c086ff91c6f8ba9e40c1be40da7fb54c86262c7f18de5c7216ed0754e7a4fcd9"
+    },
+    {
+      "path": "src/app/api/buddy/spawn-session/implementation.ts",
       "bytes": 6842,
       "sha256": "8734e6615e31cf7d527a0ff0f6bc60a17aaa4ccad0ec5dbc433f2a348619d188"
     },
     {
-      "path": "src/app/api/buddy/turn/route.ts",
+      "path": "src/app/api/buddy/spawn-session/route.ts",
+      "bytes": 120,
+      "sha256": "c086ff91c6f8ba9e40c1be40da7fb54c86262c7f18de5c7216ed0754e7a4fcd9"
+    },
+    {
+      "path": "src/app/api/buddy/turn/implementation.ts",
       "bytes": 20323,
       "sha256": "88ed7a7606c38a17fb502d00c3c4db0069dc29809562afa404c5e417affe8036"
     },
     {
-      "path": "src/app/api/cove-rest/[table]/route.ts",
+      "path": "src/app/api/buddy/turn/route.ts",
+      "bytes": 120,
+      "sha256": "c086ff91c6f8ba9e40c1be40da7fb54c86262c7f18de5c7216ed0754e7a4fcd9"
+    },
+    {
+      "path": "src/app/api/cove-rest/[table]/implementation.ts",
       "bytes": 14435,
       "sha256": "9240fbb8aefbec9d8457a07f7d08db7558e2f447cadd619af1120f43a0bfff22"
+    },
+    {
+      "path": "src/app/api/cove-rest/[table]/route.ts",
+      "bytes": 107,
+      "sha256": "832a72c63d9c11c18c4736117dc2be23f76f301fc7a7e4e8ce1212fc6124c692"
     },
     {
       "path": "src/app/api/crm/attio/route.ts",
@@ -608,19 +643,34 @@
       "sha256": "d3ee1741edad964af97da8ca0078acf21d4aa2c99d6d6d32c6b17b9c4e5ea702"
     },
     {
-      "path": "src/app/api/day-plan/assistant-apply/route.ts",
+      "path": "src/app/api/day-plan/assistant-apply/implementation.ts",
       "bytes": 11521,
       "sha256": "7af2501c20de04610381863a19bbfd8f8596ed7ababa8645731b01affec3c695"
     },
     {
-      "path": "src/app/api/day-plan/execution/route.ts",
+      "path": "src/app/api/day-plan/assistant-apply/route.ts",
+      "bytes": 115,
+      "sha256": "e1abd6f6b942c084a9b2889928ab481f041cf17ad1d5773c330c53d3513469ca"
+    },
+    {
+      "path": "src/app/api/day-plan/execution/implementation.ts",
       "bytes": 7258,
       "sha256": "e33f8f3b719cf383f55a81ec7fe8d07d5e54fd84bd66b1196f9905fd65327488"
     },
     {
-      "path": "src/app/api/day-plan/route.ts",
+      "path": "src/app/api/day-plan/execution/route.ts",
+      "bytes": 120,
+      "sha256": "c086ff91c6f8ba9e40c1be40da7fb54c86262c7f18de5c7216ed0754e7a4fcd9"
+    },
+    {
+      "path": "src/app/api/day-plan/implementation.ts",
       "bytes": 35262,
       "sha256": "5e34dfdf19c9fb3d231291415e2c1ed29eed7617a31435965c81ea60539b119a"
+    },
+    {
+      "path": "src/app/api/day-plan/route.ts",
+      "bytes": 120,
+      "sha256": "c086ff91c6f8ba9e40c1be40da7fb54c86262c7f18de5c7216ed0754e7a4fcd9"
     },
     {
       "path": "src/app/api/email/automation/route.ts",
@@ -628,9 +678,14 @@
       "sha256": "8219afdfee2b55768da1af3f2e6e79c3fc8ccd213d50eb99a912d7b32f8b6a60"
     },
     {
-      "path": "src/app/api/failures/route.ts",
+      "path": "src/app/api/failures/implementation.ts",
       "bytes": 2963,
       "sha256": "ff6303584bb4f4b2f255468ce346bf812d42fe88d8de21d2f753d3f2a5982c96"
+    },
+    {
+      "path": "src/app/api/failures/route.ts",
+      "bytes": 120,
+      "sha256": "c086ff91c6f8ba9e40c1be40da7fb54c86262c7f18de5c7216ed0754e7a4fcd9"
     },
     {
       "path": "src/app/api/health/route.ts",
@@ -648,14 +703,24 @@
       "sha256": "a1215a66e955594548693b7006444390ea1e6164f9a8ef7c1c6c32adcbed7af3"
     },
     {
-      "path": "src/app/api/task-session-runs/route.ts",
+      "path": "src/app/api/task-session-runs/implementation.ts",
       "bytes": 7110,
       "sha256": "fcc66aade4e34a0acacea91b13d32322ea982c32c31ee6744a73d8ff745846d3"
     },
     {
-      "path": "src/app/api/task-settings/route.ts",
+      "path": "src/app/api/task-session-runs/route.ts",
+      "bytes": 120,
+      "sha256": "c086ff91c6f8ba9e40c1be40da7fb54c86262c7f18de5c7216ed0754e7a4fcd9"
+    },
+    {
+      "path": "src/app/api/task-settings/implementation.ts",
       "bytes": 3815,
       "sha256": "4505b571946e494b652b980489b65ff37d191d61de2cccfd149c7a1955967973"
+    },
+    {
+      "path": "src/app/api/task-settings/route.ts",
+      "bytes": 121,
+      "sha256": "1a3c690cf622764935d4be8e321731b75be880ecb5d035cdd1ede11204e47885"
     },
     {
       "path": "src/app/crm/page.tsx",
@@ -678,9 +743,14 @@
       "sha256": "d4c09eb152e3c77910c2ef80a6d750b440597001d658cfade4ab9592fcc87c6c"
     },
     {
-      "path": "src/app/guide/page.tsx",
+      "path": "src/app/guide/content.tsx",
       "bytes": 6068,
       "sha256": "f6a09448e9dc7a179318f729776bb274dcb18ccbe18b1255c580967c56c68642"
+    },
+    {
+      "path": "src/app/guide/page.tsx",
+      "bytes": 37,
+      "sha256": "d32a6331fd1262a6eedf17abf79336d32ca1ce29abd0f978097357adcc44334c"
     },
     {
       "path": "src/app/layout.tsx",
@@ -999,8 +1069,8 @@
     },
     {
       "path": "src/lib/attention/transport.mjs",
-      "bytes": 2503,
-      "sha256": "29b06cecf2a16d746de0febe4a922376cac3f5b16c4ca0c743316371dc107675"
+      "bytes": 2690,
+      "sha256": "2fab159b31da69895c10c4c2d6b569b34dcf20ed51b1983f42c5c0a0a9a98852"
     },
     {
       "path": "src/lib/autonomy/groundwork.ts",
@@ -1099,8 +1169,8 @@
     },
     {
       "path": "src/lib/claude-execution/notify.ts",
-      "bytes": 6447,
-      "sha256": "9ae8656066227484bf3ca5505d8e44ff01cf69c0b04c3329410a9a2d294790a9"
+      "bytes": 6732,
+      "sha256": "d38cfdac06338cc28c5de900e47e76a52dfab59626fd8292e54771c876dbeeb0"
     },
     {
       "path": "src/lib/claude-execution/orchestrator-session.ts",
@@ -1399,13 +1469,13 @@
     },
     {
       "path": "src/lib/intake/notification-transport.mjs",
-      "bytes": 1630,
-      "sha256": "f2bed795bad1a318ff5f1917ccb358794e7b38cde620fcea8cb26b693c955098"
+      "bytes": 3152,
+      "sha256": "7129030404972683813f49d8d5ab85b73d16e4d2333a16d49208003f5009cce6"
     },
     {
       "path": "src/lib/intake/run.ts",
-      "bytes": 21575,
-      "sha256": "5ab67d9f2f0730287c30d7797f3d4203c572816ea9369871c80284038efec583"
+      "bytes": 21866,
+      "sha256": "eb3c5d4aff3dc6f2836d73cb8762c64f6e7c934d89a26b8f08a30b441e2294e2"
     },
     {
       "path": "src/lib/intake/task-writer.ts",
@@ -1634,8 +1704,8 @@
     },
     {
       "path": "tests/buddy-assistant-apply.test.mjs",
-      "bytes": 28027,
-      "sha256": "51cc08c5b3ce1e6cf1fd5a25714579c50c83b6dbcdbb00841a9b751c05eb5f64"
+      "bytes": 28036,
+      "sha256": "eab504c3bd8a2b1b5786c471eea032ed11ca7a9339e0755b50d028cce4901ce8"
     },
     {
       "path": "tests/buddy-commands.test.mjs",
@@ -1674,8 +1744,8 @@
     },
     {
       "path": "tests/buddy-route.test.mjs",
-      "bytes": 18948,
-      "sha256": "9f427d5c74260479df48d9540623715418133ad7848e5fed674f9c142d81c26f"
+      "bytes": 18966,
+      "sha256": "47d131f4d5ea728982a18225aad528741b4e384c23b94dadaf9dc5bbb352b885"
     },
     {
       "path": "tests/buddy-router.test.mjs",
@@ -1684,8 +1754,8 @@
     },
     {
       "path": "tests/buddy-spawn-session.test.mjs",
-      "bytes": 10033,
-      "sha256": "f5d254311de12f0b5e032edc519598d568d190d3e3c3a713d78e8aae45d2f339"
+      "bytes": 10042,
+      "sha256": "b56c464a3091e3518d1f2d86cebce66c6453063ac4fdaeb03c868ffdfc52f9a3"
     },
     {
       "path": "tests/buddy-store.test.mjs",
@@ -1699,8 +1769,8 @@
     },
     {
       "path": "tests/claude-notify.test.mjs",
-      "bytes": 5939,
-      "sha256": "90919de92a7b6731e8835f67472470739f1b61a0335a3299014b16a95dcd943f"
+      "bytes": 6303,
+      "sha256": "2f763cc51c6601b2ce61b93e13a0dd310d0e1cefee7028562b628847e373229b"
     },
     {
       "path": "tests/claude-worker.test.mjs",
@@ -1719,13 +1789,13 @@
     },
     {
       "path": "tests/cove-legacy-compat.test.mjs",
-      "bytes": 7807,
-      "sha256": "9f38a8c93bb06a9deac5f13e857834d86a6b0b921256315a6b0d936f45aee490"
+      "bytes": 7752,
+      "sha256": "57ac250853277098ad8dd6a3e3787a70d9d0fc3fce5157e35ecd05ac034f1782"
     },
     {
       "path": "tests/cove-rest-route.test.mjs",
-      "bytes": 15691,
-      "sha256": "355c00bdc4caa2bb244f44acfd32e6744c65fd41635ab38d8b82cf6c537128f8"
+      "bytes": 15700,
+      "sha256": "3c8c87eb5f4e93730d9dc37c702b9c240ff2eaf4e1afe31bd6213efbd40d893c"
     },
     {
       "path": "tests/crm-backend.test.mjs",
@@ -1784,8 +1854,8 @@
     },
     {
       "path": "tests/day-plan-next-routes.test.mjs",
-      "bytes": 1687,
-      "sha256": "573ae7903ef4303dea75c0e0bc5910e40e0dc610fd193732c6479d3055a77308"
+      "bytes": 1696,
+      "sha256": "1500888ab394dcd0ec3087804ca09d94351a9ba3241f55bfafcfa431357ee60b"
     },
     {
       "path": "tests/day-plan-presentation.test.mjs",
@@ -1794,8 +1864,8 @@
     },
     {
       "path": "tests/day-plan-route.test.mjs",
-      "bytes": 44569,
-      "sha256": "74bf7d94f60c6bf0be95a82f7a83e6eb5086c3a6d06e535a26cd1e7882eddacc"
+      "bytes": 44578,
+      "sha256": "12008fe1735baae9fb1c3b570f080c60636ad7c36016c4d2db757adb49f8a812"
     },
     {
       "path": "tests/day-plan-store.test.mjs",
@@ -1914,8 +1984,8 @@
     },
     {
       "path": "tests/guide-runtime.test.mjs",
-      "bytes": 783,
-      "sha256": "b50b2bc217e48bf61706fd4207b77eb4b71e0beda93ddfe882088307b7682e95"
+      "bytes": 786,
+      "sha256": "8f1bf6f0bbd817c1f510498ab8d046c7b4930e71387d4184256c78d157db1408"
     },
     {
       "path": "tests/health-collector.test.mjs",
@@ -1998,9 +2068,14 @@
       "sha256": "08ca6fdab3a22573269f3dd46b12917b3df210ccb1e372c6725c0b05525d1e18"
     },
     {
+      "path": "tests/notification-branding.test.mjs",
+      "bytes": 2603,
+      "sha256": "f814853aa981fc4d4be634c65338376ec21771d7e6a30b4d9378e54236e13a13"
+    },
+    {
       "path": "tests/notification-routing.test.mjs",
-      "bytes": 18892,
-      "sha256": "3a3fd5373e078c9aa910706097eac0589501be4cbd1416788f37babeaf982487"
+      "bytes": 19068,
+      "sha256": "7dda38bb7ff565d13199fd6adaebba96bcbc0836185e47f2b52787543468016c"
     },
     {
       "path": "tests/operator.test.mjs",
@@ -2014,8 +2089,8 @@
     },
     {
       "path": "tests/public-handoff.test.mjs",
-      "bytes": 2252,
-      "sha256": "7764d4900bb10fdf9321f229476aa657e53cf7fdcae14c88c77d26e3a5228e8e"
+      "bytes": 2306,
+      "sha256": "6010d72073529ee564e98d62755248d8c8fcd2fd12438acffbfbf55d9fd76bbb"
     },
     {
       "path": "tests/quiet-current-arrival-cache.test.mjs",
@@ -2054,8 +2129,8 @@
     },
     {
       "path": "tests/reliability-receipts.test.mjs",
-      "bytes": 12394,
-      "sha256": "b8679a97e0926ca6e38733e65034561b69b6fbc4565d941ab0681dd1d6b73ce7"
+      "bytes": 12403,
+      "sha256": "eac44ab66ac94fb49bc38fe21ecb234af3adc194be3a3d47075607dd9c1713bf"
     },
     {
       "path": "tests/round5-review-guards.test.mjs",
@@ -2074,8 +2149,8 @@
     },
     {
       "path": "tests/task-mode-gating.test.mjs",
-      "bytes": 3585,
-      "sha256": "6fabab6945c875145ba9a40a7cdaf2a6ec1cbf469b4177e4fc4e664719d48dbc"
+      "bytes": 3594,
+      "sha256": "18ebc821ce7d0c980eb49a49365243e16ab0b5d0107c099ba51afa8e39408511"
     },
     {
       "path": "tests/task-recurrence.test.mjs",
@@ -2084,13 +2159,13 @@
     },
     {
       "path": "tests/task-session-runs.test.mjs",
-      "bytes": 42522,
-      "sha256": "52bc0d8575fa69e5611a1f237ffd649c97adb270b26fb4e3e0d9cfeed45d8b65"
+      "bytes": 42531,
+      "sha256": "dbde5ad3e97a2ab078202b2e1e857c753820a84af0ad46492ece2bbb68461433"
     },
     {
       "path": "tests/task-settings.test.mjs",
-      "bytes": 4447,
-      "sha256": "08931eadb2928d7ea56d75d8ce568ed570737168df5f85e6ee694b6048944255"
+      "bytes": 4456,
+      "sha256": "4852d75915902f702ff0ada0c8f41acc4e7aded0bacaac6a29c8aa07efdb2520"
     },
     {
       "path": "tests/task-stale-archive.test.mjs",
