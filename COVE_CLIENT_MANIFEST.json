@@ -1,11 +1,11 @@
 {
   "version": 1,
   "product": "Cove",
-  "source_sha": "7b83b7935f563a7636dbac4007b5a63d8aaa0035",
+  "source_sha": "7f5f9fff32f361feb8c1f1154cb432994bd73943",
   "source_worktree_dirty": false,
   "allow_dirty": false,
-  "exported_at": "2026-08-07T04:09:41.330Z",
-  "file_count": 410,
+  "exported_at": "2026-08-07T06:09:40.310Z",
+  "file_count": 412,
   "files": [
     {
       "path": ".claude/skills/cove-morning-brief/SKILL.md",
@@ -34,8 +34,8 @@
     },
     {
       "path": "AGENTS.md",
-      "bytes": 327,
-      "sha256": "e3447d84251880fb34cfae09131cb4c57471529bbfe60976a3245793cf621627"
+      "bytes": 1938,
+      "sha256": "d0c7acda9c589ff8aef4f13f64733e49b8f7a3be89c60c52721f050f4267f48c"
     },
     {
       "path": "AGENT_CONTRACT.md",
@@ -54,8 +54,8 @@
     },
     {
       "path": "CONFIGURATION.md",
-      "bytes": 2030,
-      "sha256": "683775b61bc7d9bc0e68ae9469527ada43b21700b8268e8a17cf6ad5ef7efd29"
+      "bytes": 2085,
+      "sha256": "387b290b578f04701deabab6bc8e64d69cb9545fce1184e9241d4db669b07a3a"
     },
     {
       "path": "DATA.md",
@@ -74,8 +74,8 @@
     },
     {
       "path": "README.md",
-      "bytes": 6073,
-      "sha256": "8f446408c42aba82e5b578beb3d9c202fcba63513ef01c51c3ef50e2aa54bb2b"
+      "bytes": 6845,
+      "sha256": "5cb96d3939be00aa7810972b709ebd76557a511bbdd41f583477a9cfe68e89ec"
     },
     {
       "path": "SECURITY_AND_INTEGRATIONS.md",
@@ -84,8 +84,8 @@
     },
     {
       "path": "SETUP.md",
-      "bytes": 17130,
-      "sha256": "1bcca418745882113196af67c4a787c02d9fbe3a07138da039f218459cec4e3a"
+      "bytes": 23313,
+      "sha256": "49c4dbf027aadbbd60572def570717367ffbf0582b73711e3f2043a77005eefd"
     },
     {
       "path": "buddy/.gitignore",
@@ -234,8 +234,8 @@
     },
     {
       "path": "package.json",
-      "bytes": 3841,
-      "sha256": "c21ffb90da078e2cd3ae72e57ec8ec15a2be568098beec7cb160495e137f6125"
+      "bytes": 3911,
+      "sha256": "c360fa8381782f44d19be15b56820e73884ed3820ab4c0ff44a025c5cdfa70d4"
     },
     {
       "path": "postcss.config.mjs",
@@ -301,6 +301,11 @@
       "path": "scripts/cove-buddy-data.ts",
       "bytes": 21186,
       "sha256": "b60248ba00692026110e756e703d1b2c8475967e7721a90b0d295e55a4374d70"
+    },
+    {
+      "path": "scripts/cove-check-brief-writer.mjs",
+      "bytes": 2197,
+      "sha256": "24b0a36ad146284cb8b70edae4353ec2763af3c8fabd228ba2c77241e7b064a3"
     },
     {
       "path": "scripts/cove-claude-worker.ts",
@@ -414,8 +419,8 @@
     },
     {
       "path": "scripts/cove-verify.mjs",
-      "bytes": 801,
-      "sha256": "54f3bc5d8b70bde29c1187271f5d38626576322cb75b08cc6d1b7f02b8ea1acb"
+      "bytes": 1199,
+      "sha256": "95bd50f8535d3f57d2752744266ad2ec7884625e1f85c9fa17e3e76f2a4e21dc"
     },
     {
       "path": "scripts/cove-voice-samples.ts",
@@ -434,8 +439,8 @@
     },
     {
       "path": "scripts/install-cove-local.sh",
-      "bytes": 34305,
-      "sha256": "24c5996376d3042708025ba53309364d8c4b186ed314e40eb6e04ab976873f1c"
+      "bytes": 35300,
+      "sha256": "2b477ed4d4b1d0e7876a9bd5197609b6a7e908488faedecfa28c1b62a7a2777c"
     },
     {
       "path": "scripts/install-cove-voice.sh",
@@ -1084,8 +1089,8 @@
     },
     {
       "path": "src/lib/claude-execution/morning-brief-writer.ts",
-      "bytes": 2975,
-      "sha256": "13c210c78f946dad593c826c1678151395d9c3aa787c8af3cdaacf7897f86c1f"
+      "bytes": 2974,
+      "sha256": "dc666cca36aba272a97187e040795dc6c46a07f09d966d60cb09304c32d1b980"
     },
     {
       "path": "src/lib/claude-execution/notify.ts",
@@ -1694,8 +1699,8 @@
     },
     {
       "path": "tests/claude-worker.test.mjs",
-      "bytes": 33377,
-      "sha256": "67be977fefbc1ca957911830e9b61e6e1923239d89996d910f7e529ddbf3a174"
+      "bytes": 35646,
+      "sha256": "a3d931e342f103c81e24f9401b13f16886ca5d71a4bc93be1299a9de1c465746"
     },
     {
       "path": "tests/cove-arrival-schedule.test.mjs",
@@ -1754,8 +1759,8 @@
     },
     {
       "path": "tests/day-plan-brief.test.mjs",
-      "bytes": 101543,
-      "sha256": "544c87b1cc9b433bab24ef524396ea8257e4a0efc3dfe3de23a8b3abd2b2ce26"
+      "bytes": 102454,
+      "sha256": "aba42967ae66b78eb7d7b023317dd0dad7008141beac49e4b793a2f4e8394cb5"
     },
     {
       "path": "tests/day-plan-candidates.test.mjs",
@@ -1961,6 +1966,11 @@
       "path": "tests/progress-reconcile.test.mjs",
       "bytes": 36038,
       "sha256": "ee6ba253182ddbbd4c09d2e8cd6bf4b24aee74f6ca7e5d8dd062b139cc28e6e0"
+    },
+    {
+      "path": "tests/public-handoff.test.mjs",
+      "bytes": 1883,
+      "sha256": "75d307d9da3c227ddaf0f6176943f174eb909ef07ebbfb9b77a7ea6e4a5e02e9"
     },
     {
       "path": "tests/quiet-current-arrival-cache.test.mjs",
