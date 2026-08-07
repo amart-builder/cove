@@ -4,10 +4,13 @@ import { hasDayPlanRouteAccess } from "@/lib/request-security";
 import { getRuntimeMode, type RuntimeMode } from "@/lib/runtime/mode";
 import {
   getTaskSessionManager,
+  TaskSessionCapacityError,
+  TaskSessionRunNotFoundError,
   type TaskSessionManager,
 } from "@/lib/task-sessions/manager";
 import type {
   LaunchTaskSessionInput,
+  TaskSessionLaunchMode,
   TaskSessionOwner,
   TaskSessionPromptSnapshot,
 } from "@/lib/task-sessions/types";
@@ -50,6 +53,7 @@ function promptSnapshot(value: unknown): TaskSessionPromptSnapshot {
       "definitionOfDone",
       4_000,
     ),
+    whyToday: optionalText(prompt.whyToday, "whyToday", 4_000),
     project: optionalText(prompt.project, "project", 300),
     dueAt: optionalText(prompt.dueAt, "dueAt", 100),
   };
@@ -58,6 +62,14 @@ function promptSnapshot(value: unknown): TaskSessionPromptSnapshot {
 function owner(value: unknown): TaskSessionOwner {
   if (value !== "claude" && value !== "together") {
     throw new TaskSessionRequestError("owner must be Claude or Together.");
+  }
+  return value;
+}
+
+function launchMode(value: unknown): TaskSessionLaunchMode | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (value !== "planning" && value !== "auto") {
+    throw new TaskSessionRequestError("mode must be planning or auto.");
   }
   return value;
 }
@@ -112,6 +124,7 @@ export async function handleTaskSessionRunsPost(
       { status: 404 },
     );
   }
+  let requestedAction: unknown;
   try {
     const raw = await request.text();
     if (Buffer.byteLength(raw, "utf8") > MAX_BODY_BYTES) {
@@ -122,6 +135,12 @@ export async function handleTaskSessionRunsPost(
       throw new TaskSessionRequestError("Task session request is invalid.");
     }
     const object = body as Record<string, unknown>;
+    requestedAction = object.action;
+    const manager = dependencies.manager ?? getTaskSessionManager();
+    if (object.action === "abandon") {
+      const runId = requiredText(object.runId, "runId", 240);
+      return NextResponse.json({ run: manager.abandonRun(runId, "user_closed") });
+    }
     if (object.action !== "launch") {
       throw new TaskSessionRequestError("Unknown task session action.");
     }
@@ -130,19 +149,42 @@ export async function handleTaskSessionRunsPost(
       dayPlanId: optionalText(object.dayPlanId, "dayPlanId", 240),
       itemId: optionalText(object.itemId, "itemId", 240),
       owner: owner(object.owner),
+      mode: launchMode(object.mode),
       promptSnapshot: promptSnapshot(object.promptSnapshot),
     };
-    const manager = dependencies.manager ?? getTaskSessionManager();
     return NextResponse.json({ run: manager.launch(input) }, { status: 201 });
   } catch (error) {
+    if (
+      error instanceof TaskSessionRunNotFoundError ||
+      (error instanceof Error && error.name === "TaskSessionRunNotFoundError")
+    ) {
+      return NextResponse.json(
+        { error: error.message, code: "task_session_not_found" },
+        { status: 404 },
+      );
+    }
+    if (
+      error instanceof TaskSessionCapacityError ||
+      (error instanceof Error && error.name === "TaskSessionCapacityError")
+    ) {
+      const limit = "limit" in error && typeof error.limit === "number"
+        ? error.limit
+        : 6;
+      return NextResponse.json(
+        { error: error.message, code: "task_session_capacity", limit },
+        { status: 409 },
+      );
+    }
     if (!(error instanceof TaskSessionRequestError) && !(error instanceof SyntaxError)) {
-      console.error("Task session launch failed.", error);
+      console.error("Task session action failed.", error);
     }
     return NextResponse.json(
       {
         error: error instanceof Error
           ? error.message
-          : "Could not start the Claude session.",
+          : requestedAction === "abandon"
+            ? "Could not abandon the Claude session."
+            : "Could not start the Claude session.",
       },
       {
         status: error instanceof TaskSessionRequestError || error instanceof SyntaxError

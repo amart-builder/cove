@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { classifyEmail, type EmailClassification } from "../src/lib/email/classifier";
+import { parseFromHeader } from "../src/lib/email/from-header";
 import {
   createEmailArtifactHandler,
   createEmailClassificationHandler,
@@ -17,6 +18,9 @@ import {
 } from "../src/lib/email/state-machine";
 import { reconcileGmailToCard, type GmailThreadObservation } from "../src/lib/email/automation";
 import { openLocalDatabase } from "../src/lib/local/database";
+import { resolveEmailRuntimePaths } from "../src/lib/email/runtime-paths";
+import { signatureHtmlToText } from "../src/lib/email/draft-format";
+import { loadSignature } from "../src/lib/email/signature";
 import { JobScheduler } from "../src/lib/reliability/jobs";
 import { recordReceipt } from "../src/lib/reliability/receipts";
 import {
@@ -37,8 +41,10 @@ type RunnerOptions = {
     subject: string;
     text: string;
     voice?: string;
+    recentContext?: string;
   }) => Promise<EmailClassification>;
   now?: () => Date;
+  warn?: (message: string) => void;
 };
 
 const INTAKE_PAGE_SIZE = 100;
@@ -54,6 +60,28 @@ type EmailTriageResult = {
   pagesScanned: number;
   intakeTruncated: boolean;
 };
+
+export function emailTriageAttentionMessage(input: {
+  archiveFailures: number;
+  jobsFailed: number;
+  jobsDead: number;
+}): string | undefined {
+  const parts: string[] = [];
+  if (input.archiveFailures > 0) {
+    parts.push(
+      `${input.archiveFailures} ${input.archiveFailures === 1 ? "email could" : "emails could"} not be archived`,
+    );
+  }
+  const backgroundJobs = input.jobsFailed + input.jobsDead;
+  if (backgroundJobs > 0) {
+    parts.push(
+      `${backgroundJobs} background ${backgroundJobs === 1 ? "job needs" : "jobs need"} attention`,
+    );
+  }
+  if (parts.length === 0) return undefined;
+  if (parts.length === 1) return `${parts[0]}.`;
+  return `${parts[0]} and ${parts[1]}.`;
+}
 
 function header(message: MailMessage, name: string): string {
   return message.headers.find((item) => item.name.toLowerCase() === name.toLowerCase())
@@ -94,11 +122,26 @@ async function runEmailTriageUnchecked(
 ): Promise<EmailTriageResult> {
   const repoDir = options.repoDir ??
     path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-  const dataDir = options.dataDir ?? path.join(repoDir, "data");
-  const dbPath = options.dbPath ?? path.join(dataDir, "cove.db");
+  const { dataDir, dbPath } = resolveEmailRuntimePaths({
+    repoDir,
+    dataDir: options.dataDir,
+    dbPath: options.dbPath,
+  });
   const now = options.now ?? (() => new Date());
-  const startedAt = now().toISOString();
+  const started = now();
+  const startedAt = started.toISOString();
+  const warn = options.warn ?? console.warn;
   const config = readWorkspaceConfig(dataDir);
+  const cachedSignature = loadSignature(dataDir, config.accountEmail);
+  if (
+    cachedSignature &&
+    started.getTime() - Date.parse(cachedSignature.fetchedAt) > 30 * 24 * 60 * 60 * 1_000
+  ) {
+    warn("Cove email signature cache is over 30 days old. Run `npm run email:signature-sync` to refresh it.");
+  }
+  const signatureText = cachedSignature
+    ? signatureHtmlToText(cachedSignature.html)
+    : null;
   const gateway = options.gateway ?? createGoogleWorkspaceGateway({ dataDir }).mail;
   const classifier = options.classifier ?? ((input) => classifyEmail({ ...input, repoDir }));
   await gateway.getProfile();
@@ -121,14 +164,15 @@ async function runEmailTriageUnchecked(
       seenMessageIds.add(listed.id);
       const message = await gateway.getMessage({ messageId: listed.id, format: "full" });
       if (isFromAccount(message, config.accountEmail)) continue;
+      const from = parseFromHeader(header(message, "From"));
       const observation = observeInboundMessage({
         messageId: message.id,
         threadId: message.threadId,
         gmailHistoryId: message.historyId,
         internalDate: message.internalDate ?? "0",
         accountEmail: config.accountEmail,
-        senderName: header(message, "From").slice(0, 500),
-        senderEmail: address(header(message, "From")),
+        senderName: from.displayName.slice(0, 500),
+        senderEmail: from.address,
         subject: header(message, "Subject").slice(0, 2_000),
         bodyExcerpt: message.text.slice(0, 20_000),
         receivedAt: message.internalDate
@@ -187,6 +231,7 @@ async function runEmailTriageUnchecked(
     accountEmail: config.accountEmail,
     dbPath,
     repoDir,
+    signatureText,
     voice: voiceGuide,
     classifier,
     now,
@@ -194,7 +239,10 @@ async function runEmailTriageUnchecked(
   scheduler.register("gmail-operation", createGmailOperationHandler({
     gateway,
     dbPath,
+    dataDir,
+    cachedSignature,
     now,
+    warn,
   }));
   scheduler.register("email-artifacts", createEmailArtifactHandler({
     dbPath,
@@ -252,7 +300,11 @@ async function runEmailTriageUnchecked(
       intakeTruncated || reconciled.archiveFailures.length > 0 || jobsFailed > 0 || jobsDead > 0
       ? intakeTruncated
         ? `Inbox intake reached its ${MAX_INTAKE_PAGES}-page safety limit. Cove marks observed messages with Cove/Triaged so later runs can move past them and reach more of the inbox.`
-        : `${reconciled.archiveFailures.length} archive, ${jobsFailed} retryable job, and ${jobsDead} stopped job failure(s) need attention.`
+        : emailTriageAttentionMessage({
+            archiveFailures: reconciled.archiveFailures.length,
+            jobsFailed,
+            jobsDead,
+          })
       : undefined,
   });
   return {
@@ -273,8 +325,11 @@ export async function runEmailTriage(options: RunnerOptions = {}): Promise<Email
   } catch (error) {
     const repoDir = options.repoDir ??
       path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-    const dataDir = options.dataDir ?? path.join(repoDir, "data");
-    const dbPath = options.dbPath ?? path.join(dataDir, "cove.db");
+    const { dbPath } = resolveEmailRuntimePaths({
+      repoDir,
+      dataDir: options.dataDir,
+      dbPath: options.dbPath,
+    });
     const occurredAt = (options.now ?? (() => new Date()))().toISOString();
     const failure = safeWorkspaceFailure(error);
     try {

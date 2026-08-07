@@ -1,5 +1,11 @@
 export type TaskSessionOwner = "claude" | "together";
+export type TaskSessionLaunchMode = "planning" | "auto";
 export type TaskSessionPermissionMode = "acceptEdits" | "plan";
+export type TaskSessionModel =
+  | "claude-opus-5"
+  | "claude-sonnet-5"
+  | "claude-haiku-4-5";
+export type TaskSessionEffort = "medium" | "high";
 export type TaskSessionRunStatus =
   | "running"
   | "awaiting_approval"
@@ -12,6 +18,7 @@ export type TaskSessionPromptSnapshot = {
   detail: string;
   outcome?: string;
   definitionOfDone?: string;
+  whyToday?: string;
   project?: string;
   dueAt?: string;
 };
@@ -23,10 +30,14 @@ export type TaskSessionRun = {
   itemId?: string;
   owner: TaskSessionOwner;
   permissionMode: TaskSessionPermissionMode;
+  model: TaskSessionModel;
+  effort: TaskSessionEffort;
+  modelReason: string;
   status: TaskSessionRunStatus;
-  claudeSessionId: string;
+  claudeSessionId?: string;
   outputDir: string;
   resumeUrl: string;
+  resumeCommand?: string;
   promptSnapshot: TaskSessionPromptSnapshot;
   resultSummary?: string;
   hint?: string;
@@ -42,6 +53,7 @@ export type LaunchTaskSessionInput = {
   dayPlanId?: string;
   itemId?: string;
   owner: TaskSessionOwner;
+  mode?: TaskSessionLaunchMode;
   promptSnapshot: TaskSessionPromptSnapshot;
 };
 

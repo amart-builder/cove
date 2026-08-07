@@ -32,27 +32,34 @@ import { realTimeLabel } from '@/lib/quiet-current/presentation';
 import { taskColumnKeyForName, type TaskColumnKey } from '@/lib/tasks/columns';
 import {
   buildDayPlanCandidates,
+  eligibleNotTodayTasks,
   orderArrivalCandidatesByTier,
   selectArrivalCandidateTasks,
 } from '@/lib/day-plan/candidates';
 import {
+  canStartDayPlanSettlement,
   combineSurfaceErrors,
   firstContinuingItem,
+  focusBandItems,
   formatArrivalDueDate,
   helpfulProjectLabel,
   reorderDayPlanItems,
+  selectShelfTasks,
   selectBoardExecutionPresentation,
   selectCurrentExecutionRow,
   shouldShowNeedsSetupToStart,
   shortArrivalSummary,
 } from '@/lib/day-plan/presentation';
-import type { DayPlanExecutionRun, DayPlanItem } from '@/lib/day-plan/types';
+import type { DayPlan, DayPlanExecutionRun, DayPlanItem } from '@/lib/day-plan/types';
 import {
   planTaskReconciliation,
   reconciliationStateMatches,
   type ReconciliationTaskState,
 } from '@/lib/day-plan/reconciliation';
-import MorningArrival, { type MorningArrivalItem } from './MorningArrival';
+import MorningArrival, {
+  type MorningArrivalBoardTask,
+  type MorningArrivalItem,
+} from './MorningArrival';
 import DaySettlement from './DaySettlement';
 import DayRitualLayer, { DayRitualContentSwap } from './DayRitualLayer';
 import { OpenInClaudeCode, RunStatusChip } from './ClaudeRunIndicators';
@@ -65,6 +72,8 @@ import {
 } from '@/lib/data/recurrence';
 import { getRuntimeMode } from '@/lib/runtime/mode';
 import type { RecurringTemplate } from '@/lib/tasks/recurrence';
+import { getTaskSettings, updateTaskSettings } from '@/lib/data/task-settings';
+import { reduceFocusSeats } from '@/lib/tasks/focus-seats';
 import RhythmManager, { cadenceDisplay } from './RhythmManager';
 import useDayRitual from './useDayRitual';
 import useTaskSessionRuns from './useTaskSessionRuns';
@@ -78,6 +87,18 @@ import {
   type TaskSessionRun,
 } from '@/lib/task-sessions/types';
 import CoveReadinessStrip from './CoveReadinessStrip';
+import ClaudeDeskStrip from './ClaudeDeskStrip';
+import TodayRiverStageV2, {
+  type SecondCurrentItemV2,
+  type TodayRiverStageV2MotionHandle,
+  type TodayRiverTaskV2,
+} from './TodayRiverStageV2';
+import {
+  CURRENT_DAY_ARC,
+  TODAY2_DAY_ARC,
+  getDayProgress,
+  pointOnCubicDayArc,
+} from './day-arc';
 
 type TaskStatus = ArrivalTaskStatus;
 type ColumnData = ArrivalColumn;
@@ -119,12 +140,7 @@ interface TodayExperienceProps {
   createTask: (input: CreateTaskInput) => Promise<string>;
   updateTask: (id: string, patch: UpdateTaskInput) => Promise<TaskData>;
   deleteTask: (id: string) => Promise<void>;
-  onOpenAllWork?: () => void;
 }
-
-type TodayViewProps = {
-  onOpenAllWork?: () => void;
-};
 
 type UndoAction = {
   message: string;
@@ -149,6 +165,7 @@ function taskSessionInput(
       detail: item.outcome || item.title,
       outcome: item.outcome,
       definitionOfDone: item.definitionOfDone,
+      whyToday: item.brief?.whyToday ?? item.whyToday,
       project: item.project,
       dueAt: item.dueAt,
     },
@@ -159,6 +176,7 @@ const JARVIS_HELD_TAG = 'jarvis-held';
 const BLOCKED_TAG = 'blocked';
 const FOCUS_KEY = 'cove.quiet-current.focus';
 const NOTES_KEY = 'cove.quiet-current.notes';
+const TODAY_RIVER_STAGE_V2 = true;
 
 // The hoisted DayRitualLayer stays mounted across ritual views; these stable ids let
 // each view's heading label the dialog and receive focus after a content swap.
@@ -181,7 +199,21 @@ function isEmailDigest(task: TaskData): boolean {
 }
 
 function isRecurringTask(task: TaskData): boolean {
-  return hasTag(task, 'recurring');
+  // Recurring occurrences carry the recurring_templates linkage; the 'recurring'
+  // tag alone is not proof (anyone can tag a one-off task).
+  return Boolean(task.recurringTemplateId);
+}
+
+function todayOwnerLabel(owner: DayPlanItem['owner']): string {
+  if (owner === 'me') return 'You';
+  if (owner === 'together') return 'Together';
+  return 'Claude';
+}
+
+function asFocusCount(value: number): 1 | 2 | 3 {
+  if (value === 2) return 2;
+  if (value === 3) return 3;
+  return 1;
 }
 
 function withTag(tags: string[], tag: string): string[] {
@@ -296,33 +328,6 @@ function getGreeting(hour: number): string {
   return 'Good evening. Bring the day to a close.';
 }
 
-function getDayProgress(date: Date): number {
-  const minutes = date.getHours() * 60 + date.getMinutes();
-  const start = 6 * 60;
-  const end = 22 * 60;
-  return Math.max(0, Math.min(1, (minutes - start) / (end - start)));
-}
-
-function cubicPoint(progress: number): { x: number; y: number } {
-  const inverse = 1 - progress;
-  const start = { x: 18, y: 112 };
-  const controlOne = { x: 116, y: 116 };
-  const controlTwo = { x: 244, y: 76 };
-  const end = { x: 306, y: 18 };
-  return {
-    x:
-      inverse ** 3 * start.x +
-      3 * inverse ** 2 * progress * controlOne.x +
-      3 * inverse * progress ** 2 * controlTwo.x +
-      progress ** 3 * end.x,
-    y:
-      inverse ** 3 * start.y +
-      3 * inverse ** 2 * progress * controlOne.y +
-      3 * inverse * progress ** 2 * controlTwo.y +
-      progress ** 3 * end.y,
-  };
-}
-
 function applyPatch(task: TaskData, patch: UpdateTaskInput): TaskData {
   return {
     ...task,
@@ -361,11 +366,11 @@ function toRestPatch(patch: UpdateTaskInput): Partial<RestTask> {
   };
 }
 
-export default function TodayView({ onOpenAllWork }: TodayViewProps) {
-  return <RestTodayView onOpenAllWork={onOpenAllWork} />;
+export default function TodayView() {
+  return <RestTodayView />;
 }
 
-function RestTodayView({ onOpenAllWork }: TodayViewProps) {
+function RestTodayView() {
   const [columns, setColumns] = useState<ColumnData[]>([]);
   const [tasks, setTasks] = useState<TaskData[]>([]);
   const [candidateEvidence, setCandidateEvidence] = useState<CandidateEvidence>();
@@ -667,7 +672,6 @@ function RestTodayView({ onOpenAllWork }: TodayViewProps) {
           await settleMutation(forceRefresh);
         }
       }}
-      onOpenAllWork={onOpenAllWork}
     />
   );
 }
@@ -682,7 +686,6 @@ function TodayExperience({
   createTask,
   updateTask,
   deleteTask,
-  onOpenAllWork,
 }: TodayExperienceProps) {
   const localMode = getRuntimeMode() === 'local';
   const taskSessions = useTaskSessionRuns(
@@ -697,6 +700,9 @@ function TodayExperience({
   const [surfaceError, setSurfaceError] = useState<string>();
   const [settlementNote, setSettlementNote] = useState('');
   const [now, setNow] = useState(() => new Date());
+  const [focusCount, setFocusCount] = useState<1 | 2 | 3>(1);
+  const [focusCountBusy, setFocusCountBusy] = useState(false);
+  const [today2GridOpen, setToday2GridOpen] = useState(false);
   // Must start false, matching the server, and never read document.hidden or the
   // reduced-motion query during the first render. CurrentCanvas renders the two
   // ambient glints conditionally on this, so a client-only true here gives the
@@ -704,14 +710,18 @@ function TodayExperience({
   // hydration of the entire page. The effect below applies the real value on
   // mount, so nothing is lost by deferring it one frame.
   const [ambientPaused, setAmbientPaused] = useState(false);
-  const [focusedTaskId, setFocusedTaskId] = useState<string | null>(() => {
-    return readLocalValue(FOCUS_KEY);
-  });
+  // Saved focus and notes live in localStorage, which the server cannot read, so
+  // for the same reason as ambientPaused above they must start at the value the
+  // server renders and load one frame later. localRestored tells the auto-focus
+  // effect to wait for that load instead of racing it.
+  const [focusedTaskId, setFocusedTaskId] = useState<string | null>(null);
+  const [localRestored, setLocalRestored] = useState(false);
   const [capture, setCapture] = useState('');
   const [capturing, setCapturing] = useState(false);
   const [captureOpen, setCaptureOpen] = useState(false);
   const [focusExpanded, setFocusExpanded] = useState(false);
   const [wakeOpen, setWakeOpen] = useState(false);
+  const [arrivalPlanCanvas, setArrivalPlanCanvas] = useState(false);
   const [showAllDownstream, setShowAllDownstream] = useState(false);
   const [expandedSuggestionId, setExpandedSuggestionId] = useState<string | null>(null);
   const [detailTaskId, setDetailTaskId] = useState<string | null>(null);
@@ -723,16 +733,10 @@ function TodayExperience({
   const [dismissMenuId, setDismissMenuId] = useState<string | null>(null);
   const [editingSuggestionId, setEditingSuggestionId] = useState<string | null>(null);
   const [suggestionDraft, setSuggestionDraft] = useState({ title: '', description: '' });
-  const [expandedArrivalItemId, setExpandedArrivalItemId] = useState<string | null>(null);
-  const [notes, setNotes] = useState<Record<string, string>>(() => {
-    try {
-      return JSON.parse(readLocalValue(NOTES_KEY) ?? '{}') as Record<string, string>;
-    } catch {
-      return {};
-    }
-  });
+  const [notes, setNotes] = useState<Record<string, string>>({});
   const focusHeadingRef = useRef<HTMLHeadingElement>(null);
   const livingCurrentRef = useRef<HTMLDivElement>(null);
+  const today2MotionRef = useRef<TodayRiverStageV2MotionHandle>(null);
   const searchDialogRef = useRef<HTMLDivElement>(null);
   const searchReturnFocusRef = useRef<HTMLElement | null>(null);
   const undoRunningRef = useRef(false);
@@ -758,21 +762,9 @@ function TodayExperience({
     [doneColumn?._id, tasks],
   );
 
-  const jarvisTasks = useMemo(
-    () =>
-      openTasks
-        .filter(
-          (task) =>
-            hasTag(task, JARVIS_HELD_TAG) ||
-            isEmailDigest(task) ||
-            (localMode && isRecurringTask(task)),
-        )
-        .sort((left, right) =>
-          Number(isRecurringTask(right)) - Number(isRecurringTask(left)) ||
-          left.position - right.position
-        ),
-    [localMode, openTasks],
-  );
+  // The shelf shows only steady work (email current + rhythm occurrences).
+  // One-off jarvis-held tasks stay on the All Work board.
+  const jarvisTasks = useMemo(() => selectShelfTasks(openTasks), [openTasks]);
 
   const commitments = useMemo(() => {
     const activeColumnIds = new Set(
@@ -807,8 +799,8 @@ function TodayExperience({
       maximum: 10,
     });
     const briefPickedIds = new Set(briefPickedTasks.map((picked) => picked.taskId));
-    // A pool of up to ten deterministic candidates: the Morning Brief overlay
-    // ranks within this pool server-side, and the plan still keeps three.
+    // A pool of up to ten deterministic candidates. The Morning Brief overlay
+    // ranks within this pool server-side and sizes Today from its ranked picks.
     const candidates = buildDayPlanCandidates({
       localDate,
       timezone,
@@ -861,6 +853,7 @@ function TodayExperience({
     enabled: !loading && Boolean(todayColumn && doneColumn),
     candidates: dayPlanCandidates,
     candidatesReady: candidateEvidence?.freshness === 'current',
+    focusCount,
     onBriefPicksChange,
   });
   const ritualView: OverlayRitualView | undefined =
@@ -883,6 +876,18 @@ function TodayExperience({
       })
       .sort((left, right) => right.updatedAt - left.updatedAt);
   }, [doneColumn?._id, tasks]);
+
+  const today2PlanEntries = useMemo(() => {
+    const taskById = new Map(openTasks.map((task) => [task._id, task]));
+    return [...(dayRitual.plan?.items ?? [])]
+      .filter((item) => item.decision === 'accepted' && taskById.has(item.taskId))
+      .sort((left, right) => left.position - right.position)
+      .map((item) => ({ item, task: taskById.get(item.taskId)! }));
+  }, [dayRitual.plan?.items, openTasks]);
+  const today2FocusTasks = useMemo(
+    () => today2PlanEntries.slice(0, focusCount).map((entry) => entry.task),
+    [focusCount, today2PlanEntries],
+  );
 
   const focusedTask = focusedTaskId
     ? openTasks.find((task) => task._id === focusedTaskId) ?? null
@@ -943,6 +948,27 @@ function TodayExperience({
   }, [loadRhythms]);
 
   useEffect(() => {
+    if (!localMode) return;
+    let cancelled = false;
+    void getTaskSettings()
+      .then((settings) => {
+        if (!cancelled) setFocusCount(asFocusCount(settings.focus_count));
+      })
+      .catch((nextError) => {
+        if (!cancelled) {
+          setSurfaceError(
+            nextError instanceof Error
+              ? nextError.message
+              : "Cove couldn't load the focus count.",
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [localMode]);
+
+  useEffect(() => {
     const interval = window.setInterval(() => setNow(new Date()), 30000);
     return () => window.clearInterval(interval);
   }, []);
@@ -962,17 +988,33 @@ function TodayExperience({
   }, []);
 
   useEffect(() => {
+    const savedFocus = readLocalValue(FOCUS_KEY);
+    if (savedFocus) setFocusedTaskId(savedFocus);
+    const savedNotes = readLocalValue(NOTES_KEY);
+    if (savedNotes) {
+      try {
+        setNotes(JSON.parse(savedNotes) as Record<string, string>);
+      } catch {
+        // Corrupt stored notes just start empty rather than breaking the day.
+      }
+    }
+    setLocalRestored(true);
+  }, []);
+
+  useEffect(() => {
+    const availableFocusTasks = TODAY_RIVER_STAGE_V2 ? today2FocusTasks : commitments;
     if (
+      !localRestored ||
       loading ||
       dayRitual.view === 'checking' ||
       dayRitual.ritualOpen ||
       focusedTask ||
-      commitments.length === 0
+      availableFocusTasks.length === 0
     ) return;
-    const first = commitments[0];
+    const first = availableFocusTasks[0];
     setFocusedTaskId(first._id);
     writeLocalValue(FOCUS_KEY, first._id);
-  }, [commitments, dayRitual.ritualOpen, dayRitual.view, focusedTask, loading]);
+  }, [commitments, dayRitual.ritualOpen, dayRitual.view, focusedTask, loading, localRestored, today2FocusTasks]);
 
   useEffect(() => {
     if (!undo || undoPaused) return;
@@ -1019,13 +1061,30 @@ function TodayExperience({
         after: { focusedTaskId: taskId },
         source,
       }).catch(() => undefined);
-      window.requestAnimationFrame(() => {
-        focusHeadingRef.current?.focus({ preventScroll: true });
-        focusHeadingRef.current?.closest('.current-now-shell')?.scrollIntoView({
-          behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
-          block: 'center',
-        });
+      const focusRenderedTask = (attempt = 0) => window.requestAnimationFrame(() => {
+        if (TODAY_RIVER_STAGE_V2) {
+          const taskCard = Array.from(
+            livingCurrentRef.current?.querySelectorAll<HTMLElement>('[data-today2-task-id]') ?? [],
+          ).find((candidate) => candidate.dataset.today2TaskId === taskId);
+          const detailControl = taskCard?.querySelector<HTMLElement>('.today2-focus-open');
+          if (detailControl) {
+            detailControl.focus({ preventScroll: true });
+          } else if (attempt < 2) {
+            focusRenderedTask(attempt + 1);
+          } else {
+            livingCurrentRef.current
+              ?.querySelector<HTMLElement>('.today2-grid-button')
+              ?.focus({ preventScroll: true });
+          }
+        } else {
+          focusHeadingRef.current?.focus({ preventScroll: true });
+          focusHeadingRef.current?.closest('.current-now-shell')?.scrollIntoView({
+            behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+            block: 'center',
+          });
+        }
       });
+      focusRenderedTask();
     },
     [focusedTaskId],
   );
@@ -1270,6 +1329,7 @@ function TodayExperience({
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (dayRitual.view === 'checking' || dayRitual.ritualOpen) return;
+      if (TODAY_RIVER_STAGE_V2 && today2GridOpen) return;
       const target = event.target as HTMLElement | null;
       const isTyping =
         target?.tagName === 'INPUT' ||
@@ -1312,18 +1372,19 @@ function TodayExperience({
         setDismissMenuId(null);
         return;
       }
-      if (isTyping || searchOpen || commitments.length === 0) return;
+      const keyboardTasks = TODAY_RIVER_STAGE_V2 ? today2FocusTasks : commitments;
+      if (isTyping || searchOpen || keyboardTasks.length === 0) return;
       if (!['j', 'k', 'ArrowDown', 'ArrowUp'].includes(event.key)) return;
       event.preventDefault();
-      const currentIndex = commitments.findIndex((task) => task._id === focusedTaskId);
+      const currentIndex = keyboardTasks.findIndex((task) => task._id === focusedTaskId);
       const direction = event.key === 'j' || event.key === 'ArrowDown' ? 1 : -1;
       const baseIndex = currentIndex < 0 ? (direction > 0 ? -1 : 0) : currentIndex;
-      const nextIndex = (baseIndex + direction + commitments.length) % commitments.length;
-      focusTask(commitments[nextIndex]._id, 'keyboard');
+      const nextIndex = (baseIndex + direction + keyboardTasks.length) % keyboardTasks.length;
+      focusTask(keyboardTasks[nextIndex]._id, 'keyboard');
     }
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [closeSearch, commitments, dayRitual.ritualOpen, dayRitual.view, dismissMenuId, focusTask, focusedTaskId, openSearch, searchOpen]);
+  }, [closeSearch, commitments, dayRitual.ritualOpen, dayRitual.view, dismissMenuId, focusTask, focusedTaskId, openSearch, searchOpen, today2FocusTasks, today2GridOpen]);
 
   async function handleCapture(event: React.FormEvent) {
     event.preventDefault();
@@ -1559,12 +1620,71 @@ function TodayExperience({
     }
   }
 
-  async function completeTask(task: TaskData) {
-    if (!doneColumn || completingTaskId) return;
+  // useDayRitual returns a fresh object every render, so hold the two values this
+  // callback needs. Calling reorder through a local also keeps exhaustive-deps from
+  // asking for the whole dayRitual object, which a method call would otherwise require.
+  const { plan: dayRitualPlan, reorder: dayRitualReorder } = dayRitual;
+
+  const persistToday2ItemOrder = useCallback(async (
+    orderedItemIds: readonly string[],
+    startingPlan?: DayPlan,
+  ) => {
+    const plan = startingPlan ?? dayRitualPlan;
+    if (!plan || plan.state !== 'active') {
+      throw new Error('Start the day before changing Today order.');
+    }
+    const itemById = new Map(plan.items.map((item) => [item.id, item]));
+    const desired = orderedItemIds.map((itemId) => itemById.get(itemId)).filter(Boolean) as DayPlanItem[];
+    if (desired.length !== plan.items.length) {
+      throw new Error('Today order no longer matches the active plan. Refresh and try again.');
+    }
+    const working = [...plan.items].sort((left, right) => left.position - right.position);
+    for (let position = 0; position < desired.length; position += 1) {
+      const item = desired[position];
+      const currentPosition = working.findIndex((candidate) => candidate.id === item.id);
+      if (currentPosition === position) continue;
+      await dayRitualReorder(item.id, position, item.title);
+      const [moved] = working.splice(currentPosition, 1);
+      working.splice(position, 0, moved);
+    }
+  }, [dayRitualPlan, dayRitualReorder]);
+
+  const persistToday2Order = useCallback(async (
+    orderedTaskIds: readonly string[],
+    startingPlan?: DayPlan,
+  ) => {
+    const plan = startingPlan ?? dayRitual.plan;
+    if (!plan) throw new Error('The day plan is not ready.');
+    const itemByTaskId = new Map(plan.items.map((item) => [item.taskId, item]));
+    const requestedIds = new Set(orderedTaskIds);
+    const orderedItemIds = [
+      ...orderedTaskIds.map((taskId) => itemByTaskId.get(taskId)?.id).filter(Boolean),
+      ...[...plan.items]
+        .sort((left, right) => left.position - right.position)
+        .filter((item) => !requestedIds.has(item.taskId))
+        .map((item) => item.id),
+    ] as string[];
+    await persistToday2ItemOrder(orderedItemIds, plan);
+  }, [dayRitual.plan, persistToday2ItemOrder]);
+
+  async function completeTask(
+    task: TaskData,
+    today2Order?: {
+      itemId: string;
+      seatIndex: number;
+      previousItemIds: string[];
+      nextTaskIds: string[];
+    },
+  ) {
+    if (!doneColumn) throw new Error('Cove needs a Done list to complete this task.');
+    if (completingTaskId) throw new Error('Another task completion is still in progress.');
     setCompletingTaskId(task._id);
     setSurfaceError(undefined);
-    await new Promise((resolve) => window.setTimeout(resolve, 230));
+    if (!today2Order) await new Promise((resolve) => window.setTimeout(resolve, 230));
     try {
+      const completed = today2Order
+        ? await dayRitual.completeItem(today2Order.itemId, task.title)
+        : undefined;
       await updateTask(task._id, {
         columnId: doneColumn._id,
         status: 'done',
@@ -1577,30 +1697,51 @@ function TodayExperience({
         after: { columnId: doneColumn._id, status: 'done' },
         source: 'human',
       });
-      const nextTask = commitments.find((candidate) => candidate._id !== task._id);
+      if (today2Order && completed) {
+        await persistToday2Order(today2Order.nextTaskIds, completed.plan);
+      }
+      const nextTask = today2Order
+        ? openTasks.find(
+            (candidate) => candidate._id === today2Order.nextTaskIds[today2Order.seatIndex],
+          ) ?? openTasks.find((candidate) => today2Order.nextTaskIds.includes(candidate._id))
+        : commitments.find((candidate) => candidate._id !== task._id);
       setFocusedTaskId(nextTask?._id ?? null);
       if (nextTask) writeLocalValue(FOCUS_KEY, nextTask._id);
       else removeLocalValue(FOCUS_KEY);
       showUndo({
         message: 'Completed',
         run: async () => {
-          await updateTask(task._id, {
-            columnId: task.columnId,
-            status: task.status ?? 'open',
-            position: task.position,
-          });
-          await recordDecision({
-            eventType: 'task_undo',
-            entityId: task._id,
-            reason: 'completion_undo',
-            source: 'human',
-          });
-          focusTask(task._id, 'undo');
-          setUndo(null);
+          const restore = async () => {
+            const reopened = today2Order
+              ? await dayRitual.reopenItem(today2Order.itemId, task.title)
+              : undefined;
+            await updateTask(task._id, {
+              columnId: task.columnId,
+              status: task.status ?? 'open',
+              position: task.position,
+            });
+            await recordDecision({
+              eventType: 'task_undo',
+              entityId: task._id,
+              reason: 'completion_undo',
+              source: 'human',
+            });
+            if (today2Order && reopened) {
+              await persistToday2ItemOrder(today2Order.previousItemIds, reopened.plan);
+            }
+            focusTask(task._id, 'undo');
+            setUndo(null);
+          };
+          if (today2Order && today2MotionRef.current) {
+            await today2MotionRef.current.runUndo(task._id, today2Order.seatIndex, restore);
+          } else {
+            await restore();
+          }
         },
       });
-    } catch {
+    } catch (nextError) {
       setSurfaceError("Cove couldn't finish completing that task. Refresh the current to confirm its state, then try again.");
+      if (today2Order) throw nextError;
     } finally {
       setCompletingTaskId(null);
     }
@@ -1701,10 +1842,14 @@ function TodayExperience({
     hour: 'numeric',
     minute: '2-digit',
   }).format(now);
+  const activePlanItems = [...(dayRitual.plan?.items ?? [])]
+    .filter((item) => item.decision === 'accepted')
+    .sort((left, right) => left.position - right.position);
   const planPositionByTaskId = new Map(
-    (dayRitual.plan?.items ?? [])
-      .filter((item) => item.decision === 'accepted')
-      .map((item) => [item.taskId, item.position]),
+    activePlanItems.map((item, index) => [item.taskId, index]),
+  );
+  const focusTaskIds = new Set(
+    focusBandItems(activePlanItems, focusCount).map((item) => item.taskId),
   );
   const downstream = commitments
     .filter((task) => task._id !== focusedTask?._id)
@@ -1719,6 +1864,9 @@ function TodayExperience({
       return left.position - right.position;
     });
   const visibleDownstream = showAllDownstream ? downstream : downstream.slice(0, 5);
+  const ifYouHaveTimeTaskId = visibleDownstream.find(
+    (task) => planPositionByTaskId.has(task._id) && !focusTaskIds.has(task._id),
+  )?._id;
   const hiddenDownstreamCount = Math.max(0, downstream.length - visibleDownstream.length);
   const focusPoint: CurrentPoint = { x: 500, y: 330 };
   const downstreamStartY = focusPoint.y + (focusExpanded ? 520 : 230);
@@ -1761,11 +1909,13 @@ function TodayExperience({
     y,
   }));
   const progress = getDayProgress(now);
-  const dayPoint = cubicPoint(progress);
+  const dayPoint = pointOnCubicDayArc(progress, CURRENT_DAY_ARC);
   const greeting = getGreeting(now.getHours());
   const waterTone = now.getHours() < 11 ? 'morning' : now.getHours() < 17 ? 'day' : 'evening';
   const morningArrivalUnavailableReason = !dayRitual.plan
-    ? "Morning Arrival is available when today's plan is ready."
+    ? dayRitual.weekendGate
+      ? `Morning Arrival is paused on ${dayRitual.weekendGate.weekday}. Choose Plan today anyway to open it.`
+      : "Morning Arrival is available when today's plan is ready."
     : dayRitual.plan.localDate !== localDateInTimezone(now, dayRitual.plan.timezone)
       ? 'Morning Arrival is available only for today.'
       : dayRitual.plan.state === 'settled'
@@ -1773,6 +1923,9 @@ function TodayExperience({
         : dayRitual.busy
           ? 'Cove is updating today\'s plan.'
           : undefined;
+  const closeDayDisabled = !dayRitual.plan ||
+    dayRitual.busy ||
+    !canStartDayPlanSettlement(dayRitual.plan);
   const searchResults = openTasks
     .filter((task) => {
       const query = searchQuery.trim().toLowerCase();
@@ -1786,9 +1939,29 @@ function TodayExperience({
   );
   const arrivalPlanItems = useMemo(
     () => orderedPlanItems.filter(
-      (item) => item.decision === 'preselected' || item.decision === 'accepted',
+      (item) =>
+        item.decision === 'pending' ||
+        item.decision === 'preselected' ||
+        item.decision === 'accepted',
     ),
     [orderedPlanItems],
+  );
+  const notTodayTasks = useMemo<MorningArrivalBoardTask[]>(
+    () => eligibleNotTodayTasks(tasks, dayRitual.plan?.items ?? [], {
+      doneColumnId: doneColumn?._id,
+      briefRankedTaskIds: briefPickedTasks.map((picked) => picked.taskId),
+    }).map((task) => ({
+      id: task._id,
+      title: task.title,
+      description: task.description,
+      project: helpfulProjectLabel(task.tags[0]),
+      due: task.dueAt
+        ? formatArrivalDueDate(task.dueAt)
+        : task.dueDate
+          ? formatArrivalDueDate(task.dueDate)
+          : undefined,
+    })),
+    [briefPickedTasks, dayRitual.plan?.items, doneColumn?._id, tasks],
   );
   const arrivalItems = useMemo<MorningArrivalItem[]>(
     () => arrivalPlanItems.map((item) => {
@@ -1975,6 +2148,70 @@ function TodayExperience({
         : dayRitual.executionError,
     surfaceError,
   );
+  const today2Tasks = useMemo<TodayRiverTaskV2[]>(
+    () => today2PlanEntries.map(({ item, task }) => ({
+      id: task._id,
+      itemId: item.id,
+      title: task.title,
+      description: task.description || item.outcome,
+      project: item.project,
+      dueLabel: item.dueAt ? formatArrivalDueDate(item.dueAt) : undefined,
+      owner: todayOwnerLabel(item.owner),
+      run: localMode ? taskSessions.latestByTaskId.get(task._id) : undefined,
+      sessionBusy: taskSessions.launchingTaskIds.has(task._id),
+    })),
+    [localMode, taskSessions.latestByTaskId, taskSessions.launchingTaskIds, today2PlanEntries],
+  );
+  const today2SecondCurrentItems = useMemo<SecondCurrentItemV2[]>(
+    () => jarvisTasks
+      .filter((task) => isEmailDigest(task) || isRecurringTask(task))
+      .map((task) => ({
+        id: task._id,
+        kicker: isEmailDigest(task) ? 'Email needs you' : 'Rhythm',
+        title: task.title,
+        kind: isEmailDigest(task) ? 'email' : 'rhythm',
+      })),
+    [jarvisTasks],
+  );
+  const today2SunPoint = useMemo(
+    () => pointOnCubicDayArc(progress, TODAY2_DAY_ARC),
+    [progress],
+  );
+
+  const changeToday2FocusCount = useCallback(async (count: 1 | 2 | 3) => {
+    if (!localMode || focusCountBusy || count === focusCount) return;
+    const previous = focusCount;
+    setFocusCount(count);
+    setFocusCountBusy(true);
+    setSurfaceError(undefined);
+    try {
+      const settings = await updateTaskSettings({ focus_count: count });
+      setFocusCount(asFocusCount(settings.focus_count));
+    } catch (nextError) {
+      setFocusCount(previous);
+      setSurfaceError(
+        nextError instanceof Error
+          ? nextError.message
+          : "Cove couldn't save the focus count.",
+      );
+    } finally {
+      setFocusCountBusy(false);
+    }
+  }, [focusCount, focusCountBusy, localMode]);
+
+  const launchToday2Session = useCallback(async (
+    taskId: string,
+    mode: NonNullable<LaunchTaskSessionInput['mode']>,
+  ) => {
+    const plan = dayRitual.plan;
+    const entry = today2PlanEntries.find((candidate) => candidate.task._id === taskId);
+    if (!localMode || !plan || !entry || taskSessions.activeRuns.length >= 6) return;
+    await taskSessions.launch({
+      ...taskSessionInput(plan.id, entry.item),
+      owner: mode === 'planning' ? 'together' : 'claude',
+      mode,
+    }).catch(() => undefined);
+  }, [dayRitual.plan, localMode, taskSessions, today2PlanEntries]);
 
   if (loading || dayRitual.view === 'checking') {
     return (
@@ -1995,7 +2232,7 @@ function TodayExperience({
             <div className="current-day-arc" aria-hidden="true">
               <svg viewBox="0 0 324 132">
                 <path d="M 18 112 C 116 116, 244 76, 306 18" />
-                <circle cx="162" cy="88" r="6" />
+                <circle suppressHydrationWarning cx={dayPoint.x} cy={dayPoint.y} r="6" />
                 <g className="current-sun" transform="translate(306 18)">
                   <circle r="9" />
                 </g>
@@ -2044,8 +2281,101 @@ function TodayExperience({
     <div className="relative h-full overflow-hidden">
       <div
         ref={livingCurrentRef}
-        className={`quiet-current-surface current-river-surface is-${waterTone} ${ambientPaused || dayRitual.ritualOpen ? 'is-ambient-paused' : ''} h-full overflow-y-auto`}
+        className={TODAY_RIVER_STAGE_V2
+          ? 'h-full overflow-hidden'
+          : `quiet-current-surface current-river-surface is-${waterTone} ${ambientPaused || dayRitual.ritualOpen ? 'is-ambient-paused' : ''} h-full overflow-y-auto`}
       >
+      {TODAY_RIVER_STAGE_V2 ? (
+        <TodayRiverStageV2
+          ref={today2MotionRef}
+          model={{
+            timeLabel,
+            timeIso: now.toISOString(),
+            greeting,
+            sunPoint: today2SunPoint,
+            doneCount: doneToday.length,
+            doneTitles: doneToday.map((task) => task.title),
+            focusCount,
+            orderedTasks: today2Tasks,
+            selectedTaskId: focusedTaskId ?? undefined,
+            completingTaskId: completingTaskId ?? undefined,
+            activeRunCount: taskSessions.activeRuns.length,
+            localMode,
+            reorderEnabled: dayRitual.plan?.state === 'active' && !dayRitual.busy,
+            focusCountBusy: focusCountBusy || !localMode,
+            rhythmCount: rhythmTemplates.filter((template) => template.active).length,
+            secondCurrentItems: today2SecondCurrentItems,
+            statusMessage: dayRitual.startReceipt ?? dayRitual.settlementReceipt,
+            errorMessage: visibleSurfaceError ?? error,
+            morningArrivalDisabled: Boolean(morningArrivalUnavailableReason),
+            morningArrivalTitle: morningArrivalUnavailableReason,
+            closeDayDisabled,
+            weekendGate: !dayRitual.plan && dayRitual.weekendGate
+              ? {
+                  weekday: dayRitual.weekendGate.weekday,
+                  planning: dayRitual.planningWeekend,
+                }
+              : undefined,
+            ritualOpen: dayRitual.ritualOpen,
+          }}
+          callbacks={{
+            onOpenMorningArrival: () => void openMorningArrival(),
+            onOpenCloseDay: () => void openDaySettlement(),
+            onPlanWeekend: () => void dayRitual.planWeekendAnyway(),
+            onFocusTask: (taskId) => focusTask(taskId, 'today2_card'),
+            onCompleteTask: async (taskId, seatIndex) => {
+              const task = tasks.find((candidate) => candidate._id === taskId);
+              const planTask = today2Tasks.find((candidate) => candidate.id === taskId);
+              if (!task || !planTask || !dayRitual.plan) {
+                throw new Error('Today changed before the task could be completed.');
+              }
+              const previousItemIds = [...dayRitual.plan.items]
+                .sort((left, right) => left.position - right.position)
+                .map((item) => item.id);
+              const previousTaskIds = today2Tasks.map((candidate) => candidate.id);
+              const nextTaskIds = reduceFocusSeats(previousTaskIds, focusCount, {
+                type: 'complete',
+                seatIndex,
+                taskId,
+              });
+              await completeTask(task, {
+                itemId: planTask.itemId,
+                seatIndex,
+                previousItemIds,
+                nextTaskIds,
+              });
+            },
+            onStartSession: (taskId, owner) => void launchToday2Session(taskId, owner),
+            onRetrySession: (taskId, owner) => void launchToday2Session(taskId, owner),
+            onReorder: (orderedTaskIds) => {
+              return persistToday2Order(orderedTaskIds).catch((nextError) => {
+                setSurfaceError(
+                  nextError instanceof Error
+                    ? nextError.message
+                    : "Cove couldn't save the new Today order.",
+                );
+              });
+            },
+            onFocusCountChange: (count) => void changeToday2FocusCount(count),
+            onGridOpenChange: setToday2GridOpen,
+            onOpenSecondCurrentItem: (item) => setDetailTaskId(item.id),
+            onEditTask: (taskId) => setDetailTaskId(taskId),
+            onMotionDataFailure: () => {
+              setCompletingTaskId(null);
+              setSurfaceError("Cove couldn't finish completing that task. Refresh the current to confirm its state, then try again.");
+            },
+          }}
+          rhythmManager={localMode ? (
+            <RhythmManager
+              templates={rhythmTemplates}
+              onChanged={async () => {
+                await Promise.all([loadRhythms(), retry()]);
+              }}
+            />
+          ) : undefined}
+        />
+      ) : (
+      <>
       <div className="current-water-plane" aria-hidden="true">
         <span className="current-water-drift current-water-drift-one" />
         <span className="current-water-drift current-water-drift-two" />
@@ -2089,7 +2419,7 @@ function TodayExperience({
               <button
                 type="button"
                 className="current-capture-toggle"
-                disabled={!dayRitual.plan || dayRitual.busy || dayRitual.plan.state === 'settled'}
+                disabled={closeDayDisabled}
                 onClick={() => void openDaySettlement()}
               >
                 Close My Day
@@ -2109,6 +2439,13 @@ function TodayExperience({
               </form>
             )}
             <CoveReadinessStrip />
+            {localMode && (
+              <ClaudeDeskStrip
+                activeRuns={taskSessions.activeRuns}
+                outputReadyRuns={taskSessions.outputReadyRuns}
+                onAbandon={taskSessions.abandon}
+              />
+            )}
             {visibleSurfaceError && (
               <p role="alert" className="current-surface-error">{visibleSurfaceError}</p>
             )}
@@ -2134,7 +2471,7 @@ function TodayExperience({
           <div className="current-day-arc" aria-hidden="true">
             <svg viewBox="0 0 324 132">
               <path d="M 18 112 C 116 116, 244 76, 306 18" />
-              <circle cx={dayPoint.x} cy={dayPoint.y} r="6" />
+              <circle suppressHydrationWarning cx={dayPoint.x} cy={dayPoint.y} r="6" />
               <g className="current-sun" transform="translate(306 18)">
                 <circle r="9" />
                 {[0, 45, 90, 135].map((angle) => (
@@ -2231,6 +2568,7 @@ function TodayExperience({
                     run={focusedBoardSession.run}
                     busy={taskSessions.launchingTaskIds.has(focusedTask._id)}
                     preferredOwner={focusedBoardSession.item.owner === 'together' ? 'together' : 'claude'}
+                    activeRunCount={taskSessions.activeRuns.length}
                     onLaunch={taskSessions.launch}
                   />
                 </div>
@@ -2345,6 +2683,7 @@ function TodayExperience({
                       run={focusedBoardSession.run}
                       busy={taskSessions.launchingTaskIds.has(focusedTask._id)}
                       preferredOwner={focusedBoardSession.item.owner === 'together' ? 'together' : 'claude'}
+                      activeRunCount={taskSessions.activeRuns.length}
                       error={taskSessions.error}
                       onLaunch={taskSessions.launch}
                     />
@@ -2385,11 +2724,19 @@ function TodayExperience({
             const execution = boardExecutionByTaskId.get(task._id);
             const session = boardSessionByTaskId.get(task._id);
             return (
-              <article
-                key={task._id}
-                className={`current-river-node is-${side} ${time ? 'is-anchored' : ''}`}
-                style={{ left: `${x / 10}%`, top: y }}
-              >
+              <div key={task._id}>
+                {task._id === ifYouHaveTimeTaskId && (
+                  <p
+                    className="absolute left-1/2 z-10 -translate-x-1/2 rounded-full border border-border/50 bg-background/75 px-3 py-1 text-[10.5px] font-[650] uppercase tracking-[0.24em] text-muted-foreground backdrop-blur"
+                    style={{ top: y - 54 }}
+                  >
+                    If you have time
+                  </p>
+                )}
+                <article
+                  className={`current-river-node is-${side} ${time ? 'is-anchored' : ''}`}
+                  style={{ left: `${x / 10}%`, top: y }}
+                >
                 <button
                   type="button"
                   className="current-node-target"
@@ -2411,6 +2758,7 @@ function TodayExperience({
                         run={session.run}
                         busy={taskSessions.launchingTaskIds.has(task._id)}
                         preferredOwner={session.item.owner === 'together' ? 'together' : 'claude'}
+                        activeRunCount={taskSessions.activeRuns.length}
                         onLaunch={taskSessions.launch}
                       />
                     </div>
@@ -2454,7 +2802,8 @@ function TodayExperience({
                     </div>
                   )}
                 </div>
-              </article>
+                </article>
+              </div>
             );
           })}
 
@@ -2477,7 +2826,7 @@ function TodayExperience({
 
           <aside className="current-jarvis-current" aria-labelledby="jarvis-lane-title">
             <div className="current-jarvis-heading">
-              <span>Work held for you</span>
+              <span>Steady work</span>
               <h2 id="jarvis-lane-title">Cove shelf</h2>
               {localMode && (
                 <RhythmManager
@@ -2579,7 +2928,11 @@ function TodayExperience({
                       {suggestion.kind === 'returned_work' && suggestion.reviewMaterial && <details className="quiet-returned-work"><summary>Read Cove&apos;s work</summary><pre>{suggestion.reviewMaterial}</pre></details>}
                       <small>Source: {suggestion.source}</small>
                       <div className="current-tributary-actions">
-                        <button type="button" onClick={() => void commitSuggestion(suggestion, 'explicit_accept')} className="quiet-pencil-action is-primary">
+                        {suggestion.kind === 'attention_nudge' ? (
+                          <button type="button" onClick={() => void dismissSuggestion(suggestion, 'acknowledged')} className="quiet-pencil-action is-primary">
+                            Seen
+                          </button>
+                        ) : <><button type="button" onClick={() => void commitSuggestion(suggestion, 'explicit_accept')} className="quiet-pencil-action is-primary">
                           {suggestion.kind === 'observed_progress'
                             ? 'Mark done'
                             : suggestion.kind === 'stale_task'
@@ -2603,6 +2956,7 @@ function TodayExperience({
                             ))}
                           </div>}
                         </div>
+                        </>}
                       </div>
                     </>
                   )}
@@ -2616,6 +2970,9 @@ function TodayExperience({
           </p>
         </section>
       </div>
+
+      </>
+      )}
 
       {undo && (
         <div
@@ -2669,7 +3026,7 @@ function TodayExperience({
                     className="quiet-search-result"
                   >
                     <span className="min-w-0 flex-1 truncate text-left">{task.title}</span>
-                    <span className="text-[10px] text-muted-foreground">
+                    <span className="text-[12px] font-medium text-muted-foreground">
                       {withJarvis ? 'Held by Cove' : brief ? 'Email needs you' : inCurrent ? 'In current' : 'Outside today'}
                     </span>
                   </button>
@@ -2706,7 +3063,11 @@ function TodayExperience({
           describedBy={RITUAL_DESCRIPTION_IDS[ritualView]}
           announcement={dayRitual.announcement}
           inertTargetRef={livingCurrentRef}
-          width={ritualView === 'settlement' ? 'default' : 'wide'}
+          width={ritualView === 'settlement'
+            ? 'default'
+            : ritualView === 'arrival' && arrivalPlanCanvas
+              ? 'canvas'
+              : 'wide'}
           onEscape={
             ritualView === 'arrival'
               ? () => arrivalEscapeRef.current?.()
@@ -2718,11 +3079,14 @@ function TodayExperience({
           <DayRitualContentSwap
             viewKey={ritualView}
             focusTargetId={RITUAL_TITLE_IDS[ritualView]}
+            fillAvailable={ritualView === 'arrival'}
           >
             {ritualView === 'arrival' ? (
               <MorningArrival
                 plan={dayRitual.plan}
+                focusCount={focusCount}
                 items={arrivalItems}
+                notTodayTasks={notTodayTasks}
                 recommendation={recommendation}
                 brief={dayRitual.morningBrief}
                 briefGeneration={dayRitual.briefGeneration}
@@ -2737,17 +3101,13 @@ function TodayExperience({
                       minute: '2-digit',
                     })}`
                   : 'Using the latest verified task evidence'}
-                expandedItemId={expandedArrivalItemId}
                 busy={dayRitual.busy}
                 error={combineSurfaceErrors(dayRitual.error, surfaceError)}
                 titleId={RITUAL_TITLE_IDS.arrival}
                 descriptionId={RITUAL_DESCRIPTION_IDS.arrival}
                 escapeRef={arrivalEscapeRef}
+                onPlanCanvasChange={setArrivalPlanCanvas}
                 onInteract={dayRitual.markArrivalInteraction}
-                onExpand={(itemId) => {
-                  dayRitual.markArrivalInteraction();
-                  setExpandedArrivalItemId((current) => current === itemId ? null : itemId);
-                }}
                 onOwnerChange={(itemId, owner) => dayRitual.setOwner(itemId, owner)}
                 onDragReorder={async (activeId, overId) => {
                   const next = reorderDayPlanItems(arrivalPlanItems, activeId, overId);
@@ -2755,18 +3115,19 @@ function TodayExperience({
                   const title = next[position]?.title ?? 'Task';
                   if (position >= 0) await dayRitual.reorder(activeId, position, title);
                 }}
-                onDismiss={dayRitual.dismissItem}
-                onAddSuggestion={dayRitual.addItem}
+                onRemove={(itemId, title, taskBacked) => taskBacked
+                  ? dayRitual.laterItem(itemId, title)
+                  : dayRitual.dismissItem(itemId, title)}
+                onComplete={async (itemId, title) => {
+                  await dayRitual.completeItem(itemId, title);
+                  await retry();
+                }}
+                onAddTask={async (taskId, title) => {
+                  await dayRitual.addTask(taskId, title);
+                }}
                 onSnooze={() => dayRitual.snooze().catch(() => undefined)}
-                onSkip={() => dayRitual.skip().catch(() => undefined)}
                 onBypass={() => dayRitual.bypass().catch(() => undefined)}
                 onStartDay={startPlannedDay}
-                onAddWhatChanged={() => {
-                  void dayRitual.bypass().then(() => setCaptureOpen(true)).catch(() => undefined);
-                }}
-                onOpenAllWork={onOpenAllWork ? () => {
-                  void dayRitual.bypass().then(onOpenAllWork).catch(() => undefined);
-                } : undefined}
               />
             ) : ritualView === 'settlement' ? (
               <DaySettlement

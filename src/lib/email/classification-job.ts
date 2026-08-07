@@ -1,21 +1,22 @@
 import type { ScheduledJob } from "../reliability/jobs";
 import type { MailMessage, RestrictedMailGateway } from "../workspace";
-import { openLocalDatabase } from "../local/database";
+import { localDatabasePath, openLocalDatabase } from "../local/database";
 import { classifyEmail, type EmailClassification } from "./classifier";
+import { parseFromHeader } from "./from-header";
 import { applyEmailClassification } from "./state-machine";
 import {
   captureEmailCommitments,
+  formatEmailCRMContext,
+  getEmailCRMContext,
   recordEmailCorrespondence,
   type EmailCommitmentInput,
 } from "./automation";
+import { handleUrgentEmail } from "../attention/email-urgency";
+import { recordFailure } from "../reliability/failures";
 
 function header(message: MailMessage, name: string): string {
   return message.headers.find((item) => item.name.toLowerCase() === name.toLowerCase())
     ?.value ?? "";
-}
-
-function address(value: string): string {
-  return (/<([^<>]+)>/.exec(value)?.[1] ?? value).trim().toLowerCase();
 }
 
 function normalizedEvidence(value: string): string {
@@ -50,6 +51,7 @@ export function createEmailClassificationHandler(input: {
   accountEmail: string;
   dbPath?: string;
   repoDir?: string;
+  signatureText?: string | null;
   voice?: () => string;
   classifier?: (input: {
     accountEmail: string;
@@ -57,8 +59,10 @@ export function createEmailClassificationHandler(input: {
     subject: string;
     text: string;
     voice?: string;
+    recentContext?: string;
   }) => Promise<EmailClassification>;
   now?: () => Date;
+  urgentHandler?: typeof handleUrgentEmail;
 }) {
   const classifier = input.classifier ??
     ((classificationInput) => classifyEmail({
@@ -153,12 +157,29 @@ export function createEmailClassificationHandler(input: {
       messageId: claim.messageId,
       format: "full",
     });
+    const from = parseFromHeader(header(message, "From"));
+    // Relationship context is best effort: any CRM failure means classifying
+    // without context, never a failed job. Only stored deterministic CRM data
+    // reaches the trusted context slot, never other threads' email bodies.
+    let recentContext: string | undefined;
+    try {
+      recentContext = formatEmailCRMContext(getEmailCRMContext({
+        senderName: from.displayName,
+        senderEmail: from.address,
+        threadId: message.threadId,
+        dbPath: input.dbPath,
+        now: input.now,
+      }));
+    } catch {
+      recentContext = undefined;
+    }
     const result = await classifier({
       accountEmail: input.accountEmail,
       sender: header(message, "From"),
       subject: header(message, "Subject"),
       text: message.text || message.snippet,
       voice: input.voice?.(),
+      recentContext,
     });
     const sourceEvidence = normalizedEvidence(message.text || message.snippet);
     const groundedCommitments = (result.commitments ?? []).filter((commitment) => {
@@ -173,11 +194,12 @@ export function createEmailClassificationHandler(input: {
       summary: result.summary,
       recommendedAction: result.recommendedAction,
       draftBody: result.draftBody,
+      signatureText: input.signatureText,
       artifactPayload: {
         messageId: message.id,
         threadId: message.threadId,
-        senderName: header(message, "From").slice(0, 240),
-        senderEmail: address(header(message, "From")),
+        senderName: from.displayName.slice(0, 240),
+        senderEmail: from.address,
         subject: header(message, "Subject").slice(0, 240) || "Email correspondence",
         summary: result.summary,
         occurredAt: message.internalDate
@@ -192,6 +214,39 @@ export function createEmailClassificationHandler(input: {
       dbPath: input.dbPath,
       now: input.now?.(),
     });
+    if (applied.applied && result.urgent === true) {
+      try {
+        (input.urgentHandler ?? handleUrgentEmail)({
+          dbPath: input.dbPath ?? localDatabasePath(),
+          repoDir: input.repoDir,
+          messageId: claim.messageId,
+          emailItemId: claim.emailItemId,
+          fromHeader: header(message, "From"),
+          urgent: result.urgent,
+          urgencyReason: result.urgencyReason,
+          now: input.now?.(),
+        });
+      } catch (error) {
+        // An urgent email that fails to alert is the exact drop this system
+        // exists to prevent, so it goes to the Failure Inbox, not just stderr.
+        const detail = error instanceof Error ? error.message : String(error);
+        console.error("Urgent email attention handling failed:", detail);
+        try {
+          recordFailure({
+            source: "urgent-email",
+            sourceId: claim.messageId,
+            message: `Cove judged an email urgent but could not alert: ${detail}`,
+            details: { messageId: claim.messageId, emailItemId: claim.emailItemId },
+            dbPath: input.dbPath,
+          });
+        } catch (recordError) {
+          console.error(
+            "Urgent email failure inbox write failed:",
+            recordError instanceof Error ? recordError.message : String(recordError),
+          );
+        }
+      }
+    }
     const permanentlySkipped = !applied.applied && applied.cause !== "version_mismatch";
     if (applied.applied || permanentlySkipped) {
       await input.gateway.modifyThreadLabels({

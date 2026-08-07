@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isUtf8 } from "node:buffer";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
@@ -167,10 +168,11 @@ for (const file of listed) {
     bytes = Buffer.from(`${JSON.stringify({
       ...sourcePackage,
       license: "SEE LICENSE IN LICENSE",
-      engines: { node: ">=20" },
+      engines: { node: "^20.19.0 || ^22.13.0 || >=24" },
     }, null, 2)}\n`, "utf8");
   }
-  let text = bytes.toString("utf8");
+  const isBinary = !isUtf8(bytes);
+  let text = bytes.toString(isBinary ? "latin1" : "utf8");
   if (file === "tests/progress-reconcile.test.mjs") {
     for (const fixture of fixtureAllowlist) {
       if (text.includes(fixture.value)) {
@@ -179,7 +181,9 @@ for (const file of listed) {
       }
     }
   }
-  bytes = Buffer.from(text, "utf8");
+  if (!isBinary) {
+    bytes = Buffer.from(text, "utf8");
+  }
   for (const pattern of secretPatterns) {
     pattern.lastIndex = 0;
     if (pattern.test(text)) findings.push(`${file}: ${pattern.source}`);

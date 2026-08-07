@@ -21,12 +21,17 @@ test.after(() => {
   else process.env.NEXT_PUBLIC_COVE_RUNTIME = PREVIOUS_RUNTIME;
 });
 
-function setup(t, executionEnvironment = { autonomousEnabled: false, workspaces: new Map() }) {
+function setup(
+  t,
+  executionEnvironment = { autonomousEnabled: false, workspaces: new Map() },
+  focusCount = 3,
+) {
   const file = path.join(os.tmpdir(), `cove-execution-${process.pid}-${Date.now()}-${Math.random()}.db`);
   const store = createDayPlanStore({
     dbPath: file,
     now: () => new Date('2026-07-10T16:00:00.000Z'),
     executionEnvironment,
+    focusCount,
   });
   t.after(() => {
     store.close();
@@ -433,11 +438,23 @@ test('claudeSessionId is projected for loopback actionable runs only', () => {
   assert.equal(stripped.readiness.workspacePath, undefined);
 });
 
-test('Start My Day batch-kicks every accepted Claude and Together item in plan mode', (t) => {
+test('Start My Day accepts every retained item but batch-kicks only the first three focus items', (t) => {
   const { store, plan: original } = setup(t);
   let plan = original;
-  plan = mutate(store, plan, 'item_owner', { itemId: plan.items[0].id, owner: 'together' });
-  plan = mutate(store, plan, 'item_owner', { itemId: plan.items[1].id, owner: 'claude' });
+  for (let index = 0; index < 3; index += 1) {
+    plan = mutate(store, plan, 'item_add', {
+      title: `Additional ${index}`,
+      outcome: `Finish additional ${index}`,
+      why: `Reason ${index}`,
+      owner: 'claude',
+    });
+  }
+  for (const [index, item] of plan.items.entries()) {
+    plan = mutate(store, plan, 'item_owner', {
+      itemId: item.id,
+      owner: index % 2 === 0 ? 'together' : 'claude',
+    });
+  }
   const started = store.mutateDayPlan({
     planId: plan.id,
     expectedVersion: plan.version,
@@ -445,16 +462,17 @@ test('Start My Day batch-kicks every accepted Claude and Together item in plan m
     action: 'start_day',
   });
   assert.equal(started.plan.state, 'active');
-  assert.equal(started.executionRuns.length, 2);
+  assert.equal(started.plan.items.every((item) => item.decision === 'accepted'), true);
+  assert.equal(started.executionRuns.length, 3);
   assert.deepEqual(
     new Set(started.executionRuns.map((run) => run.itemId)),
-    new Set(plan.items.map((item) => item.id)),
+    new Set(plan.items.slice(0, 3).map((item) => item.id)),
   );
   assert.equal(started.executionRuns.every((run) => run.mode === 'plan_review'), true);
   assert.equal(started.executionRuns.every((run) => run.status === 'queued'), true);
   assert.equal(started.unreadyItems?.length ?? 0, 0);
   assert.equal(started.kickoffSkips?.length ?? 0, 0);
-  assert.equal(store.listExecutionRuns(plan.id).length, 2);
+  assert.equal(store.listExecutionRuns(plan.id).length, 3);
   const replay = store.mutateDayPlan({
     planId: plan.id,
     expectedVersion: plan.version,
@@ -462,8 +480,69 @@ test('Start My Day batch-kicks every accepted Claude and Together item in plan m
     action: 'start_day',
   });
   assert.equal(replay.replayed, true);
-  assert.equal(replay.executionRuns.length, 2);
-  assert.equal(store.listExecutionRuns(plan.id).length, 2);
+  assert.equal(replay.executionRuns.length, 3);
+  assert.equal(store.listExecutionRuns(plan.id).length, 3);
+});
+
+test('Start My Day limits cloud kickoff to the configured focus count', (t) => {
+  const { store, plan: original } = setup(
+    t,
+    { autonomousEnabled: false, workspaces: new Map() },
+    1,
+  );
+  let plan = original;
+  for (const item of plan.items) {
+    plan = mutate(store, plan, 'item_owner', { itemId: item.id, owner: 'claude' });
+  }
+  const started = store.mutateDayPlan({
+    planId: plan.id,
+    expectedVersion: plan.version,
+    mutationId: 'start-day:focus-count-one',
+    action: 'start_day',
+  });
+
+  assert.equal(started.executionRuns.length, 1);
+  assert.equal(started.executionRuns[0].itemId, plan.items[0].id);
+});
+
+test('cloud kickoff uses the first three positions without owner-based backfill', (t) => {
+  const { store, plan: original } = setup(t);
+  let plan = original;
+  const addedOwners = ['claude', 'claude', 'me', 'together'];
+  for (const [index, owner] of addedOwners.entries()) {
+    plan = mutate(store, plan, 'item_add', {
+      title: `Position ${index + 3}`,
+      outcome: `Finish position ${index + 3}`,
+      why: `Owner mix ${index + 3}`,
+      owner,
+    });
+  }
+  for (const [index, owner] of ['claude', 'together'].entries()) {
+    plan = mutate(store, plan, 'item_owner', {
+      itemId: plan.items[index].id,
+      owner,
+    });
+  }
+  const ordered = [...plan.items].sort((left, right) => left.position - right.position);
+  assert.deepEqual(ordered.map((item) => item.owner), [
+    'claude', 'together', 'claude', 'claude', 'me', 'together',
+  ]);
+
+  const started = store.mutateDayPlan({
+    planId: plan.id,
+    expectedVersion: plan.version,
+    mutationId: 'start-day:owner-mix',
+    action: 'start_day',
+  });
+  assert.deepEqual(
+    new Set(started.executionRuns.map((run) => run.itemId)),
+    new Set(ordered.slice(0, 3).map((item) => item.id)),
+  );
+  assert.equal(started.executionRuns.length, 3);
+  assert.equal(
+    started.executionRuns.some((run) => ordered.slice(3).some((item) => item.id === run.itemId)),
+    false,
+  );
 });
 
 test('reopening arrival quiesces queued and running agent work before a fresh restart', (t) => {

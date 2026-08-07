@@ -1,5 +1,6 @@
 import type { MorningBriefGenerationState } from './brief';
 import type {
+  DayPlan,
   DayPlanExecutionConfig,
   DayPlanExecutionReadiness,
   DayPlanExecutionRun,
@@ -43,6 +44,34 @@ const NON_PROJECT_TAGS = new Set([
   'today',
   'urgent',
 ]);
+
+// The Cove shelf holds only steady work: the rolling email card and recurring
+// rhythm occurrences (tasks spawned from recurring_templates, linked through
+// recurringTemplateId). One-off jarvis-held tasks stay off the shelf; they
+// remain visible on the All Work board.
+export type ShelfTask = {
+  tags: string[];
+  recurringTemplateId?: string;
+  position: number;
+};
+
+function isEmailCurrentTask(task: ShelfTask): boolean {
+  return task.tags.some((tag) => tag.trim().toLowerCase() === 'email-current');
+}
+
+export function belongsOnShelf(task: ShelfTask): boolean {
+  return isEmailCurrentTask(task) || Boolean(task.recurringTemplateId);
+}
+
+export function selectShelfTasks<T extends ShelfTask>(openTasks: readonly T[]): T[] {
+  return openTasks
+    .filter(belongsOnShelf)
+    .sort(
+      (left, right) =>
+        Number(Boolean(right.recurringTemplateId)) - Number(Boolean(left.recurringTemplateId)) ||
+        left.position - right.position,
+    );
+}
 
 export function morningArrivalGreeting(date: Date, timezone: string): string {
   const hourPart = new Intl.DateTimeFormat('en-US', {
@@ -184,23 +213,29 @@ export function ownerDescription(owner: DayOwner): string {
   return OWNER_DESCRIPTIONS[owner];
 }
 
-export function selectEssentialItems<T extends DayPlanItem>(
+/** The active Today items in committed order, limited to the configured focus slots. */
+export function focusBandItems<T extends DayPlanItem>(
   items: readonly T[],
-  maximum = 3,
+  focusCount: number,
 ): T[] {
-  const limit = Math.max(0, maximum);
-  const isExplicitArrivalAddition = (item: T) =>
-    item.sourceRefs?.some((source) => source.sourceType === 'decision') &&
-    item.rankReasons?.includes('accepted_today');
-  const essentialIds = new Set(
-    items
-      .filter((item) => !isExplicitArrivalAddition(item))
-      .slice(0, limit)
-      .map((item) => item.id),
-  );
-  return items.filter(
-    (item) => essentialIds.has(item.id) || isExplicitArrivalAddition(item),
-  );
+  const finiteFocusCount = Number.isFinite(focusCount) ? focusCount : 3;
+  return [...items]
+    .filter(
+      (item) =>
+        item.decision === 'preselected' ||
+        item.decision === 'accepted',
+    )
+    .sort((left, right) => left.position - right.position)
+    .slice(0, Math.max(1, Math.min(3, finiteFocusCount)));
+}
+
+export function canStartDayPlanSettlement(plan: DayPlan): boolean {
+  if (plan.state === 'active') return true;
+  if (plan.state === 'settling' && plan.settlementState === 'in_progress') return true;
+  return plan.state === 'proposed' &&
+    (plan.arrivalState === 'bypassed' ||
+      plan.arrivalState === 'skipped' ||
+      plan.arrivalState === 'snoozed');
 }
 
 export function reorderDayPlanItems<T extends DayPlanItem>(
@@ -383,11 +418,18 @@ export function shouldShowNeedsSetupToStart(input: {
     !input.taskDone;
 }
 
-export function startDayReceiptCopy(startingCount: number, alreadyInMotionCount: number): string {
+export function startDayReceiptCopy(
+  startingCount: number,
+  alreadyInMotionCount: number,
+  failedTitles: readonly string[] = [],
+): string {
   const starting = `Claude is starting on ${startingCount} ${startingCount === 1 ? 'item' : 'items'}.`;
-  return alreadyInMotionCount > 0
+  const base = alreadyInMotionCount > 0
     ? `${starting} ${alreadyInMotionCount} already in motion.`
     : starting;
+  return failedTitles.length > 0
+    ? `${base} Could not start: ${failedTitles.join(', ')}.`
+    : base;
 }
 
 export function executionRestartLabel(status: DayPlanExecutionRunStatus): 'Retry' | 'Restart' {
@@ -633,19 +675,4 @@ export function shouldAttemptLateBriefAttach(input: {
   // waits for fresh candidates, preserving the evidence boundary for tasks.
   if (!input.hasConsumedBrief && input.generationState === 'succeeded') return true;
   return input.candidatesReady && input.candidateCount > 0;
-}
-
-export type ArrivalEscapeDecision =
-  | { type: 'collapse'; itemId: string }
-  | { type: 'none' };
-
-// Escape is a pure decision: collapse an expanded card or transient UI if one is open,
-// otherwise do nothing. It never bypasses or closes the ritual.
-export function resolveArrivalEscape(input: {
-  dragging: boolean;
-  expandedItemId?: string | null;
-}): ArrivalEscapeDecision {
-  if (input.dragging) return { type: 'none' };
-  if (input.expandedItemId) return { type: 'collapse', itemId: input.expandedItemId };
-  return { type: 'none' };
 }

@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { runEmailTriage } from "../scripts/cove-email-runner.ts";
+import {
+  emailTriageAttentionMessage,
+  runEmailTriage,
+} from "../scripts/cove-email-runner.ts";
+import { resolveEmailRuntimePaths } from "../src/lib/email/runtime-paths.ts";
+import { writeSignature } from "../src/lib/email/signature.ts";
 import { openLocalDatabase } from "../src/lib/local/database.ts";
 import { listFailures } from "../src/lib/reliability/failures.ts";
 import { listRecentReceipts } from "../src/lib/reliability/receipts.ts";
@@ -72,6 +77,24 @@ function threadMessage(input) {
   };
 }
 
+test("email triage attention copy names only non-zero plain-language categories", () => {
+  assert.equal(emailTriageAttentionMessage({
+    archiveFailures: 0,
+    jobsFailed: 4,
+    jobsDead: 0,
+  }), "4 background jobs need attention.");
+  assert.equal(emailTriageAttentionMessage({
+    archiveFailures: 1,
+    jobsFailed: 0,
+    jobsDead: 2,
+  }), "1 email could not be archived and 2 background jobs need attention.");
+  assert.equal(emailTriageAttentionMessage({
+    archiveFailures: 0,
+    jobsFailed: 0,
+    jobsDead: 0,
+  }), undefined);
+});
+
 test("top-level Google auth failure is surfaced on Issues before the runner exits", async () => {
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "cove-email-runner-"));
   const dbPath = path.join(dataDir, "cove.db");
@@ -93,6 +116,74 @@ test("top-level Google auth failure is surfaced on Issues before the runner exit
   const failures = listFailures({ dbPath });
   assert.equal(failures.length, 1);
   assert.match(failures[0].message, /Google Workspace was temporarily unavailable/i);
+});
+
+test("runner defaults its database and workspace cache to COVE_DATA_DIR", async (t) => {
+  const dataDir = mkdtempSync(path.join(os.tmpdir(), "cove-email-env-data-"));
+  const previous = {
+    data: process.env.COVE_DATA_DIR,
+    db: process.env.COVE_DB_PATH,
+  };
+  process.env.COVE_DATA_DIR = dataDir;
+  delete process.env.COVE_DB_PATH;
+  t.after(() => {
+    if (previous.data === undefined) delete process.env.COVE_DATA_DIR;
+    else process.env.COVE_DATA_DIR = previous.data;
+    if (previous.db === undefined) delete process.env.COVE_DB_PATH;
+    else process.env.COVE_DB_PATH = previous.db;
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+  workspaceConfig(dataDir);
+  await runEmailTriage({
+    gateway: {
+      getProfile: async () => ({ emailAddress: "alex@example.com" }),
+      ensureCoveLabel: async () => ({ id: "label-cove", name: "Cove/Triaged" }),
+      listMessages: async () => ({ messages: [] }),
+    },
+    now: () => new Date("2026-08-05T18:00:00Z"),
+  });
+  assert.equal(existsSync(path.join(dataDir, "cove.db")), true);
+});
+
+test("email runtime paths use repo data when no options or environment are set", () => {
+  assert.deepEqual(resolveEmailRuntimePaths({
+    repoDir: "/opt/cove",
+    env: {},
+  }), {
+    dataDir: "/opt/cove/data",
+    dbPath: "/opt/cove/data/cove.db",
+  });
+});
+
+test("runner warns once when the cached Gmail signature is over 30 days old", async (t) => {
+  const dataDir = mkdtempSync(path.join(os.tmpdir(), "cove-email-stale-signature-"));
+  t.after(() => rmSync(dataDir, { recursive: true, force: true }));
+  const dbPath = path.join(dataDir, "cove.db");
+  workspaceConfig(dataDir);
+  writeSignature({
+    dataDir,
+    html: '<div class="gmail_signature">Alex</div>',
+    metadata: {
+      sendAsEmail: "alex@example.com",
+      fetchedAt: "2026-06-01T00:00:00.000Z",
+      sourceMessageId: "sent-old-signature",
+    },
+  });
+  const warnings = [];
+  await runEmailTriage({
+    dataDir,
+    dbPath,
+    warn: (message) => warnings.push(message),
+    gateway: {
+      getProfile: async () => ({ emailAddress: "alex@example.com" }),
+      ensureCoveLabel: async () => ({ id: "label-cove", name: "Cove/Triaged" }),
+      listMessages: async () => ({ messages: [] }),
+    },
+    now: () => new Date("2026-08-05T18:00:00Z"),
+  });
+  assert.deepEqual(warnings, [
+    "Cove email signature cache is over 30 days old. Run `npm run email:signature-sync` to refresh it.",
+  ]);
 });
 
 test("inbox discovery excludes Cove and pre-rename Forge triage markers", async (t) => {

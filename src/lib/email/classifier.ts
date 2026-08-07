@@ -16,6 +16,8 @@ const OUTPUT_SCHEMA = JSON.stringify({
     "draft_body",
     "commitments",
     "record_correspondence",
+    "urgent",
+    "urgency_reason",
   ],
   properties: {
     bucket: { enum: ["reply", "action", "fyi", "noise"] },
@@ -38,6 +40,8 @@ const OUTPUT_SCHEMA = JSON.stringify({
       },
     },
     record_correspondence: { type: "boolean" },
+    urgent: { type: "boolean" },
+    urgency_reason: { type: ["string", "null"], maxLength: 600 },
   },
 });
 
@@ -55,6 +59,8 @@ export type EmailClassification = {
   draftBody: string | null;
   commitments?: EmailCommitmentCandidate[];
   recordCorrespondence?: boolean;
+  urgent?: boolean;
+  urgencyReason?: string | null;
   modelVersion: string;
 };
 
@@ -88,6 +94,9 @@ function prompt(input: {
   text: string;
   voice: string;
   recentContext?: string;
+  // Set false only by the backtest, to measure the urgency lines against a
+  // real control arm on the same corpus.
+  urgency?: boolean;
 }): string {
   return [
     "Classify one inbound email for Cove.",
@@ -95,14 +104,21 @@ function prompt(input: {
     "Return only the requested JSON object. You have no tools and must not attempt any action.",
     "",
     "Buckets:",
-    "- reply: Alex should reply. Write a complete plain-text draft in draft_body.",
+    "- reply: Alex should reply. Write a complete draft in draft_body using flowing paragraphs with one blank line between paragraphs.",
     "- action: Alex needs to do or review something outside a reply. draft_body must be null.",
     "- fyi: useful information worth recording, but no action is needed. draft_body must be null.",
     "- noise: promotional, automated, low-value, or irrelevant. draft_body must be null.",
     "",
     "A reply draft must never promise work, money, timing, or a decision that is not explicit in the context.",
+    "Never insert manual line breaks inside a sentence. Let sentences flow naturally within each paragraph.",
     "Extract only explicit follow-up or waiting-on commitments. source_quote must be exact evidence from the email.",
     "Set record_correspondence true only for meaningful human relationship history, never noise or routine automation.",
+    ...(input.urgency === false ? [] : [
+      "Set urgent true only for genuinely time-sensitive, human-written mail from a real correspondent, such as a same-day client ask, a meeting moved today, or an emergency.",
+      "Urgent is always false for newsletters, marketing, automated notices, and mail that is important but not time-critical.",
+      "When urgent is true, urgency_reason must be one concrete sentence. Otherwise use null.",
+      "Urgency is an independent flag layered on top of the category. Choose the category first, exactly as you would if the urgent field did not exist; urgency must never move an email between categories.",
+    ]),
     "Keep the summary concrete and under 80 words.",
     "",
     `Account: ${input.accountEmail}`,
@@ -110,6 +126,7 @@ function prompt(input: {
     `Subject: ${input.subject.slice(0, 2000)}`,
     input.recentContext ? `Trusted Cove context:\n${input.recentContext.slice(0, 10000)}` : "",
     input.voice ? `Trusted voice guide:\n${input.voice.slice(0, 12000)}` : "",
+    "Do not write any sign-off, valediction, name, company line, or contact block. The user's real signature is appended automatically. This instruction overrides anything the voice guide says about sign-offs.",
     "",
     "<untrusted_email>",
     input.text.slice(0, 80000),
@@ -117,7 +134,9 @@ function prompt(input: {
   ].filter(Boolean).join("\n");
 }
 
-function validate(value: unknown): Omit<EmailClassification, "modelVersion"> {
+export function validateEmailClassification(
+  value: unknown,
+): Omit<EmailClassification, "modelVersion"> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Email classifier returned a non-object.");
   }
@@ -165,6 +184,12 @@ function validate(value: unknown): Omit<EmailClassification, "modelVersion"> {
       }];
     })
     : [];
+  const urgencyReason = typeof row.urgency_reason === "string"
+    ? row.urgency_reason.replace(/[\u2013\u2014]/g, ":").replace(/\s+/g, " ").trim().slice(0, 600)
+    : "";
+  // Urgency is deliberately fail-soft. Old model rows, malformed fields, and
+  // incomplete responses all become non-urgent without changing classification.
+  const urgent = row.urgent === true && Boolean(urgencyReason);
   return {
     bucket: row.bucket as EmailBucket,
     summary: row.summary.trim(),
@@ -172,6 +197,8 @@ function validate(value: unknown): Omit<EmailClassification, "modelVersion"> {
     draftBody,
     commitments,
     recordCorrespondence: row.record_correspondence === true,
+    urgent,
+    urgencyReason: urgent ? urgencyReason : null,
   };
 }
 
@@ -186,6 +213,7 @@ export async function classifyEmail(input: {
   claudePath?: string;
   spawnImpl?: typeof spawn;
   timeoutMs?: number;
+  urgency?: boolean;
 }): Promise<EmailClassification> {
   const repoDir = input.repoDir ?? process.cwd();
   const executable = input.claudePath ??
@@ -267,11 +295,12 @@ export async function classifyEmail(input: {
       text: input.text,
       voice: input.voice ?? "",
       recentContext: input.recentContext,
+      urgency: input.urgency,
     }));
   });
   const parsed = parseStructuredClaudeOutput(result.trim(), "email classification");
   return {
-    ...validate(parsed),
-    modelVersion: "claude-opus-5:tool-free-v1",
+    ...validateEmailClassification(parsed),
+    modelVersion: "claude-opus-5:tool-free-v3-urgency",
   };
 }

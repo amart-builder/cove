@@ -1,9 +1,15 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { getRuntimeMode, type RuntimeMode } from '@/lib/runtime/mode';
+import {
+  TASK_WORKSPACE_VIEW_EVENT,
+  announceTaskWorkspaceView,
+  requestedTaskWorkspaceView,
+  type TaskWorkspaceView,
+} from '@/components/tasks/task-workspace-view';
 
 const baseTabs = [
   { name: 'Today', href: '/tasks' },
@@ -25,29 +31,82 @@ export function preferredDarkTheme(
 
 export default function TabNav() {
   const pathname = usePathname();
-  const tabs = tabNavItems(getRuntimeMode());
-  const [dark, setDark] = useState(
-    () => typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
+  const runtimeMode = getRuntimeMode();
+  const tabs = tabNavItems(runtimeMode);
+  const quietCurrentAvailable = runtimeMode !== 'convex';
+  // Must start false so the server and the first client render agree; reading
+  // the theme here instead would fail hydration for anyone in dark mode. The
+  // pre-paint script in the root layout owns the <html> class, and the icons
+  // below follow it through CSS, so this state only drives the label and toggle.
+  const [dark, setDark] = useState(false);
+  const [taskView, setTaskView] = useState<TaskWorkspaceView>(
+    quietCurrentAvailable ? 'today' : 'all-work',
   );
+  const [visible, setVisible] = useState(true);
+  const navRef = useRef<HTMLElement>(null);
+  const hideTimerRef = useRef<number | undefined>(undefined);
 
-  // Hydration can rewrite the <html> class the pre-paint script added, so
-  // re-apply the stored preference once after mount.
-  useEffect(() => {
-    let wantDark: boolean;
-    try {
-      const stored = localStorage.getItem('theme');
-      wantDark = preferredDarkTheme(
-        stored,
-        matchMedia('(prefers-color-scheme: dark)').matches,
-      );
-    } catch {
-      return;
-    }
-    document.documentElement.classList.toggle('dark', wantDark);
-    // Hydration may replace the pre-paint class, so mirror its repaired state.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setDark(wantDark);
+  const clearHideTimer = useCallback(() => {
+    if (hideTimerRef.current === undefined) return;
+    window.clearTimeout(hideTimerRef.current);
+    hideTimerRef.current = undefined;
   }, []);
+
+  const showBar = useCallback(() => {
+    clearHideTimer();
+    setVisible(true);
+  }, [clearHideTimer]);
+
+  const scheduleHide = useCallback((delay: number) => {
+    clearHideTimer();
+    hideTimerRef.current = window.setTimeout(() => {
+      const nav = navRef.current;
+      if (
+        nav?.contains(document.activeElement) ||
+        nav?.querySelector('details[open], [role="dialog"], [aria-expanded="true"]')
+      ) {
+        hideTimerRef.current = undefined;
+        return;
+      }
+      setVisible(false);
+      hideTimerRef.current = undefined;
+    }, delay);
+  }, [clearHideTimer]);
+
+  useEffect(() => {
+    try {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setDark(preferredDarkTheme(
+        localStorage.getItem('theme'),
+        matchMedia('(prefers-color-scheme: dark)').matches,
+      ));
+    } catch {
+      // localStorage throws in some privacy modes; the light default stands.
+    }
+  }, []);
+
+  useEffect(() => {
+    const requested = requestedTaskWorkspaceView(
+      window.location.search,
+      quietCurrentAvailable,
+    );
+    const update = requested
+      ? window.setTimeout(() => setTaskView(requested), 0)
+      : undefined;
+    const handleView = (event: Event) => {
+      setTaskView((event as CustomEvent<TaskWorkspaceView>).detail);
+    };
+    window.addEventListener(TASK_WORKSPACE_VIEW_EVENT, handleView);
+    return () => {
+      if (update !== undefined) window.clearTimeout(update);
+      window.removeEventListener(TASK_WORKSPACE_VIEW_EVENT, handleView);
+    };
+  }, [quietCurrentAvailable]);
+
+  useEffect(() => {
+    scheduleHide(2500);
+    return clearHideTimer;
+  }, [clearHideTimer, scheduleHide]);
 
   function toggleTheme() {
     const next = !dark;
@@ -57,8 +116,28 @@ export default function TabNav() {
   }
 
   return (
-    <nav className="quiet-main-nav flex h-12 items-center gap-1 border-b px-4 sm:px-6" aria-label="Main navigation">
-      <span className="mr-4 flex items-center gap-2 text-sm font-semibold tracking-[-0.02em] text-foreground sm:mr-7">
+    <>
+    <div
+      className="fixed inset-x-0 top-0 z-[129] h-6"
+      aria-hidden="true"
+      onMouseEnter={showBar}
+      onMouseLeave={() => scheduleHide(700)}
+    />
+    <nav
+      ref={navRef}
+      className={`quiet-main-nav fixed inset-x-0 top-0 z-[130] grid h-12 grid-cols-[1fr_auto_1fr] items-center border-b px-4 transition-[translate,opacity] duration-[350ms] ease-[cubic-bezier(.22,.8,.25,1)] motion-reduce:translate-none motion-reduce:duration-150 sm:px-6 ${
+        visible ? 'translate-y-0 opacity-100' : 'pointer-events-none -translate-y-full opacity-0'
+      }`}
+      aria-label="Main navigation"
+      onMouseEnter={showBar}
+      onMouseLeave={() => scheduleHide(700)}
+      onFocusCapture={showBar}
+      onBlurCapture={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) scheduleHide(700);
+      }}
+    >
+      <div className="flex h-full min-w-0 items-center gap-1">
+      <span className="mr-4 flex items-center gap-2 text-[13.5px] font-[650] tracking-[-0.012em] text-foreground sm:mr-7">
         <span className="quiet-cove-mark" aria-hidden="true" />
         Cove
       </span>
@@ -69,7 +148,7 @@ export default function TabNav() {
             <Link
               key={tab.href}
               href={tab.href}
-              className={`relative flex h-full items-center px-3 text-[13px] font-medium transition-colors duration-150 ${
+              className={`relative flex h-full items-center px-3 text-[13.5px] font-medium transition-colors duration-150 ${
                 isActive
                   ? 'text-foreground'
                   : 'text-muted-foreground hover:text-foreground'
@@ -84,7 +163,33 @@ export default function TabNav() {
           );
         })}
       </div>
-      <div className="ml-auto flex items-center gap-2">
+      </div>
+      {pathname.startsWith('/tasks') ? (
+        <div
+          className="quiet-segmented-control flex items-center rounded-full p-1"
+          role="group"
+          aria-label="Task view"
+        >
+          <button
+            type="button"
+            aria-pressed={taskView === 'today'}
+            disabled={!quietCurrentAvailable}
+            onClick={() => announceTaskWorkspaceView('today')}
+            className={`quiet-segment ${taskView === 'today' ? 'is-active' : ''}`}
+          >
+            Today
+          </button>
+          <button
+            type="button"
+            aria-pressed={taskView === 'all-work'}
+            onClick={() => announceTaskWorkspaceView('all-work')}
+            className={`quiet-segment ${taskView === 'all-work' ? 'is-active' : ''}`}
+          >
+            All Work
+          </button>
+        </div>
+      ) : <span />}
+      <div className="ml-auto flex items-center gap-2 justify-self-end">
         <Link
           href="/guide"
           className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
@@ -101,25 +206,25 @@ export default function TabNav() {
           className="w-7 h-7 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors duration-150"
           aria-label={dark ? 'Switch to light mode' : 'Switch to dark mode'}
         >
-          {dark ? (
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="5" />
-              <line x1="12" y1="1" x2="12" y2="3" />
-              <line x1="12" y1="21" x2="12" y2="23" />
-              <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
-              <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
-              <line x1="1" y1="12" x2="3" y2="12" />
-              <line x1="21" y1="12" x2="23" y2="12" />
-              <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
-              <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
-            </svg>
-          ) : (
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-            </svg>
-          )}
+          {/* Both icons always render and CSS picks one, so the markup never
+              depends on a theme the server cannot know. */}
+          <svg className="hidden dark:block" aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="5" />
+            <line x1="12" y1="1" x2="12" y2="3" />
+            <line x1="12" y1="21" x2="12" y2="23" />
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+            <line x1="1" y1="12" x2="3" y2="12" />
+            <line x1="21" y1="12" x2="23" y2="12" />
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+          </svg>
+          <svg className="block dark:hidden" aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+          </svg>
         </button>
       </div>
     </nav>
+    </>
   );
 }

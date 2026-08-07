@@ -25,7 +25,7 @@ interface DayRitualLayerProps {
   announcement?: string;
   initialFocusRef?: RefObject<HTMLElement | null>;
   inertTargetRef?: RefObject<HTMLElement | null>;
-  width?: 'default' | 'wide';
+  width?: 'default' | 'wide' | 'canvas';
   onEscape: () => void;
   children: ReactNode;
 }
@@ -67,6 +67,15 @@ export default function DayRitualLayer({
       }
       if (event.key !== 'Tab') return;
 
+      const activeElement = document.activeElement;
+      const eventTarget = event.target instanceof Element ? event.target : null;
+      if (
+        (activeElement instanceof Element && activeElement.closest('[data-buddy-root]')) ||
+        eventTarget?.closest('[data-buddy-root]')
+      ) {
+        return;
+      }
+
       const focusable = Array.from(
         dialogRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR) ?? [],
       ).filter(
@@ -85,7 +94,6 @@ export default function DayRitualLayer({
 
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
-      const activeElement = document.activeElement;
       const focusIsOutside = !dialogRef.current?.contains(activeElement);
       if (
         event.shiftKey &&
@@ -110,8 +118,13 @@ export default function DayRitualLayer({
 
   return (
     <div
-      className="absolute inset-0 z-[100] overflow-y-auto overscroll-contain bg-background/70 p-3 backdrop-blur-md sm:p-6"
+      className={`fixed inset-0 z-[140] overscroll-contain bg-background/70 backdrop-blur-md ${
+        width === 'canvas'
+          ? 'flex min-h-0 flex-col overflow-hidden p-2 sm:p-3'
+          : 'overflow-y-auto p-3 sm:p-6'
+      }`}
       data-day-ritual-layer
+      data-day-ritual-width={width}
     >
       <section
         ref={dialogRef}
@@ -120,8 +133,12 @@ export default function DayRitualLayer({
         aria-labelledby={labelledBy}
         aria-describedby={describedBy}
         tabIndex={-1}
-        className={`mx-auto flex min-h-full w-full flex-col justify-center outline-none ${
-          width === 'wide' ? 'max-w-7xl' : 'max-w-3xl'
+        className={`mx-auto flex flex-col justify-center outline-none ${
+          width === 'canvas'
+            ? 'h-full min-h-0 w-[min(100rem,calc(100vw-3rem))] max-w-none flex-1'
+            : width === 'wide'
+              ? 'min-h-full w-full max-w-7xl'
+              : 'min-h-full w-full max-w-3xl'
         }`}
       >
         {children}
@@ -141,6 +158,7 @@ interface DayRitualContentSwapProps {
   // Element id of the incoming view's heading (tabIndex={-1}); focused on swap so the
   // dialog's name, Escape routing, and the focus trap all follow the new view at once.
   focusTargetId?: string;
+  fillAvailable?: boolean;
   children: ReactNode;
 }
 
@@ -157,6 +175,7 @@ type RitualSnapshot = { key: string; content: ReactNode };
 export function DayRitualContentSwap({
   viewKey,
   focusTargetId,
+  fillAvailable = false,
   children,
 }: DayRitualContentSwapProps) {
   // Mirror of the last committed view, held in a ref so parent re-renders while a
@@ -193,8 +212,11 @@ export function DayRitualContentSwap({
   }, [outgoing]);
 
   return (
-    <div className="day-ritual-swap">
-      <div key={viewKey} className="day-ritual-swap-in">
+    <div className={`day-ritual-swap ${fillAvailable ? 'flex min-h-0 flex-1 flex-col' : ''}`}>
+      <div
+        key={viewKey}
+        className={`day-ritual-swap-in ${fillAvailable ? 'flex min-h-0 flex-1 flex-col justify-center' : ''}`}
+      >
         {children}
       </div>
       {outgoing && (

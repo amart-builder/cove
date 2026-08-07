@@ -53,5 +53,11 @@ next-env.d.ts
 
 # on-device voice transcription environment (large; installed per-machine)
 /.venv-voice/
+
+# two-day simulation harness (local verification only)
+/.sim-two-days/
 .gbrain-source
 /supabase/
+
+# Graphify tool output cache
+/graphify-out/

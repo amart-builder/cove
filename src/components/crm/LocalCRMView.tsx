@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   listContacts,
   listCompanies,
@@ -69,6 +69,8 @@ const ACTIVITY_TYPES: Array<{ value: string; label: string }> = [
   { value: 'email', label: 'Email' },
 ];
 
+type EditableContactField = 'notes' | 'location' | 'howWeMet' | 'tier' | 'tags';
+
 export default function LocalCRMView() {
   const [contacts, setContacts] = useState<Contact[] | null>(null);
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -76,6 +78,7 @@ export default function LocalCRMView() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [showAddForm, setShowAddForm] = useState(false);
+  const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
 
   const load = useCallback(async (query = '') => {
     try {
@@ -138,23 +141,28 @@ export default function LocalCRMView() {
     setContacts((cur) => (cur ? [...cur, contact] : [contact]));
     if (newCompany) setCompanies((cur) => [...cur, newCompany]);
     setSelectedId(contact.id);
+    setMobileDetailOpen(true);
     setShowAddForm(false);
   }
 
   function handleContactDeleted(id: string) {
     setContacts((cur) => (cur ? cur.filter((c) => c.id !== id) : cur));
-    if (selectedId === id) setSelectedId(null);
+    if (selectedId === id) {
+      setSelectedId(null);
+      setMobileDetailOpen(false);
+    }
   }
 
   if (error) {
     return (
       <div className="water-workspace flex h-full items-center justify-center p-6">
-        <div className="water-empty-state max-w-lg p-5 text-sm">
-          <p className="font-medium text-foreground">People could not load.</p>
-          <p className="mt-1 text-muted-foreground">{error}</p>
+        <div className="water-empty-state max-w-lg p-6">
+          <p className="water-eyebrow">Relationships</p>
+          <h1 className="water-workspace-title mt-2">People could not load.</h1>
+          <p className="mt-2 text-[13.5px] leading-[1.55] text-muted-foreground">{error}</p>
           <button
             onClick={() => void load(search)}
-            className="water-primary-button mt-3 px-4 py-1.5"
+            className="water-primary-button mt-4 px-4 py-2"
           >
             Retry
           </button>
@@ -172,15 +180,15 @@ export default function LocalCRMView() {
   }
 
   return (
-    <div className="water-workspace people-surface flex h-full overflow-hidden">
+    <div className={`water-workspace people-surface flex h-full overflow-hidden ${
+      mobileDetailOpen ? 'is-detail-open' : ''
+    }`}>
       {/* Left pane: list */}
-      <section className="water-list-panel flex min-w-0 flex-1 flex-col overflow-hidden">
-        <div className="water-toolbar flex flex-wrap items-center gap-2 border-b px-5 py-2.5 sm:gap-3">
-          <div className="flex items-baseline gap-2 shrink-0">
-            <h1 className="water-workspace-title text-sm">People</h1>
-            <span className="text-xs text-muted-foreground tabular-nums">
-              {contacts.length} {contacts.length === 1 ? 'entry' : 'entries'}
-            </span>
+      <section className="people-list-pane water-list-panel flex min-w-0 flex-1 flex-col overflow-hidden">
+        <div className="water-toolbar people-toolbar flex flex-wrap items-center gap-3 border-b px-5 pb-4 pt-[64px]">
+          <div className="shrink-0">
+            <p className="water-eyebrow">Relationships</p>
+            <h1 className="water-workspace-title mt-1">People</h1>
           </div>
 
           <div className="relative min-w-[180px] max-w-[280px] flex-1">
@@ -199,16 +207,19 @@ export default function LocalCRMView() {
               placeholder="Search name, company, email, tags..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="water-control w-full py-1.5 pl-8 pr-3 text-xs placeholder:text-muted-foreground"
+              className="water-control w-full py-2 pl-8 pr-3 text-[13.5px] placeholder:text-muted-foreground"
             />
           </div>
 
           <button
             onClick={() => setShowAddForm((v) => !v)}
-            className="water-primary-button ml-auto shrink-0 px-4 py-1.5"
+            className="water-primary-button ml-auto shrink-0 px-4 py-2"
           >
             + Add contact
           </button>
+          <p className="w-full text-[12px] font-medium text-muted-foreground tabular-nums">
+            {contacts.length} {contacts.length === 1 ? 'person' : 'people'}
+          </p>
         </div>
 
         {showAddForm && (
@@ -233,14 +244,17 @@ export default function LocalCRMView() {
                 return (
                   <li key={contact.id}>
                     <button
-                      onClick={() => setSelectedId(contact.id)}
-                      className={`water-list-row flex w-full items-center gap-3 border-b px-5 py-3 text-left ${
+                      onClick={() => {
+                        setSelectedId(contact.id);
+                        setMobileDetailOpen(true);
+                      }}
+                      className={`water-list-row flex min-h-[56px] w-full items-center gap-3 border-b px-5 py-2.5 text-left ${
                         active ? 'is-active' : ''
                       }`}
                     >
                       <div className="min-w-0 flex-1">
                         <div className="flex items-baseline gap-2">
-                          <span className="truncate text-[13px] font-medium text-foreground">
+                          <span className="truncate text-[13.5px] font-medium text-foreground">
                             {contact.name}
                           </span>
                           {companyName(contact) && (
@@ -249,20 +263,8 @@ export default function LocalCRMView() {
                             </span>
                           )}
                         </div>
-                        {contact.tags.length > 0 && (
-                          <div className="mt-1 flex flex-wrap gap-1">
-                            {contact.tags.slice(0, 4).map((tag) => (
-                              <span
-                                key={tag}
-                                className="water-pill px-2 py-0.5"
-                              >
-                                {tag}
-                              </span>
-                            ))}
-                          </div>
-                        )}
                       </div>
-                      <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+                      <span className="shrink-0 text-[12px] font-medium text-muted-foreground tabular-nums">
                         {relativeDate(contact.last_interaction_at)}
                       </span>
                     </button>
@@ -275,7 +277,7 @@ export default function LocalCRMView() {
       </section>
 
       {/* Right pane: detail */}
-      <aside className="water-detail-shell w-[400px] shrink-0 overflow-y-auto max-lg:w-[340px]">
+      <aside className="people-detail-pane water-detail-shell w-[400px] shrink-0 overflow-y-auto max-lg:w-[340px]">
         {selectedContact ? (
           <ContactDetailPanel
             key={selectedContact.id}
@@ -295,7 +297,10 @@ export default function LocalCRMView() {
               await deleteContact(selectedContact.id);
               handleContactDeleted(selectedContact.id);
             }}
-            onClose={() => setSelectedId(null)}
+            onClose={() => {
+              setSelectedId(null);
+              setMobileDetailOpen(false);
+            }}
           />
         ) : (
           <div className="flex h-full items-center justify-center p-6 text-center">
@@ -380,7 +385,7 @@ function AddContactForm({
             }}
             placeholder="Full name"
             autoFocus
-            className={`w-full rounded-md border bg-card px-2.5 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-accent-blue/40 ${
+            className={`w-full px-2.5 py-1.5 text-foreground ${
               formError && !name.trim() ? 'border-accent-red' : ''
             }`}
           />
@@ -392,7 +397,7 @@ function AddContactForm({
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             placeholder="Email"
-            className="w-full rounded-md border bg-card px-2.5 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-accent-blue/40"
+            className="w-full px-2.5 py-1.5 text-foreground"
           />
         </div>
         <div>
@@ -402,7 +407,7 @@ function AddContactForm({
             value={role}
             onChange={(e) => setRole(e.target.value)}
             placeholder="Role"
-            className="w-full rounded-md border bg-card px-2.5 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-accent-blue/40"
+            className="w-full px-2.5 py-1.5 text-foreground"
           />
         </div>
         <div>
@@ -412,7 +417,7 @@ function AddContactForm({
             value={phone}
             onChange={(e) => setPhone(e.target.value)}
             placeholder="Phone"
-            className="w-full rounded-md border bg-card px-2.5 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-accent-blue/40"
+            className="w-full px-2.5 py-1.5 text-foreground"
           />
         </div>
         <div>
@@ -420,7 +425,7 @@ function AddContactForm({
           <select
             value={companyId}
             onChange={(e) => setCompanyId(e.target.value)}
-            className="w-full rounded-md border bg-card px-2.5 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-accent-blue/40"
+            className="w-full px-2.5 py-1.5 text-foreground"
           >
             <option value="">No company</option>
             {companies.map((c) => (
@@ -441,14 +446,14 @@ function AddContactForm({
               value={newCompanyName}
               onChange={(e) => setNewCompanyName(e.target.value)}
               placeholder="Company name"
-              className="w-full rounded-md border bg-card px-2.5 py-1.5 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-accent-blue/40"
+              className="w-full px-2.5 py-1.5 text-foreground"
             />
           </div>
         )}
       </div>
 
       {formError && (
-        <div className="text-[11px] text-accent-red">{formError}</div>
+        <div className="text-[12px] font-medium text-accent-red">{formError}</div>
       )}
 
       <div className="flex gap-1.5">
@@ -491,35 +496,91 @@ function ContactDetailPanel({
   const [tier, setTier] = useState(contact.tier ?? 'C');
   const [tagsStr, setTagsStr] = useState(contact.tags.join(', '));
   const [saveError, setSaveError] = useState<string>();
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const latestSaveRequestId = useRef(0);
+  const dirtyVersionByField = useRef<Record<EditableContactField, number>>({
+    notes: 0,
+    location: 0,
+    howWeMet: 0,
+    tier: 0,
+    tags: 0,
+  });
+  const saveStatusField = useRef<EditableContactField | undefined>(undefined);
+  const savedStatusTimer = useRef<number | undefined>(undefined);
 
-  async function saveField(patch: Partial<Contact>) {
+  useEffect(() => {
+    return () => {
+      if (savedStatusTimer.current !== undefined) {
+        window.clearTimeout(savedStatusTimer.current);
+      }
+    };
+  }, []);
+
+  function clearSavedStatusTimer() {
+    if (savedStatusTimer.current === undefined) return;
+    window.clearTimeout(savedStatusTimer.current);
+    savedStatusTimer.current = undefined;
+  }
+
+  function markDraftDirty(field: EditableContactField) {
+    dirtyVersionByField.current[field] += 1;
+    if (saveStatus === 'saved' && saveStatusField.current === field) {
+      clearSavedStatusTimer();
+      saveStatusField.current = undefined;
+      setSaveStatus('idle');
+    }
+  }
+
+  async function saveField(field: EditableContactField, patch: Partial<Contact>) {
+    const requestId = ++latestSaveRequestId.current;
+    const dirtyVersionAtStart = dirtyVersionByField.current[field];
+    clearSavedStatusTimer();
+    saveStatusField.current = field;
     try {
       setSaveError(undefined);
+      setSaveStatus('saving');
       await onSaveContact(patch);
+      if (requestId !== latestSaveRequestId.current) return;
+      if (dirtyVersionByField.current[field] !== dirtyVersionAtStart) {
+        saveStatusField.current = undefined;
+        setSaveStatus('idle');
+        return;
+      }
+      setSaveStatus('saved');
+      savedStatusTimer.current = window.setTimeout(() => {
+        if (requestId !== latestSaveRequestId.current) return;
+        saveStatusField.current = undefined;
+        setSaveStatus('idle');
+        savedStatusTimer.current = undefined;
+      }, 3000);
     } catch (err) {
+      if (requestId !== latestSaveRequestId.current) return;
+      saveStatusField.current = undefined;
+      setSaveStatus('idle');
       setSaveError(err instanceof Error ? err.message : String(err));
     }
   }
 
   function commitNotes() {
     if (notes === (contact.notes ?? '')) return;
-    void saveField({ notes });
+    void saveField('notes', { notes });
   }
 
   function commitLocation() {
     if (location === (contact.location ?? '')) return;
-    void saveField({ location: location || null });
+    void saveField('location', { location: location || null });
   }
 
   function commitHowWeMet() {
     if (howWeMet === (contact.how_we_met ?? '')) return;
-    void saveField({ how_we_met: howWeMet || null });
+    void saveField('howWeMet', { how_we_met: howWeMet || null });
   }
 
   function commitTier(next: string) {
     setTier(next);
     if (next === contact.tier) return;
-    void saveField({ tier: next });
+    markDraftDirty('tier');
+    void saveField('tier', { tier: next });
   }
 
   function commitTags() {
@@ -532,7 +593,7 @@ function ContactDetailPanel({
       ),
     );
     if (parsed.join(',') === contact.tags.join(',')) return;
-    void saveField({ tags: parsed });
+    void saveField('tags', { tags: parsed });
   }
 
   async function handleDelete() {
@@ -547,12 +608,25 @@ function ContactDetailPanel({
 
   return (
     <div className="water-detail-panel flex flex-col">
-      <div className="water-detail-heading flex items-start justify-between border-b px-5 py-4">
-        <div className="min-w-0">
-          <h2 className="truncate text-base">
-            {contact.name}
-          </h2>
-          <p className="mt-0.5 text-[13px] text-muted-foreground">
+      <div className="water-detail-heading border-b px-5 pb-4 pt-[64px]">
+        <button
+          type="button"
+          onClick={onClose}
+          className="people-mobile-back water-text-button mb-3 items-center gap-1 px-0 py-1"
+        >
+          <span aria-hidden="true">←</span> Back
+        </button>
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+          <div className="flex items-center gap-3">
+            <h2 className="truncate text-[21px] font-[650] tracking-[-0.018em]">
+              {contact.name}
+            </h2>
+            <span className="text-[12px] font-medium text-muted-foreground" role="status" aria-live="polite">
+              {saveStatus === 'idle' ? '' : saveStatus === 'saving' ? 'Saving...' : 'Saved'}
+            </span>
+          </div>
+          <p className="mt-0.5 text-[13.5px] leading-[1.55] text-muted-foreground">
             {[contact.role, companyName].filter(Boolean).join(' at ') ||
               'No role set'}
           </p>
@@ -584,14 +658,15 @@ function ContactDetailPanel({
               </a>
             )}
           </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="water-secondary-button flex h-8 w-8 shrink-0 items-center justify-center text-lg leading-none"
+            aria-label="Close details"
+          >
+            &times;
+          </button>
         </div>
-        <button
-          onClick={onClose}
-          className="water-secondary-button flex h-7 w-7 items-center justify-center text-lg leading-none"
-          aria-label="Close details"
-        >
-          &times;
-        </button>
       </div>
 
       {saveError && (
@@ -607,11 +682,14 @@ function ContactDetailPanel({
           </label>
           <textarea
             value={notes}
-            onChange={(e) => setNotes(e.target.value)}
+            onChange={(e) => {
+              setNotes(e.target.value);
+              markDraftDirty('notes');
+            }}
             onBlur={commitNotes}
             rows={4}
             placeholder="What should you remember about this person?"
-            className="w-full resize-y rounded-md border bg-background px-2.5 py-2 text-sm text-foreground outline-none focus:ring-1 focus:ring-accent-blue/40"
+            className="w-full resize-y px-2.5 py-2 text-foreground"
           />
         </div>
 
@@ -623,7 +701,7 @@ function ContactDetailPanel({
             <select
               value={tier}
               onChange={(e) => commitTier(e.target.value)}
-              className="w-full rounded-md border bg-background px-2.5 py-2 text-sm text-foreground outline-none focus:ring-1 focus:ring-accent-blue/40"
+              className="w-full px-2.5 py-2 text-foreground"
             >
               <option value="A">Tier A</option>
               <option value="B">Tier B</option>
@@ -637,10 +715,13 @@ function ContactDetailPanel({
             <input
               type="text"
               value={location}
-              onChange={(e) => setLocation(e.target.value)}
+              onChange={(e) => {
+                setLocation(e.target.value);
+                markDraftDirty('location');
+              }}
               onBlur={commitLocation}
               placeholder="City, region"
-              className="w-full rounded-md border bg-background px-2.5 py-2 text-sm text-foreground outline-none focus:ring-1 focus:ring-accent-blue/40"
+              className="w-full px-2.5 py-2 text-foreground"
             />
           </div>
         </div>
@@ -652,10 +733,13 @@ function ContactDetailPanel({
           <input
             type="text"
             value={howWeMet}
-            onChange={(e) => setHowWeMet(e.target.value)}
+            onChange={(e) => {
+              setHowWeMet(e.target.value);
+              markDraftDirty('howWeMet');
+            }}
             onBlur={commitHowWeMet}
             placeholder="Where the relationship started"
-            className="w-full rounded-md border bg-background px-2.5 py-2 text-sm text-foreground outline-none focus:ring-1 focus:ring-accent-blue/40"
+            className="w-full px-2.5 py-2 text-foreground"
           />
         </div>
 
@@ -666,10 +750,13 @@ function ContactDetailPanel({
           <input
             type="text"
             value={tagsStr}
-            onChange={(e) => setTagsStr(e.target.value)}
+            onChange={(e) => {
+              setTagsStr(e.target.value);
+              markDraftDirty('tags');
+            }}
             onBlur={commitTags}
             placeholder="investor, warm intro, roofing"
-            className="w-full rounded-md border bg-background px-2.5 py-2 text-sm text-foreground outline-none focus:ring-1 focus:ring-accent-blue/40"
+            className="w-full px-2.5 py-2 text-foreground"
           />
         </div>
       </div>
@@ -679,7 +766,7 @@ function ContactDetailPanel({
       <div className="flex justify-between border-t px-5 py-3">
         <button
           onClick={() => void handleDelete()}
-          className="text-[11px] text-accent-red hover:underline"
+          className="text-[12px] font-medium text-accent-red hover:underline"
         >
           Delete contact
         </button>
@@ -770,7 +857,7 @@ function ActivityTimeline({
           <select
             value={activityType}
             onChange={(e) => setActivityType(e.target.value)}
-            className="rounded-md border bg-card px-2 py-1.5 text-xs text-foreground outline-none focus:ring-1 focus:ring-accent-blue/40"
+            className="px-2 py-1.5 text-foreground"
           >
             {ACTIVITY_TYPES.map((t) => (
               <option key={t.value} value={t.value}>
@@ -786,7 +873,7 @@ function ActivityTimeline({
               if (error) setError(undefined);
             }}
             placeholder="Title"
-            className="min-w-0 flex-1 rounded-md border bg-card px-2.5 py-1.5 text-sm text-foreground outline-none focus:ring-1 focus:ring-accent-blue/40"
+            className="min-w-0 flex-1 px-2.5 py-1.5 text-foreground"
           />
         </div>
         <textarea
@@ -794,7 +881,7 @@ function ActivityTimeline({
           onChange={(e) => setContent(e.target.value)}
           rows={2}
           placeholder="Details (optional)"
-          className="w-full resize-y rounded-md border bg-card px-2.5 py-1.5 text-sm text-foreground outline-none focus:ring-1 focus:ring-accent-blue/40"
+          className="w-full resize-y px-2.5 py-1.5 text-foreground"
         />
         <div className="flex justify-end">
           <button
@@ -828,10 +915,10 @@ function ActivityTimeline({
               className="water-activity-card border px-3 py-2.5"
             >
               <div className="flex items-baseline justify-between gap-2">
-                <span className="text-[13px] font-medium text-foreground">
+                <span className="text-[13.5px] font-medium text-foreground">
                   {a.title || ACTIVITY_TYPES.find((t) => t.value === a.activity_type)?.label || a.activity_type}
                 </span>
-                <span className="shrink-0 text-[10px] uppercase text-muted-foreground">
+                <span className="shrink-0 text-[10.5px] font-[650] uppercase tracking-[.24em] text-muted-foreground">
                   {a.activity_type}
                 </span>
               </div>
@@ -840,7 +927,7 @@ function ActivityTimeline({
                   {a.content}
                 </p>
               )}
-              <p className="mt-1 text-[10px] text-muted-foreground">
+              <p className="mt-1 text-[12px] font-medium text-muted-foreground">
                 {fullTimestamp(a.created_at)}
               </p>
             </li>

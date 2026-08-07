@@ -77,12 +77,15 @@ const ACTIONS = new Set<DayPlanMutationAction>([
   "item_later",
   "item_dismiss",
   "item_add",
+  "item_complete",
+  "item_reopen",
   "item_owner",
   "item_reorder",
   "start_day",
   "settlement_offer",
   "settlement_skip",
   "settlement_start",
+  "settlement_cancel",
   "settlement_decide",
   "settlement_commit",
 ]);
@@ -138,6 +141,10 @@ export function assertRecurringCarryAllowed(
   }
 }
 const TASK_SUPPORTS = new Set(["commitment", "deadline", "priority"]);
+// The reason a brief-picked backlog task rides into the arrival. The brief is
+// server-written evidence, so a pick is its own eligibility source: an open task
+// with no deadline at all still belongs in the plan once the brief chose it.
+const BRIEF_PICK_WHY_TODAY = "This open task was selected for today's plan.";
 const WHY_TODAY = new Set([
   "This is accepted work already in flight.",
   "This is accepted work already committed for today.",
@@ -145,6 +152,7 @@ const WHY_TODAY = new Set([
   "This accepted commitment has a verified due date today.",
   "This is overdue and still open.",
   "This is due today and still open.",
+  BRIEF_PICK_WHY_TODAY,
 ]);
 const DUE_BACKLOG_WHY_TODAY = new Set([
   "This is overdue and still open.",
@@ -153,6 +161,7 @@ const DUE_BACKLOG_WHY_TODAY = new Set([
 const RANK_REASONS = new Set([
   "accepted_in_flight",
   "accepted_today",
+  "brief_pick_transport",
   "due_backlog",
   "priority_low",
   "priority_medium",
@@ -332,12 +341,20 @@ function candidateValue(value: unknown, index: number): RecommendationCandidate 
   if (
     !rankReasons.includes("accepted_today") &&
     !rankReasons.includes("accepted_in_flight") &&
-    !rankReasons.includes("due_backlog")
+    !rankReasons.includes("due_backlog") &&
+    !rankReasons.includes("brief_pick_transport")
   ) {
     throw new Error("Task candidate rank must preserve its eligibility source.");
   }
+  // Both backlog sources carry an open-work reason, and only they may: a
+  // deadline-driven pick reads as overdue/due today, a brief pick reads as
+  // chosen. Pairing them here keeps either reason from being smuggled onto an
+  // accepted-column candidate, which would launder backlog work into the plan.
+  const backlogSourced =
+    rankReasons.includes("due_backlog") || rankReasons.includes("brief_pick_transport");
   if (
-    rankReasons.includes("due_backlog") !== DUE_BACKLOG_WHY_TODAY.has(whyToday)
+    backlogSourced !==
+    (DUE_BACKLOG_WHY_TODAY.has(whyToday) || whyToday === BRIEF_PICK_WHY_TODAY)
   ) {
     throw new Error("Due-backlog rank must preserve its open deadline reason.");
   }
@@ -488,19 +505,23 @@ export function parseDayPlanPostBody(value: unknown): ParsedPost {
   }
   const owner = stringValue(body.owner, "owner", { max: 20 });
   if (owner && !OWNERS.has(owner as DayPlanOwner)) throw new Error("Unknown owner.");
+  const taskId = stringValue(body.taskId, "taskId", { max: 240 });
+  const taskBackedAdd = action === "item_add" && Boolean(taskId);
   const title = stringValue(body.title, "title", {
-    required: action === "item_add",
+    required: action === "item_add" && !taskBackedAdd,
     max: 240,
   });
   const outcome = stringValue(body.outcome, "outcome", {
-    required: action === "item_add",
+    required: action === "item_add" && !taskBackedAdd,
     max: 1200,
   });
   const why = stringValue(body.why, "why", {
-    required: action === "item_add",
+    required: action === "item_add" && !taskBackedAdd,
     max: 1200,
   });
-  if (action === "item_add" && !owner) throw new Error("owner is required.");
+  if (action === "item_add" && !taskBackedAdd && !owner) {
+    throw new Error("owner is required.");
+  }
   const disposition = stringValue(body.disposition, "disposition", { max: 20 });
   if (disposition && !DISPOSITIONS.has(disposition as SettlementDisposition)) {
     throw new Error("Unknown closing choice.");
@@ -525,6 +546,7 @@ export function parseDayPlanPostBody(value: unknown): ParsedPost {
       mutationId: mutationIdValue(body.mutationId),
       expectedVersion: expectedVersion as number,
       itemId: stringValue(body.itemId, "itemId", { max: 240 }),
+      taskId,
       title,
       outcome,
       definitionOfDone: stringValue(body.definitionOfDone, "definitionOfDone", {

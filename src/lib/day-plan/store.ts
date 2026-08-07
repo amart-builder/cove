@@ -10,6 +10,7 @@ import { getRuntimeMode } from "../runtime/mode";
 import { operatorTimezone } from "../operator";
 import { recordReceiptInDatabase } from "../reliability/receipts";
 import { taskColumnKeyForName } from "../tasks/columns";
+import { DEFAULT_TASK_SETTINGS, readTaskSettings } from "../tasks/settings";
 import {
   applyLocalMigration,
   type LocalMigration,
@@ -76,6 +77,10 @@ import {
   DayPlanNotFound,
   DayPlanVersionConflict,
 } from "./store-errors";
+import {
+  canStartDayPlanSettlement,
+  focusBandItems,
+} from "./presentation";
 
 type Clock = () => Date;
 
@@ -89,6 +94,8 @@ const CONTENT_MUTATION_ACTIONS = new Set<string>([
   "item_later",
   "item_dismiss",
   "item_add",
+  "item_complete",
+  "item_reopen",
   "item_owner",
   "item_reorder",
 ]);
@@ -1119,6 +1126,51 @@ function requireArrivalEditing(plan: DayPlan): void {
   }
 }
 
+function requirePlanOrdering(plan: DayPlan): void {
+  if (
+    (plan.state === "proposed" && plan.arrivalState === "opened") ||
+    plan.state === "active"
+  ) return;
+  throw new DayPlanInvalidTransition(
+    "Today items can change only while arrival is open or the day is active.",
+  );
+}
+
+function activatePlanWithoutKickoff(
+  plan: DayPlan,
+  mutationId: string,
+  changedAt: string,
+  includePending: boolean,
+): DayPlanItem[] {
+  const accepted = [...plan.items]
+    .filter(
+      (item) =>
+        item.decision === "accepted" ||
+        item.decision === "preselected" ||
+        (includePending && item.decision === "pending"),
+    )
+    .sort((left, right) => left.position - right.position);
+  for (const item of accepted) {
+    item.decision = "accepted";
+    item.humanDecisionEventIds = [
+      ...new Set([...item.humanDecisionEventIds, mutationId]),
+    ];
+  }
+  const firstHuman = accepted.find(
+    (item) => item.owner === "me" || item.owner === "together",
+  );
+  const first = firstHuman ?? accepted[0];
+  plan.state = "active";
+  plan.recommendedFirstItemId = first?.id;
+  plan.recommendedFirstTaskId = first?.taskId;
+  plan.confirmedAt = changedAt;
+  return accepted;
+}
+
+function isWeekendAutoSettleMutation(mutationId: string): boolean {
+  return mutationId.startsWith("weekend-auto-settle:");
+}
+
 function requireAssistantEditing(
   plan: DayPlan,
   hasMiddayReplanProof: boolean,
@@ -1171,6 +1223,7 @@ export function createDayPlanStore(options: {
   now?: Clock;
   executionEnvironment?: CoveExecutionEnvironment | (() => CoveExecutionEnvironment);
   resolveProjectDirectory?: (hint: string) => string | null;
+  focusCount?: number | (() => number);
 }) {
   const db = openSqliteDatabase(options.dbPath);
   const now = options.now ?? (() => new Date());
@@ -1179,6 +1232,12 @@ export function createDayPlanStore(options: {
       ? options.executionEnvironment()
       : options.executionEnvironment ?? loadCoveExecutionEnvironment();
   const projectDirectoryResolver = options.resolveProjectDirectory ?? resolveProjectDirectory;
+  const configuredFocusCount = () => {
+    const value = typeof options.focusCount === "function"
+      ? options.focusCount()
+      : options.focusCount ?? 3;
+    return Math.max(1, Math.min(3, value));
+  };
   db.pragma("foreign_keys = ON");
   for (const migration of DAY_PLAN_MIGRATIONS) {
     applyLocalMigration(db, migration, now);
@@ -2645,6 +2704,12 @@ export function createDayPlanStore(options: {
 
   function managedTaskOfflimits(task: ManagedTaskRow | undefined): boolean {
     if (!task || task.status !== "open" || task.recurring_template_id) return true;
+    if (task.column_id) {
+      const column = db.prepare(
+        "SELECT name FROM task_columns WHERE id = ?",
+      ).get(task.column_id) as { name: string } | undefined;
+      if (column && taskColumnKeyForName(column.name) === "done") return true;
+    }
     let tags: string[] = [];
     try {
       const parsed = JSON.parse(task.tags ?? "[]");
@@ -3019,7 +3084,7 @@ export function createDayPlanStore(options: {
         // Deterministic winner on a same-key conflict is the earliest
         // finished_at, and the winner's COMPLETE canonical payload is adopted
         // (an identical input hash does not guarantee identical model output).
-        // The row id is kept so references stay valid — but a brief a plan has
+        // The row id is kept so references stay valid, but a brief a plan has
         // already consumed is pinned: its content must never change under an
         // arrival that was built from it.
         const existingFinished = sameKey.finished_at ?? sameKey.created_at;
@@ -3260,7 +3325,7 @@ export function createDayPlanStore(options: {
           return { plan: attached, snapshot: getSnapshot(attached.id), replayed: false };
         }
         // Attach-only (the 15s late-brief poll): nothing attached, so this is a
-        // deliberate silent no-op — no ledger event and the mutation id stays
+        // deliberate silent no-op with no ledger event, and the mutation id stays
         // unconsumed, so a repeating poll never grows the ledger. Only a real
         // attach above records anything (as its brief_attach event).
         if (input.attachOnly) {
@@ -3647,6 +3712,7 @@ export function createDayPlanStore(options: {
       const executionRuns: DayPlanExecutionRun[] = [];
       const unreadyItems: DayPlanUnreadyItem[] = [];
       const kickoffSkips: DayPlanKickoffSkip[] = [];
+      let settlementOrigin: "active" | "proposed" | undefined;
 
       switch (input.action) {
         case "arrival_open":
@@ -3682,6 +3748,7 @@ export function createDayPlanStore(options: {
           );
           plan.arrivalState = "skipped";
           plan.snoozedUntil = undefined;
+          activatePlanWithoutKickoff(plan, input.mutationId, changedAt, true);
           break;
         case "arrival_bypass":
           requireState(
@@ -3691,6 +3758,9 @@ export function createDayPlanStore(options: {
           );
           plan.arrivalState = "bypassed";
           plan.snoozedUntil = undefined;
+          if (!isWeekendAutoSettleMutation(input.mutationId)) {
+            activatePlanWithoutKickoff(plan, input.mutationId, changedAt, true);
+          }
           break;
         case "arrival_reopen":
           if (plan.state === "proposed") {
@@ -3792,8 +3862,99 @@ export function createDayPlanStore(options: {
           break;
         }
         case "item_add": {
-          requireArrivalEditing(plan);
-          if (plan.items.length >= 10) {
+          requirePlanOrdering(plan);
+          const addedDecision = plan.state === "active" ? "accepted" : "preselected";
+          const activeCount = plan.items.filter(
+            (item) =>
+              item.decision === "pending" ||
+              item.decision === "preselected" ||
+              item.decision === "accepted",
+          ).length;
+          const taskId = cleanOptional(input.taskId);
+          if (taskId) {
+            const existing = plan.items.find((item) => item.taskId === taskId);
+            if (
+              existing &&
+              (existing.decision === "pending" ||
+                existing.decision === "preselected" ||
+                existing.decision === "accepted")
+            ) {
+              throw new DayPlanInvalidTransition("That task is already in Today.");
+            }
+            if (existing?.decision === "completed") {
+              throw new DayPlanInvalidTransition("That task is already complete.");
+            }
+            const task = managedTask(taskId);
+            if (managedTaskOfflimits(task)) {
+              throw new DayPlanInvalidTransition(
+                "That task is not available for today's plan.",
+              );
+            }
+            if (activeCount >= 10) {
+              throw new DayPlanInvalidTransition("Today's plan is full.");
+            }
+            const taskPriority = task!.priority === "high" || task!.priority === "low"
+              ? task!.priority
+              : "medium";
+            const title = task!.title.trim();
+            if (!title) {
+              throw new DayPlanInvalidTransition("That task needs a title.");
+            }
+            const description = task!.description?.trim();
+            const dueAt = task!.due_at ?? task!.due_date ?? undefined;
+            const itemId = existing?.id ?? randomUUID();
+            const hydrated: DayPlanItem = {
+              ...(existing ?? {} as DayPlanItem),
+              id: itemId,
+              candidateId: existing?.candidateId ?? itemId,
+              taskId,
+              outcomeKey: `task:${taskId}`,
+              title,
+              outcome: description || title,
+              definitionOfDone: existing?.definitionOfDone ?? description ?? title,
+              project: task!.project?.trim() || undefined,
+              owner: existing?.owner ?? "me",
+              commitment: "ink",
+              whyToday: existing?.whyToday ?? "Added from Not today.",
+              priority: taskPriority,
+              dueAt,
+              sourceRefs: [{
+                sourceType: "task",
+                recordId: taskId,
+                sourceUpdatedAt: task!.updated_at ?? changedAt,
+                refreshedAt: changedAt,
+                freshness: "current",
+                supports: ["commitment", "priority"],
+              }],
+              newestSourceRefreshAt: changedAt,
+              conflicts: [],
+              humanDecisionEventIds: [
+                ...new Set([...(existing?.humanDecisionEventIds ?? []), input.mutationId]),
+              ],
+              rankReasons: ["accepted_today", `priority_${taskPriority}`],
+              position: activeCount,
+              decision: addedDecision,
+            };
+            const ordered = [...plan.items]
+              .sort((left, right) => left.position - right.position)
+              .filter((item) => item.id !== itemId);
+            const lastActiveIndex = ordered.findLastIndex(
+              (item) =>
+                item.decision === "pending" ||
+                item.decision === "preselected" ||
+                item.decision === "accepted",
+            );
+            const insertIndex = lastActiveIndex >= 0
+              ? lastActiveIndex + 1
+              : ordered.length;
+            ordered.splice(insertIndex, 0, hydrated);
+            ordered.forEach((item, position) => {
+              item.position = position;
+            });
+            plan.items = ordered;
+            break;
+          }
+          if (activeCount >= 10) {
             throw new DayPlanInvalidTransition("Today's plan is full.");
           }
           const title = cleanOptional(input.title);
@@ -3832,8 +3993,149 @@ export function createDayPlanStore(options: {
             humanDecisionEventIds: [input.mutationId],
             rankReasons: ["accepted_today", "priority_high"],
             position: plan.items.length,
-            decision: "preselected",
+            decision: addedDecision,
           });
+          break;
+        }
+        case "item_complete": {
+          requirePlanOrdering(plan);
+          const item = requireItem(plan, input.itemId);
+          requireState(
+            item.decision,
+            ["pending", "preselected", "accepted"],
+            "Only a Today item can be completed.",
+          );
+          item.preCompletionPlanPosition = item.position;
+          const taskBacked = item.sourceRefs.some(
+            (source) => source.sourceType === "task" && source.recordId === item.taskId,
+          );
+          if (taskBacked) {
+            const task = managedTask(item.taskId);
+            if (!task) throw new DayPlanInvalidTransition("The board task no longer exists.");
+            if (task.status !== "done") {
+              if (
+                task.column_id &&
+                typeof task.position === "number" &&
+                Number.isFinite(task.position)
+              ) {
+                item.preCompletionBoardPlacement = {
+                  columnId: task.column_id,
+                  position: task.position,
+                  status: task.status,
+                };
+              } else {
+                delete item.preCompletionBoardPlacement;
+              }
+              const doneColumn = (db.prepare(
+                "SELECT id, name FROM task_columns ORDER BY position ASC",
+              ).all() as Array<{ id: string; name: string }>).find(
+                (column) => taskColumnKeyForName(column.name) === "done",
+              );
+              if (!doneColumn) {
+                throw new DayPlanInvalidTransition("Cove needs a Done list to complete this task.");
+              }
+              const nextPosition = db.prepare(
+                "SELECT COALESCE(MAX(position), -1) + 1 AS position FROM tasks WHERE column_id = ? AND status = 'done'",
+              ).pluck().get(doneColumn.id) as number;
+              db.prepare(
+                `UPDATE tasks
+                 SET column_id = ?, status = 'done', position = ?, updated_at = ?
+                 WHERE id = ?`,
+              ).run(doneColumn.id, nextPosition, changedAt, task.id);
+            }
+          }
+          item.decision = "completed";
+          plan.items = [
+            ...plan.items.filter((candidate) => candidate.id !== item.id),
+            item,
+          ];
+          plan.items.forEach((candidate, index) => {
+            candidate.position = index;
+          });
+          break;
+        }
+        case "item_reopen": {
+          requirePlanOrdering(plan);
+          const item = requireItem(plan, input.itemId);
+          requireState(
+            item.decision,
+            ["completed"],
+            "Only a completed Today item can be reopened.",
+          );
+          const taskBacked = item.sourceRefs.some(
+            (source) => source.sourceType === "task" && source.recordId === item.taskId,
+          );
+          if (taskBacked) {
+            const task = managedTask(item.taskId);
+            if (!task) throw new DayPlanInvalidTransition("The board task no longer exists.");
+            const placement = item.preCompletionBoardPlacement;
+            const recordedColumn = placement
+              ? db.prepare("SELECT id FROM task_columns WHERE id = ?")
+                  .get(placement.columnId) as { id: string } | undefined
+              : undefined;
+            const todayColumn = recordedColumn ?? (db.prepare(
+              "SELECT id, name FROM task_columns ORDER BY position ASC",
+            ).all() as Array<{ id: string; name: string }>).find(
+              (column) => taskColumnKeyForName(column.name) === "today",
+            );
+            if (!todayColumn) {
+              throw new DayPlanInvalidTransition("Cove needs a Today list to reopen this task.");
+            }
+            const nextPosition = recordedColumn && placement
+              ? placement.position
+              : db.prepare(
+                  "SELECT COALESCE(MAX(position), -1) + 1 AS position FROM tasks WHERE column_id = ? AND status = 'open'",
+                ).pluck().get(todayColumn.id) as number;
+            if (recordedColumn && placement) {
+              const occupied = db.prepare(
+                `SELECT 1 FROM tasks
+                 WHERE column_id = ? AND id <> ? AND position = ? AND status IS ?
+                 LIMIT 1`,
+              ).get(recordedColumn.id, task.id, placement.position, placement.status);
+              if (occupied) {
+                db.prepare(
+                  `UPDATE tasks
+                   SET position = position + 1
+                   WHERE column_id = ? AND id <> ? AND position >= ? AND status IS ?`,
+                ).run(recordedColumn.id, task.id, placement.position, placement.status);
+              }
+            }
+            db.prepare(
+              `UPDATE tasks
+               SET column_id = ?, status = ?, position = ?, archived_at = NULL,
+                   archived_from_status = NULL, updated_at = ?
+               WHERE id = ?`,
+            ).run(
+              todayColumn.id,
+              recordedColumn && placement ? placement.status : "open",
+              nextPosition,
+              changedAt,
+              task.id,
+            );
+          }
+          item.decision = "accepted";
+          const preCompletionPlanPosition = item.preCompletionPlanPosition;
+          if (
+            typeof preCompletionPlanPosition === "number" &&
+            Number.isInteger(preCompletionPlanPosition)
+          ) {
+            const ordered = [...plan.items].sort(
+              (left, right) => left.position - right.position,
+            );
+            ordered.splice(ordered.indexOf(item), 1);
+            ordered.splice(
+              Math.max(0, Math.min(ordered.length, preCompletionPlanPosition)),
+              0,
+              item,
+            );
+            ordered.forEach((candidate, index) => {
+              candidate.position = index;
+            });
+            plan.items = ordered;
+          }
+          delete item.preCompletionPlanPosition;
+          delete item.preCompletionBoardPlacement;
+          delete item.settlementDecision;
           break;
         }
         case "item_owner": {
@@ -3849,7 +4151,7 @@ export function createDayPlanStore(options: {
           break;
         }
         case "item_reorder": {
-          requireArrivalEditing(plan);
+          requirePlanOrdering(plan);
           const item = requireItem(plan, input.itemId);
           if (!Number.isInteger(input.position)) {
             throw new DayPlanInvalidTransition("Item position must be an integer.");
@@ -3873,30 +4175,18 @@ export function createDayPlanStore(options: {
               (item) => item.decision === "accepted" || item.decision === "preselected",
             )
             .sort((left, right) => left.position - right.position);
-          const firstHuman = accepted.find(
-            (item) => item.owner === "me" || item.owner === "together",
-          );
-          const first = firstHuman ?? accepted[0];
-          if (!first) {
+          if (accepted.length === 0) {
             throw new DayPlanInvalidTransition(
               "Start My Day requires one accepted focus.",
             );
           }
-          for (const item of accepted) {
-            item.decision = "accepted";
-            item.humanDecisionEventIds = [
-              ...new Set([...item.humanDecisionEventIds, input.mutationId]),
-            ];
-          }
-          plan.state = "active";
+          activatePlanWithoutKickoff(plan, input.mutationId, changedAt, false);
+          const focus = focusBandItems(plan.items, configuredFocusCount());
           plan.arrivalState = "confirmed";
-          plan.recommendedFirstItemId = first.id;
-          plan.recommendedFirstTaskId = first.taskId;
-          plan.confirmedAt = changedAt;
           // Local owner chips launch resumable task sessions through the
           // separate task-session lifecycle. Keep the allowlisted headless lane
           // intact for unattended work and preserve its existing cloud behavior.
-          for (const item of getRuntimeMode() === "local" ? [] : accepted) {
+          for (const item of getRuntimeMode() === "local" ? [] : focus) {
             if (item.owner !== "claude" && item.owner !== "together") continue;
             const liveRun = findLiveItemRun(plan.id, item.id);
             if (liveRun) {
@@ -4020,11 +4310,7 @@ export function createDayPlanStore(options: {
           {
             const alreadyInProgress =
               plan.state === "settling" && plan.settlementState === "in_progress";
-            if (
-              !alreadyInProgress &&
-              plan.state !== "active" &&
-              !(plan.state === "proposed" && ["bypassed", "skipped"].includes(plan.arrivalState))
-            ) {
+            if (!canStartDayPlanSettlement(plan)) {
               throw new DayPlanInvalidTransition("Settlement cannot start yet.");
             }
             if (!alreadyInProgress) {
@@ -4033,6 +4319,13 @@ export function createDayPlanStore(options: {
                 ["not_due", "offered", "skipped"],
                 "Settlement is already in progress or complete.",
               );
+              if (
+                plan.state === "proposed" &&
+                plan.arrivalState === "snoozed"
+              ) {
+                activatePlanWithoutKickoff(plan, input.mutationId, changedAt, true);
+              }
+              settlementOrigin = plan.state === "active" ? "active" : "proposed";
               plan.state = "settling";
               plan.settlementState = "in_progress";
             }
@@ -4065,6 +4358,14 @@ export function createDayPlanStore(options: {
             }
             break;
           }
+        case "settlement_cancel":
+          if (plan.state !== "settling" || plan.settlementState !== "in_progress") {
+            throw new DayPlanInvalidTransition("Only an active settlement can be cancelled.");
+          }
+          plan.state = settlementOriginState(plan.id);
+          plan.settlementState = "offered";
+          for (const item of plan.items) delete item.settlementDecision;
+          break;
         case "settlement_decide": {
           if (plan.state !== "settling" || plan.settlementState !== "in_progress") {
             throw new DayPlanInvalidTransition("Settlement decisions require an active settlement.");
@@ -4274,7 +4575,7 @@ export function createDayPlanStore(options: {
         changedItem.humanDecisionEventIds = [
           ...new Set([...changedItem.humanDecisionEventIds, input.mutationId]),
         ];
-        if (["item_edit", "item_owner", "item_later", "item_dismiss"].includes(input.action)) {
+        if (["item_edit", "item_owner", "item_later", "item_dismiss", "item_complete", "item_reopen"].includes(input.action)) {
           invalidateQueuedRunsForItem(plan, changedItem, changedAt);
         }
       }
@@ -4298,7 +4599,11 @@ export function createDayPlanStore(options: {
         expectedVersion: input.expectedVersion,
         resultVersion: plan.version,
         before,
-        after: input.action === "start_day" ? { plan, kickoffSkips } : plan,
+        after: input.action === "start_day"
+          ? { plan, kickoffSkips }
+          : input.action === "settlement_start"
+            ? { plan, settlementOriginState: settlementOrigin }
+            : plan,
         createdAt: changedAt,
       });
       return {
@@ -4402,11 +4707,42 @@ export function createDayPlanStore(options: {
     return rows.map(eventFromRow);
   }
 
+  function settlementOriginState(planId: string): "active" | "proposed" {
+    const rows = db.prepare(
+      `SELECT event_type, before_json, after_json
+       FROM day_plan_events
+       WHERE day_plan_id = ? AND event_type IN ('settlement_start', 'settlement_cancel')
+       ORDER BY rowid DESC`,
+    ).all(planId) as Array<Pick<EventRow, "event_type" | "before_json" | "after_json">>;
+    for (const row of rows) {
+      if (row.event_type === "settlement_cancel") break;
+      const after = row.after_json
+        ? parseJson<unknown>(row.after_json, "settlement start event after")
+        : undefined;
+      if (after && typeof after === "object" && !Array.isArray(after)) {
+        const origin = (after as { settlementOriginState?: unknown }).settlementOriginState;
+        if (origin === "active" || origin === "proposed") return origin;
+      }
+      const before = row.before_json
+        ? parseJson<unknown>(row.before_json, "settlement start event before")
+        : undefined;
+      if (before && typeof before === "object" && !Array.isArray(before)) {
+        const origin = (before as { state?: unknown }).state;
+        if (origin === "active" || origin === "proposed") return origin;
+      }
+    }
+    throw new DayPlanInvalidTransition("Settlement origin is unavailable.");
+  }
+
   // Construction keeps the historical compatibility repair, but board
   // activation is reserved for the guarded GET initialization call (or the
   // worker's explicit same-day activation) so a task-table problem cannot make
   // store construction fail before the route's fail-open boundary.
-  cleanupWeekendPlan();
+  try {
+    cleanupWeekendPlan();
+  } catch (error) {
+    console.error("Day plan initialization skipped.", error);
+  }
 
   return {
     initialize,
@@ -4481,12 +4817,27 @@ export function createDayPlanStore(options: {
 
 type DayPlanGlobal = { __coveDayPlanStore?: DayPlanStore };
 
+let warnedTaskSettingsReadFailure = false;
+
+function configuredFocusCountFromTaskSettings(): number {
+  try {
+    return readTaskSettings().focus_count;
+  } catch (error) {
+    if (!warnedTaskSettingsReadFailure) {
+      warnedTaskSettingsReadFailure = true;
+      console.warn("Task settings could not be read. Using defaults.", error);
+    }
+    return DEFAULT_TASK_SETTINGS.focus_count;
+  }
+}
+
 export function getDayPlanStore(): DayPlanStore {
   const global = globalThis as unknown as DayPlanGlobal;
   if (!global.__coveDayPlanStore) {
     global.__coveDayPlanStore = createDayPlanStore({
       dbPath:
         coveEnv("DB_PATH") ?? path.join(process.cwd(), "data", "cove.db"),
+      focusCount: configuredFocusCountFromTaskSettings,
     });
   }
   return global.__coveDayPlanStore;

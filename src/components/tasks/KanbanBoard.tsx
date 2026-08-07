@@ -99,6 +99,7 @@ interface KanbanBoardContentProps {
   tasksData: TaskData[];
   loading: boolean;
   error?: string;
+  onRetry: () => Promise<void>;
   onSeed?: () => Promise<void>;
   onCreateTask: (input: CreateTaskInput) => Promise<void>;
   onUpdateTask: (id: string, patch: UpdateTaskInput, nextTasks?: TaskData[]) => Promise<void>;
@@ -294,6 +295,7 @@ function SupabaseKanbanBoard() {
       tasksData={tasks}
       loading={loading}
       error={error}
+      onRetry={reload}
       onSeed={!loading && !error ? ensureDefaultColumns : undefined}
       onCreateTask={async (input) => {
         const targetColumnId = input.columnId ?? null;
@@ -405,6 +407,7 @@ function KanbanBoardContent({
   tasksData,
   loading,
   error,
+  onRetry,
   onSeed,
   onCreateTask,
   onUpdateTask,
@@ -423,6 +426,11 @@ function KanbanBoardContent({
   const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>('all');
   const [completingTaskId, setCompletingTaskId] = useState<string | null>(null);
   const [showRecentlyDeleted, setShowRecentlyDeleted] = useState(false);
+  const [operationError, setOperationError] = useState<{
+    message: string;
+    retry?: () => Promise<void>;
+  }>();
+  const [retryingOperation, setRetryingOperation] = useState(false);
   const [archiveUndo, setArchiveUndo] = useState<{
     id: string;
     title: string;
@@ -435,6 +443,22 @@ function KanbanBoardContent({
     description: '',
     tags: '',
   });
+
+  async function retryOperation() {
+    const retry = operationError?.retry;
+    if (!retry || retryingOperation) return;
+    setRetryingOperation(true);
+    try {
+      await retry();
+      setOperationError(undefined);
+    } catch {
+      setOperationError((current) => current
+        ? { ...current, message: "That still didn't save. Try again." }
+        : current);
+    } finally {
+      setRetryingOperation(false);
+    }
+  }
 
   useEffect(() => {
     if (!seeded && onSeed) {
@@ -735,14 +759,27 @@ function KanbanBoardContent({
     const movedTasks = applyMove(originalTasks, activeId, overCol, destinationIndex);
     setLocalTasks(movedTasks);
 
-    try {
-      await onUpdateTask(activeId, {
+    const persistMove = () => onUpdateTask(activeId, {
         columnId: overCol,
         position: destinationIndex,
         status: statusForColumn(overCol),
       }, movedTasks);
+    try {
+      await persistMove();
+      setOperationError(undefined);
     } catch (err) {
       console.error('Failed to persist drag:', err);
+      setOperationError({
+        message: "That task move didn't save. The board was restored.",
+        retry: async () => {
+          setLocalTasks(movedTasks);
+          try {
+            await persistMove();
+          } finally {
+            setLocalTasks(null);
+          }
+        },
+      });
     } finally {
       setLocalTasks(null);
     }
@@ -769,8 +806,12 @@ function KanbanBoardContent({
 
       setNewTask({ title: '', priority: 'medium', dueDate: '', description: '', tags: '' });
       setShowAddForm(false);
+      setOperationError(undefined);
     } catch (err) {
       console.error('Failed to add task:', err);
+      setOperationError({
+        message: "Cove couldn't add that task. Your draft is still here.",
+      });
     }
   }
 
@@ -801,8 +842,7 @@ function KanbanBoardContent({
 
     setCompletingTaskId(taskId);
     setLocalTasks(movedTasks);
-    try {
-      await onUpdateTask(
+    const persistCompletion = () => onUpdateTask(
         taskId,
         {
           columnId: doneColumn._id,
@@ -811,9 +851,25 @@ function KanbanBoardContent({
         },
         movedTasks
       );
+    try {
+      await persistCompletion();
+      setOperationError(undefined);
     } catch (err) {
       console.error('Failed to mark task done:', err);
       setLocalTasks(null);
+      setOperationError({
+        message: "Cove couldn't mark that task done. The board was restored.",
+        retry: async () => {
+          setCompletingTaskId(taskId);
+          setLocalTasks(movedTasks);
+          try {
+            await persistCompletion();
+          } finally {
+            setCompletingTaskId(null);
+            setLocalTasks(null);
+          }
+        },
+      });
     } finally {
       setCompletingTaskId(null);
       setLocalTasks(null);
@@ -876,6 +932,13 @@ function KanbanBoardContent({
         <div className="water-empty-state max-w-lg p-5 text-sm">
           <p className="font-medium text-foreground">Tasks could not load.</p>
           <p className="mt-1 text-muted-foreground">{error}</p>
+          <button
+            type="button"
+            className="water-text-button mt-3 px-3 py-2"
+            onClick={() => void onRetry()}
+          >
+            Retry
+          </button>
         </div>
       </div>
     );
@@ -887,11 +950,11 @@ function KanbanBoardContent({
 
   return (
     <div className="water-workspace all-work-surface flex h-full flex-col">
-      <div className="water-toolbar all-work-toolbar flex items-center gap-3 border-b px-5">
-        <h1 className="water-workspace-title text-sm">All Work</h1>
+      <header className="water-toolbar all-work-toolbar border-b px-5 pt-[62px]">
+        <div className="all-work-toolbar-row flex items-center gap-3">
+          <h1 className="water-workspace-title shrink-0">All Work</h1>
 
-        <div className="ml-4 flex items-center gap-2 flex-1">
-          <div className="relative max-w-[240px] flex-1">
+          <div className="relative ml-4 max-w-[320px] flex-1">
             <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <circle cx="11" cy="11" r="8" />
               <path d="m21 21-4.3-4.3" />
@@ -902,59 +965,99 @@ function KanbanBoardContent({
               placeholder="Search tasks..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="water-control w-full py-1.5 pl-8 pr-3 text-xs placeholder:text-muted-foreground"
+              className="water-control w-full py-2 pl-8 pr-3 text-[13.5px] placeholder:text-muted-foreground"
             />
           </div>
 
-          <select
-            aria-label="Filter tasks"
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-            className="water-control px-3 py-1.5 text-xs"
-          >
-            <option value="all">All Tasks</option>
-            <option value="today">Must happen today</option>
-            <option value="not-started">Not Started</option>
-            <option value="in-progress">In Flight / Waiting</option>
-            <option value="blocked">Blocked</option>
-            <option value="done">Done</option>
-          </select>
+          <details className="all-work-filter relative ml-auto">
+            <summary className="water-secondary-button flex cursor-pointer list-none items-center gap-2 px-4 py-2">
+              Filter
+              {(statusFilter !== 'all' || priorityFilter !== 'all') && (
+                <span className="all-work-filter-dot" aria-label="Filters active" />
+              )}
+            </summary>
+            <div className="water-popover absolute right-0 top-[calc(100%+8px)] z-20 w-[250px] space-y-3 p-4">
+              <label className="block">
+                Status
+                <select
+                  aria-label="Filter tasks"
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+                  className="water-control mt-1.5 w-full px-3 py-2 text-[13.5px]"
+                >
+                  <option value="all">All Tasks</option>
+                  <option value="today">Must happen today</option>
+                  <option value="not-started">Not Started</option>
+                  <option value="in-progress">In Flight / Waiting</option>
+                  <option value="blocked">Blocked</option>
+                  <option value="done">Done</option>
+                </select>
+              </label>
+              <label className="block">
+                Priority
+                <select
+                  aria-label="Filter tasks by priority"
+                  value={priorityFilter}
+                  onChange={(e) => setPriorityFilter(e.target.value as PriorityFilter)}
+                  className="water-control mt-1.5 w-full px-3 py-2 text-[13.5px]"
+                >
+                  <option value="all">All Priority</option>
+                  <option value="high">High</option>
+                  <option value="medium">Medium</option>
+                  <option value="low">Low</option>
+                </select>
+              </label>
+            </div>
+          </details>
 
-          <select
-            aria-label="Filter tasks by priority"
-            value={priorityFilter}
-            onChange={(e) => setPriorityFilter(e.target.value as PriorityFilter)}
-            className="water-control px-3 py-1.5 text-xs"
+          <button
+            onClick={() => setShowAddForm(!showAddForm)}
+            aria-label={showAddForm ? 'Close add task form' : 'Open add task form'}
+            className="water-primary-button px-4 py-2"
           >
-            <option value="all">All Priority</option>
-            <option value="high">High</option>
-            <option value="medium">Medium</option>
-            <option value="low">Low</option>
-          </select>
-
-          <span className="text-[11px] text-muted-foreground tabular-nums">
-            {filteredTasks.length}/{totalTasks}
-          </span>
+            + Add Task
+          </button>
         </div>
 
-        {onRestoreTask && (
+        <div className="all-work-toolbar-meta flex items-center gap-3">
+          <span className="text-[12px] font-medium text-muted-foreground tabular-nums">
+            Showing {filteredTasks.length} of {totalTasks} tasks
+          </span>
+          {onRestoreTask && (
+            <button
+              type="button"
+              onClick={() => setShowRecentlyDeleted(true)}
+              className="water-text-button px-2 py-1"
+            >
+              Recently deleted
+            </button>
+          )}
+        </div>
+      </header>
+
+      {operationError && (
+        <div role="alert" className="mx-5 mt-3 flex items-center gap-3 rounded-xl border border-accent-red/30 bg-accent-red/5 px-4 py-3 text-xs text-accent-red">
+          <p className="min-w-0 flex-1">{operationError.message}</p>
+          {operationError.retry && (
+            <button
+              type="button"
+              disabled={retryingOperation}
+              className="shrink-0 font-medium underline underline-offset-2 disabled:opacity-50"
+              onClick={() => void retryOperation()}
+            >
+              {retryingOperation ? 'Retrying…' : 'Retry'}
+            </button>
+          )}
           <button
             type="button"
-            onClick={() => setShowRecentlyDeleted(true)}
-            className="water-text-button ml-2 px-2.5 py-1.5"
+            aria-label="Dismiss operation error"
+            className="shrink-0 text-base leading-none"
+            onClick={() => setOperationError(undefined)}
           >
-            Recently deleted
+            ×
           </button>
-        )}
-
-        <button
-          onClick={() => setShowAddForm(!showAddForm)}
-          aria-label={showAddForm ? 'Close add task form' : 'Open add task form'}
-          className="water-primary-button ml-2 px-4 py-2"
-        >
-          + Add Task
-        </button>
-      </div>
+        </div>
+      )}
 
       {taskSessions.error && (
         <p role="alert" className="mx-5 mt-2 text-xs text-accent-red">
@@ -974,7 +1077,7 @@ function KanbanBoardContent({
                 onChange={(e) => setNewTask((prev) => ({ ...prev, title: e.target.value }))}
                 placeholder="Task title"
                 autoFocus
-                className="w-full px-3 py-2 text-sm"
+                className="w-full px-3 py-2"
               />
             </div>
             <div className="w-24">
@@ -985,7 +1088,7 @@ function KanbanBoardContent({
                 onChange={(e) =>
                   setNewTask((prev) => ({ ...prev, priority: e.target.value as 'low' | 'medium' | 'high' }))
                 }
-                className="w-full px-3 py-2 text-sm"
+                className="w-full px-3 py-2"
               >
                 <option value="low">Low</option>
                 <option value="medium">Medium</option>
@@ -999,7 +1102,7 @@ function KanbanBoardContent({
                 aria-label="New task due date"
                 value={newTask.dueDate}
                 onChange={(e) => setNewTask((prev) => ({ ...prev, dueDate: e.target.value }))}
-                className="w-full px-3 py-2 text-sm"
+                className="w-full px-3 py-2"
               />
             </div>
             <div className="flex gap-1.5 shrink-0">
@@ -1031,7 +1134,7 @@ function KanbanBoardContent({
                 value={newTask.description}
                 onChange={(e) => setNewTask((prev) => ({ ...prev, description: e.target.value }))}
                 placeholder="Optional description"
-                className="w-full px-3 py-2 text-sm"
+                className="w-full px-3 py-2"
               />
             </div>
             <div className="flex-1">
@@ -1042,7 +1145,7 @@ function KanbanBoardContent({
                 value={newTask.tags}
                 onChange={(e) => setNewTask((prev) => ({ ...prev, tags: e.target.value }))}
                 placeholder="design, frontend (comma-separated)"
-                className="w-full px-3 py-2 text-sm"
+                className="w-full px-3 py-2"
               />
             </div>
           </div>
@@ -1057,7 +1160,7 @@ function KanbanBoardContent({
           onDragOver={handleDragOver}
           onDragEnd={handleDragEnd}
         >
-          <div className="flex h-full min-w-max gap-4">
+          <div className="flex h-full min-w-max gap-[18px]">
             {columns.length === 0 ? (
               <div className="water-empty-state flex min-h-[180px] w-[360px] items-center justify-center px-6 text-center text-sm">
                 No task lists yet.
@@ -1071,9 +1174,6 @@ function KanbanBoardContent({
                   onOpenDetail={setDetailTaskId}
                   onCompleteTask={handleCompleteTask}
                   completingTaskId={completingTaskId}
-                  sessionRuns={getRuntimeMode() === 'local' ? taskSessions.latestByTaskId : undefined}
-                  launchingTaskIds={taskSessions.launchingTaskIds}
-                  onLaunchSession={getRuntimeMode() === 'local' ? taskSessions.launch : undefined}
                 />
               ))
             )}
@@ -1105,6 +1205,10 @@ function KanbanBoardContent({
                 await onConfirmRecurrence(detailTaskId, cadence);
               }
             : undefined}
+          sessionRun={getRuntimeMode() === 'local' ? taskSessions.latestByTaskId.get(detailTaskId) : undefined}
+          sessionBusy={taskSessions.launchingTaskIds.has(detailTaskId)}
+          sessionError={taskSessions.error}
+          onLaunchSession={getRuntimeMode() === 'local' ? taskSessions.launch : undefined}
         />
       )}
 

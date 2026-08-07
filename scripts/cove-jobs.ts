@@ -3,6 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { coveEnv } from "../src/lib/env";
+import { resolveEmailRuntimePaths } from "../src/lib/email/runtime-paths";
+import { signatureHtmlToText } from "../src/lib/email/draft-format";
+import { loadSignature } from "../src/lib/email/signature";
 import { createSqliteBackup } from "../src/lib/reliability/backup";
 import { JobScheduler } from "../src/lib/reliability/jobs";
 import {
@@ -24,6 +27,7 @@ import {
 } from "../src/lib/email/classification-job";
 import { createGoogleWorkspaceGateway, workspaceConfigPath } from "../src/lib/workspace";
 import { readWorkspaceConfig } from "../src/lib/workspace";
+import { observeIncrementalInbox } from "../src/lib/email/incremental-intake";
 
 function localDateKey(date: Date): string {
   const year = date.getFullYear();
@@ -37,29 +41,42 @@ function voiceGuide(): string {
   return existsSync(file) ? readFileSync(file, "utf8").slice(0, 12_000) : "";
 }
 
-function paths(): { dbPath: string; backupDir: string } {
+function paths(): { dataDir: string; dbPath: string; backupDir: string } {
   const repoDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-  const dbPath = coveEnv("DB_PATH") ?? path.join(repoDir, "data", "cove.db");
+  const { dataDir, dbPath } = resolveEmailRuntimePaths({ repoDir });
   return {
+    dataDir,
     dbPath,
     backupDir: coveEnv("BACKUP_DIR") ?? path.join(path.dirname(dbPath), "backups"),
   };
 }
 
-function schedulerWithHandlers(dbPath: string, backupDir: string): JobScheduler {
+function schedulerWithHandlers(dbPath: string, backupDir: string, dataDir: string): JobScheduler {
   const scheduler = new JobScheduler({ dbPath });
-  const dataDir = path.dirname(dbPath);
   if (existsSync(workspaceConfigPath(dataDir))) {
     const gateway = createGoogleWorkspaceGateway({ dataDir });
     const workspace = readWorkspaceConfig(dataDir);
+    const cachedSignature = loadSignature(dataDir, workspace.accountEmail);
+    if (
+      cachedSignature &&
+      Date.now() - Date.parse(cachedSignature.fetchedAt) > 30 * 24 * 60 * 60 * 1_000
+    ) {
+      console.warn("Cove email signature cache is over 30 days old. Run `npm run email:signature-sync` to refresh it.");
+    }
+    const signatureText = cachedSignature
+      ? signatureHtmlToText(cachedSignature.html)
+      : null;
     scheduler.register("gmail-operation", createGmailOperationHandler({
       gateway: gateway.mail,
       dbPath,
+      dataDir,
+      cachedSignature,
     }));
     scheduler.register("email-classify", createEmailClassificationHandler({
       gateway: gateway.mail,
       accountEmail: workspace.accountEmail,
       dbPath,
+      signatureText,
       voice: voiceGuide,
     }));
     scheduler.register("email-artifacts", createEmailArtifactHandler({
@@ -124,7 +141,7 @@ function schedulerWithHandlers(dbPath: string, backupDir: string): JobScheduler 
 
 async function main(): Promise<number> {
   const command = process.argv[2];
-  const { dbPath, backupDir } = paths();
+  const { dataDir, dbPath, backupDir } = paths();
   if (command === "enqueue-backup" && !existsSync(dbPath)) {
     process.stdout.write(`No database at ${dbPath} yet; nothing to back up.\n`);
     return 0;
@@ -136,12 +153,29 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const scheduler = schedulerWithHandlers(dbPath, backupDir);
+  const scheduler = schedulerWithHandlers(dbPath, backupDir, dataDir);
   try {
+    let incrementalEmail: Awaited<ReturnType<typeof observeIncrementalInbox>> | undefined;
     if (command === "run") {
       if (getRuntimeMode() === "local") {
         enqueueDailyTaskMaintenance(scheduler);
         enqueueDueHealthCollection(scheduler, { dbPath });
+      }
+      if (existsSync(workspaceConfigPath(dataDir))) {
+        try {
+          const workspace = readWorkspaceConfig(dataDir);
+          const gateway = createGoogleWorkspaceGateway({ dataDir });
+          incrementalEmail = await observeIncrementalInbox({
+            gateway: gateway.mail,
+            accountEmail: workspace.accountEmail,
+            dbPath,
+          });
+        } catch (error) {
+          console.warn(
+            "Incremental email intake could not poll this tick:",
+            error instanceof Error ? error.message : String(error),
+          );
+        }
       }
     }
     if (command === "enqueue-backup") {
@@ -160,7 +194,7 @@ async function main(): Promise<number> {
     }
     const result = await scheduler.runAvailable({ concurrency: 1, maxJobs: 25 });
     reconcileDeadEmailJobs({ dbPath });
-    process.stdout.write(`${JSON.stringify(result)}\n`);
+    process.stdout.write(`${JSON.stringify({ ...result, incrementalEmail })}\n`);
     return 0;
   } finally {
     scheduler.close();

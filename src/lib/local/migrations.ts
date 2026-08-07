@@ -1240,6 +1240,100 @@ export const LOCAL_MIGRATIONS: readonly LocalMigration[] = [
       `);
     },
   },
+  {
+    version: 14,
+    name: "contact-emails",
+    up: (db) => {
+      // contact_emails is the source of truth for email-based contact
+      // resolution. contacts.email stays as the primary-address mirror so
+      // existing readers keep working.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS contact_emails (
+          id TEXT PRIMARY KEY,
+          contact_id TEXT NOT NULL REFERENCES contacts(id),
+          email TEXT NOT NULL,
+          normalized_email TEXT NOT NULL UNIQUE,
+          is_primary INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS contact_emails_contact_idx
+          ON contact_emails(contact_id);
+      `);
+      const rows = db.prepare(
+        `SELECT id, email, created_at
+         FROM contacts
+         WHERE email IS NOT NULL AND trim(email) <> ''
+         ORDER BY COALESCE(created_at, ''), id`,
+      ).all() as Array<{
+        id: string;
+        email: string;
+        created_at: string | null;
+      }>;
+      const insert = db.prepare(
+        `INSERT OR IGNORE INTO contact_emails
+           (id, contact_id, email, normalized_email, is_primary, created_at)
+         VALUES (?, ?, ?, ?, 1, ?)`,
+      );
+      for (const row of rows) {
+        const normalizedEmail = normalizeContactEmail(row.email);
+        if (!normalizedEmail) continue;
+        // OR IGNORE: legacy duplicate emails keep only the oldest row here;
+        // resolution still sees every holder through contacts.normalized_email,
+        // so duplicate addresses stay ambiguous.
+        insert.run(
+          randomUUID(),
+          row.id,
+          row.email.trim(),
+          normalizedEmail,
+          row.created_at ?? new Date().toISOString(),
+        );
+      }
+    },
+  },
+  {
+    version: 15,
+    name: "task-session-model-routing",
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE cove_task_session_runs
+          ADD COLUMN model TEXT NOT NULL DEFAULT 'claude-opus-5'
+          CHECK (model IN ('claude-opus-5','claude-sonnet-5','claude-haiku-4-5'));
+        ALTER TABLE cove_task_session_runs
+          ADD COLUMN effort TEXT NOT NULL DEFAULT 'high'
+          CHECK (effort IN ('medium','high'));
+        ALTER TABLE cove_task_session_runs
+          ADD COLUMN model_reason TEXT NOT NULL DEFAULT 'Legacy session created before model routing.';
+      `);
+    },
+  },
+  {
+    version: 16,
+    name: "attention-ledger",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS cove_attention_ledger (
+          id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL
+            CHECK (kind IN ('sweep_nudge','floor_nudge','urgent_email')),
+          ref_kind TEXT NOT NULL
+            CHECK (ref_kind IN ('task','commitment','email')),
+          ref_id TEXT NOT NULL,
+          level TEXT NOT NULL
+            CHECK (level IN ('text','banner','board','suppressed','shadow')),
+          reason TEXT NOT NULL,
+          delivered_at TEXT,
+          suppressed_reason TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS cove_attention_ledger_ref_idx
+          ON cove_attention_ledger(ref_kind, ref_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS cove_attention_ledger_budget_idx
+          ON cove_attention_ledger(level, delivered_at);
+        CREATE INDEX IF NOT EXISTS cove_attention_ledger_kind_idx
+          ON cove_attention_ledger(kind, created_at DESC);
+      `);
+    },
+  },
 ];
 
 function migrationTableExists(db: Database.Database, name: string): boolean {
