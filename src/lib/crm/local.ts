@@ -36,17 +36,17 @@ type ContactRow = Record<string, unknown> & {
   tags: string | null;
 };
 
+// activity_type, direction, and created_at are deliberately absent: the columns
+// are nullable free text, so they stay `unknown` under the index signature and
+// have to go through decodeActivity before anything can rely on them.
 type ActivityRow = Record<string, unknown> & {
   id: string;
   contact_id: string | null;
   company_id: string | null;
   source_ref: string | null;
-  activity_type: string;
   title: string | null;
   content: string | null;
-  direction: "inbound" | "outbound" | "internal" | null;
   metadata: string | null;
-  created_at: string;
 };
 
 function parseStringArray(value: unknown): string[] {
@@ -79,18 +79,163 @@ function parseObject(value: unknown): Record<string, unknown> {
   }
 }
 
+/**
+ * SQLite is looser than the domain types. `tier`, `notes`, `activity_type`, and
+ * `created_at` are nullable columns typed as required strings, `direction` is
+ * free text typed as a three-member union, and any column a pending migration
+ * has not added yet is simply missing from `SELECT *`. Spreading a raw row into
+ * the domain type asserted all of that away, so a null or absent column reached
+ * callers as a string and failed somewhere far from the cause. These decoders
+ * build every field explicitly and fall back to the defaults the schema itself
+ * declares.
+ */
+function text(value: unknown, fallback: string): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function nullableText(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function optionalText(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function activityDirection(value: unknown): ContactActivity["direction"] {
+  return value === "inbound" || value === "outbound" || value === "internal"
+    ? value
+    : null;
+}
+
 function decodeContact(row: ContactRow): Contact {
   return {
-    ...(row as unknown as Contact),
+    id: text(row.id, ""),
+    company_id: nullableText(row.company_id),
+    name: text(row.name, ""),
+    email: nullableText(row.email),
+    phone: nullableText(row.phone),
+    role: nullableText(row.role),
+    linkedin: nullableText(row.linkedin),
+    location: nullableText(row.location),
+    how_we_met: nullableText(row.how_we_met),
+    tier: text(row.tier, "C"),
     tags: parseStringArray(row.tags),
+    notes: text(row.notes, ""),
+    last_interaction_at: nullableText(row.last_interaction_at),
+    provenance_source: nullableText(row.provenance_source),
+    created_at: optionalText(row.created_at),
+    updated_at: optionalText(row.updated_at),
   };
 }
 
 function decodeActivity(row: ActivityRow): ContactActivity {
   return {
-    ...(row as unknown as ContactActivity),
+    id: text(row.id, ""),
+    contact_id: nullableText(row.contact_id),
+    company_id: nullableText(row.company_id),
+    source_ref: nullableText(row.source_ref),
+    activity_type: text(row.activity_type, "note"),
+    title: nullableText(row.title),
+    content: nullableText(row.content),
+    direction: activityDirection(row.direction),
     metadata: parseObject(row.metadata),
+    created_at: text(row.created_at, ""),
+    updated_at: optionalText(row.updated_at),
   };
+}
+
+export function mergeContactsInDatabase(
+  db: Database.Database,
+  input: { winnerId: string; loserId: string },
+  now: string,
+): Contact {
+  const winnerId = input.winnerId.trim();
+  const loserId = input.loserId.trim();
+  if (!winnerId || !loserId) {
+    throw new Error("Merge requires a winner and a loser contact id.");
+  }
+  if (winnerId === loserId) throw new Error("A contact cannot be merged into itself.");
+  const winner = db.prepare("SELECT * FROM contacts WHERE id = ?").get(winnerId) as
+    ContactRow | undefined;
+  if (!winner) throw new Error("Merge winner contact was not found.");
+  const loser = db.prepare("SELECT * FROM contacts WHERE id = ?").get(loserId) as
+    ContactRow | undefined;
+  if (!loser) throw new Error("Merge loser contact was not found.");
+  const insertEmail = db.prepare(
+    `INSERT OR IGNORE INTO contact_emails
+       (id, contact_id, email, normalized_email, is_primary, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  );
+  for (const [row, isPrimary] of [[winner, true], [loser, false]] as const) {
+    const normalizedEmail = normalizeContactEmail(row.email ?? undefined);
+    if (normalizedEmail) {
+      insertEmail.run(
+        randomUUID(),
+        row.id,
+        row.email!.trim(),
+        normalizedEmail,
+        isPrimary ? 1 : 0,
+        now,
+      );
+    }
+  }
+  db.prepare(
+    "UPDATE contact_emails SET contact_id = ?, is_primary = 0 WHERE contact_id = ?",
+  ).run(winnerId, loserId);
+  for (const table of [
+    "contact_activities",
+    "commitments",
+    "email_items",
+    "meeting_notes",
+  ]) {
+    db.prepare(`UPDATE ${table} SET contact_id = ? WHERE contact_id = ?`)
+      .run(winnerId, loserId);
+  }
+  const empty = (value: unknown) =>
+    value === null || value === undefined || String(value).trim() === "";
+  const fills: string[] = [];
+  const fillValues: unknown[] = [];
+  for (const field of [
+    "company_id",
+    "company",
+    "phone",
+    "role",
+    "linkedin",
+    "location",
+    "how_we_met",
+    "notes",
+  ]) {
+    if (empty(winner[field]) && !empty(loser[field])) {
+      fills.push(`"${field}" = ?`);
+      fillValues.push(loser[field]);
+    }
+  }
+  if (empty(winner.email) && !empty(loser.email)) {
+    const promoted = normalizeContactEmail(loser.email ?? undefined);
+    fills.push("email = ?", "normalized_email = ?");
+    fillValues.push(loser.email, promoted);
+    db.prepare(
+      `UPDATE contact_emails SET is_primary = 1
+       WHERE contact_id = ? AND normalized_email = ?`,
+    ).run(winnerId, promoted);
+  }
+  const recency = (field: string) => {
+    const winnerValue = String(winner[field] ?? "");
+    const loserValue = String(loser[field] ?? "");
+    return loserValue > winnerValue ? loserValue : winnerValue;
+  };
+  fills.push("last_interaction_at = ?", "last_contact_date = ?", "updated_at = ?");
+  fillValues.push(
+    recency("last_interaction_at") || null,
+    recency("last_contact_date") || null,
+    now,
+  );
+  db.prepare(`UPDATE contacts SET ${fills.join(", ")} WHERE id = ?`)
+    .run(...fillValues, winnerId);
+  db.prepare("DELETE FROM contacts WHERE id = ?").run(loserId);
+  return decodeContact(
+    db.prepare("SELECT * FROM contacts WHERE id = ?").get(winnerId) as ContactRow,
+  );
 }
 
 function candidate(row: ContactRow): ContactCandidate {
@@ -121,14 +266,20 @@ export class LocalCRMBackend implements CRMBackend {
   readonly kind = "local" as const;
   private readonly db: Database.Database;
   private readonly now: () => Date;
+  private readonly ownsDatabase: boolean;
 
-  constructor(options: { dbPath?: string; now?: () => Date } = {}) {
-    this.db = openLocalDatabase(options.dbPath);
+  constructor(options: {
+    dbPath?: string;
+    database?: Database.Database;
+    now?: () => Date;
+  } = {}) {
+    this.db = options.database ?? openLocalDatabase(options.dbPath);
+    this.ownsDatabase = !options.database;
     this.now = options.now ?? (() => new Date());
   }
 
   close(): void {
-    this.db.close();
+    if (this.ownsDatabase) this.db.close();
   }
 
   // contact_emails is the source of truth for email resolution; the union
@@ -437,21 +588,23 @@ export class LocalCRMBackend implements CRMBackend {
       occurredAt,
       now,
     );
-    this.db.prepare(
-      `UPDATE contacts
-       SET last_interaction_at = CASE
-             WHEN last_interaction_at IS NULL OR last_interaction_at < ?
-               THEN ?
-             ELSE last_interaction_at
-           END,
-           last_contact_date = CASE
-             WHEN last_contact_date IS NULL OR last_contact_date < ?
-               THEN ?
-             ELSE last_contact_date
-           END,
-           updated_at = ?
-       WHERE id = ?`,
-    ).run(occurredAt, occurredAt, occurredAt, occurredAt, now, contactId);
+    if (input.updateRecency !== false) {
+      this.db.prepare(
+        `UPDATE contacts
+         SET last_interaction_at = CASE
+               WHEN last_interaction_at IS NULL OR last_interaction_at < ?
+                 THEN ?
+               ELSE last_interaction_at
+             END,
+             last_contact_date = CASE
+               WHEN last_contact_date IS NULL OR last_contact_date < ?
+                 THEN ?
+               ELSE last_contact_date
+             END,
+             updated_at = ?
+         WHERE id = ?`,
+      ).run(occurredAt, occurredAt, occurredAt, occurredAt, now, contactId);
+    }
     const row = this.db.prepare(
       "SELECT * FROM contact_activities WHERE id = ?",
     ).get(id) as ActivityRow;
@@ -662,115 +815,8 @@ export class LocalCRMBackend implements CRMBackend {
   // and the classifier never call this: automated resolution stays ambiguous
   // instead of merging.
   mergeContacts(input: { winnerId: string; loserId: string }): Contact {
-    const winnerId = input.winnerId.trim();
-    const loserId = input.loserId.trim();
-    if (!winnerId || !loserId) {
-      throw new Error("Merge requires a winner and a loser contact id.");
-    }
-    if (winnerId === loserId) {
-      throw new Error("A contact cannot be merged into itself.");
-    }
-    return this.db.transaction(() => {
-      const winner = this.db.prepare(
-        "SELECT * FROM contacts WHERE id = ?",
-      ).get(winnerId) as ContactRow | undefined;
-      if (!winner) throw new Error("Merge winner contact was not found.");
-      const loser = this.db.prepare(
-        "SELECT * FROM contacts WHERE id = ?",
-      ).get(loserId) as ContactRow | undefined;
-      if (!loser) throw new Error("Merge loser contact was not found.");
-      const now = this.now().toISOString();
-
-      // Legacy rows may predate contact_emails; represent both primaries.
-      for (const [row, isPrimary] of [
-        [winner, true],
-        [loser, false],
-      ] as const) {
-        const normalizedEmail = normalizeContactEmail(row.email ?? undefined);
-        if (normalizedEmail) {
-          this.insertContactEmail({
-            contactId: row.id,
-            email: row.email!.trim(),
-            normalizedEmail,
-            isPrimary,
-            now,
-          });
-        }
-      }
-
-      // The winner keeps its primary address; the loser's addresses become
-      // secondary addresses of the winner.
-      this.db.prepare(
-        `UPDATE contact_emails
-         SET contact_id = ?, is_primary = 0
-         WHERE contact_id = ?`,
-      ).run(winnerId, loserId);
-      this.db.prepare(
-        "UPDATE contact_activities SET contact_id = ? WHERE contact_id = ?",
-      ).run(winnerId, loserId);
-      this.db.prepare(
-        "UPDATE commitments SET contact_id = ? WHERE contact_id = ?",
-      ).run(winnerId, loserId);
-      this.db.prepare(
-        "UPDATE email_items SET contact_id = ? WHERE contact_id = ?",
-      ).run(winnerId, loserId);
-      this.db.prepare(
-        "UPDATE meeting_notes SET contact_id = ? WHERE contact_id = ?",
-      ).run(winnerId, loserId);
-
-      // Fill empty winner fields from the loser; never overwrite winner data.
-      const empty = (value: unknown) =>
-        value === null || value === undefined || String(value).trim() === "";
-      const fills: string[] = [];
-      const fillValues: unknown[] = [];
-      for (const field of [
-        "company_id",
-        "company",
-        "phone",
-        "role",
-        "linkedin",
-        "location",
-        "how_we_met",
-        "notes",
-      ]) {
-        if (empty(winner[field]) && !empty(loser[field])) {
-          fills.push(`"${field}" = ?`);
-          fillValues.push(loser[field]);
-        }
-      }
-      if (empty(winner.email) && !empty(loser.email)) {
-        const promoted = normalizeContactEmail(loser.email ?? undefined);
-        fills.push("email = ?", "normalized_email = ?");
-        fillValues.push(promoted, promoted);
-        this.db.prepare(
-          `UPDATE contact_emails
-           SET is_primary = 1
-           WHERE contact_id = ? AND normalized_email = ?`,
-        ).run(winnerId, promoted);
-      }
-      const recency = (field: string) => {
-        const winnerValue = String(winner[field] ?? "");
-        const loserValue = String(loser[field] ?? "");
-        return loserValue > winnerValue ? loserValue : winnerValue;
-      };
-      fills.push("last_interaction_at = ?", "last_contact_date = ?", "updated_at = ?");
-      fillValues.push(
-        recency("last_interaction_at") || null,
-        recency("last_contact_date") || null,
-        now,
-      );
-      this.db.prepare(
-        `UPDATE contacts SET ${fills.join(", ")} WHERE id = ?`,
-      ).run(...fillValues, winnerId);
-
-      // Only the loser row itself is removed; its history was moved above,
-      // so this must never cascade into activity deletion.
-      this.db.prepare("DELETE FROM contacts WHERE id = ?").run(loserId);
-
-      const merged = this.db.prepare(
-        "SELECT * FROM contacts WHERE id = ?",
-      ).get(winnerId) as ContactRow;
-      return decodeContact(merged);
-    }).immediate();
+    return this.db.transaction(() =>
+      mergeContactsInDatabase(this.db, input, this.now().toISOString())
+    ).immediate();
   }
 }

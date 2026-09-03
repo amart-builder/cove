@@ -18,7 +18,16 @@ test("meeting and progress plists render the absolute Node executable", async (t
   const dir = await mkdtemp(path.join(os.tmpdir(), "cove-plist-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
 
-  for (const name of ["com.cove.meeting-watch.plist", "com.cove.progress.plist"]) {
+  for (const name of [
+    "com.cove.meeting-watch.plist",
+    "com.cove.meeting-drain.plist",
+    "com.cove.progress.plist",
+    "com.cove.voice-review.plist",
+    "com.cove.chief-of-staff-drain.plist",
+    "com.cove.chief-of-staff-sweep.plist",
+    "com.cove.chief-of-staff-nightly.plist",
+    "com.cove.chief-of-staff-review.plist",
+  ]) {
     const destination = path.join(dir, name);
     const rendered = renderLanePlist({
       source: path.join(ROOT, "scripts", "launchd", name),
@@ -28,10 +37,20 @@ test("meeting and progress plists render the absolute Node executable", async (t
       atlasRoot: "/Users/client/Atlas",
       dataDir: "/Users/client/Cove/data",
       nodePath: "/opt/homebrew/Cellar/node/24.1.0/bin/node",
+      notificationApp: "/Users/client/Applications/Cove Notifications.app/Contents/MacOS/CoveNotifier",
     });
     assert.match(rendered, /<string>\/opt\/homebrew\/Cellar\/node\/24\.1\.0\/bin\/node<\/string>/);
-    assert.doesNotMatch(rendered, /__COVE_NODE_REAL__|<string>\/usr\/bin\/env<\/string>/);
+    assert.doesNotMatch(
+      rendered,
+      /__COVE_(?:NODE_REAL|JOB_RUNNER|CODEX_BIN|NOTIFICATION_APP)__|<string>\/usr\/bin\/env<\/string>/,
+    );
     assert.doesNotMatch(rendered, /--env-file/);
+    if (name.startsWith("com.cove.chief-of-staff-")) {
+      assert.doesNotMatch(rendered, /<key>COVE_JOB_RUNNER<\/key>/);
+    } else {
+      assert.match(rendered, /<key>COVE_JOB_RUNNER<\/key>\s*<string>codex-sol-high<\/string>/);
+    }
+    assert.doesNotMatch(rendered, /(?:BRIEF|DUMP)_WRITER/);
     assert.equal((await stat(destination)).mode & 0o777, 0o600);
     assert.equal(await readFile(destination, "utf8"), rendered);
   }
@@ -56,6 +75,144 @@ test("meeting and progress plists render the absolute Node executable", async (t
   assert.match(await readFile(destination, "utf8"), /<string>\/opt\/homebrew\/bin\/node<\/string>/);
 });
 
+test("meeting watcher plist renders the exact weekday working-hours grid", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "cove-meeting-calendar-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const destination = path.join(dir, "com.cove.meeting-watch.plist");
+  renderLanePlist({
+    source: path.join(ROOT, "scripts", "launchd", "com.cove.meeting-watch.plist"),
+    destination,
+    repoDir: "/Users/client/Cove",
+    homeDir: "/Users/client",
+    atlasRoot: "/Users/client/Atlas",
+    dataDir: "/Users/client/Cove/data",
+    nodePath: "/opt/homebrew/bin/node",
+  });
+  const plist = JSON.parse(execFileSync(
+    "/usr/bin/plutil",
+    ["-convert", "json", "-o", "-", destination],
+    { encoding: "utf8" },
+  ));
+  const expected = [];
+  for (let weekday = 1; weekday <= 5; weekday += 1) {
+    for (let hour = 8; hour <= 17; hour += 1) {
+      for (const minute of [0, 15, 30, 45]) {
+        expected.push({ Weekday: weekday, Hour: hour, Minute: minute });
+      }
+    }
+    expected.push({ Weekday: weekday, Hour: 18, Minute: 0 });
+  }
+  assert.equal(plist.RunAtLoad, true);
+  assert.equal("StartInterval" in plist, false);
+  assert.deepEqual(plist.StartCalendarInterval, expected);
+});
+
+test("meeting drain plist is an always-on 15-minute local sweep", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "cove-meeting-drain-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const destination = path.join(dir, "com.cove.meeting-drain.plist");
+  renderLanePlist({
+    source: path.join(ROOT, "scripts", "launchd", "com.cove.meeting-drain.plist"),
+    destination,
+    repoDir: "/Users/client/Cove",
+    homeDir: "/Users/client",
+    atlasRoot: "/Users/client/Atlas",
+    dataDir: "/Users/client/Cove/data",
+    nodePath: "/opt/homebrew/bin/node",
+  });
+  const plist = JSON.parse(execFileSync(
+    "/usr/bin/plutil",
+    ["-convert", "json", "-o", "-", destination],
+    { encoding: "utf8" },
+  ));
+  assert.equal(plist.Label, "com.cove.meeting-drain");
+  assert.deepEqual(plist.ProgramArguments.slice(-1), ["--drain-only"]);
+  assert.equal(plist.StartInterval, 900);
+  assert.equal(plist.RunAtLoad, true);
+  assert.equal(plist.KeepAlive, false);
+  assert.equal("StartCalendarInterval" in plist, false);
+});
+
+test("voice review plist runs Sundays at 18:00 without login catch-up", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "cove-voice-review-calendar-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const destination = path.join(dir, "com.cove.voice-review.plist");
+  renderLanePlist({
+    source: path.join(ROOT, "scripts", "launchd", "com.cove.voice-review.plist"),
+    destination,
+    repoDir: "/Users/client/Cove",
+    homeDir: "/Users/client",
+    atlasRoot: "/Users/client/Atlas",
+    dataDir: "/Users/client/Cove/data",
+    nodePath: "/opt/homebrew/bin/node",
+  });
+  const plist = JSON.parse(execFileSync(
+    "/usr/bin/plutil",
+    ["-convert", "json", "-o", "-", destination],
+    { encoding: "utf8" },
+  ));
+  assert.equal(plist.Label, "com.cove.voice-review");
+  assert.deepEqual(plist.ProgramArguments, [
+    "/opt/homebrew/bin/node",
+    "/Users/client/Cove/scripts/cove-voice-review.mjs",
+  ]);
+  assert.deepEqual(plist.StartCalendarInterval, {
+    Weekday: 0,
+    Hour: 18,
+    Minute: 0,
+  });
+  assert.equal(plist.RunAtLoad, false);
+  assert.equal(plist.KeepAlive, false);
+  assert.equal("StartInterval" in plist, false);
+});
+
+test("chief-of-staff plists render drain, sweep, nightly, and weekly review schedules", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "cove-cos-plists-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const rendered = {};
+  for (const name of ["drain", "sweep", "nightly", "review"]) {
+    const destination = path.join(dir, `com.cove.chief-of-staff-${name}.plist`);
+    renderLanePlist({
+      source: path.join(ROOT, "scripts", "launchd", `com.cove.chief-of-staff-${name}.plist`),
+      destination,
+      repoDir: "/Users/client/Cove",
+      homeDir: "/Users/client",
+      atlasRoot: "/Users/client/Atlas",
+      dataDir: "/Users/client/Cove/data",
+      nodePath: "/opt/homebrew/bin/node",
+      codexPath: "/Users/client/.local/bin/codex",
+      notificationApp: "/Users/client/Applications/Cove Notifications.app/Contents/MacOS/CoveNotifier",
+    });
+    rendered[name] = JSON.parse(execFileSync(
+      "/usr/bin/plutil",
+      ["-convert", "json", "-o", "-", destination],
+      { encoding: "utf8" },
+    ));
+  }
+  assert.equal(rendered.drain.StartInterval, 300);
+  assert.deepEqual(rendered.drain.ProgramArguments.slice(-3), ["drain", "--max", "3"]);
+  assert.equal(
+    rendered.drain.EnvironmentVariables.COVE_NOTIFICATION_APP,
+    "/Users/client/Applications/Cove Notifications.app/Contents/MacOS/CoveNotifier",
+  );
+  assert.equal(rendered.drain.EnvironmentVariables.COVE_NOTIFY, "1");
+  assert.deepEqual(rendered.sweep.StartCalendarInterval, [
+    { Hour: 11, Minute: 30 },
+    { Hour: 16, Minute: 0 },
+  ]);
+  assert.deepEqual(rendered.sweep.ProgramArguments.slice(-7), [
+    "enqueue", "--reason", "sweep", "--slot", "11:30", "--slot", "16:00",
+  ]);
+  assert.deepEqual(rendered.nightly.StartCalendarInterval, { Hour: 21, Minute: 30 });
+  assert.deepEqual(rendered.nightly.ProgramArguments.slice(-3), ["enqueue", "--reason", "nightly"]);
+  assert.deepEqual(rendered.review.StartCalendarInterval, { Weekday: 0, Hour: 18, Minute: 0 });
+  assert.deepEqual(rendered.review.ProgramArguments.slice(-1), ["review"]);
+  for (const plist of Object.values(rendered)) {
+    assert.equal(plist.KeepAlive, false);
+    assert.match(plist.EnvironmentVariables.COVE_CODEX_BIN, /codex$/);
+  }
+});
+
 test("local env loading parses simple and quoted values without overriding the shell", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "cove-local-env-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -77,6 +234,29 @@ test("local env loading parses simple and quoted values without overriding the s
   });
 });
 
+test("installer local env lookup works in an empty process environment", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "cove-installer-env-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const lookup = (name) => execFileSync("/usr/bin/env", [
+    "-i",
+    process.execPath,
+    "--input-type=module",
+    "-e",
+    `import { pathToFileURL } from "node:url";
+     const { loadLocalEnv } = await import(pathToFileURL(process.argv[1]).href);
+     const loaded = loadLocalEnv(process.argv[2], { ...process.env });
+     process.stdout.write(loaded[process.argv[3]] ?? "");`,
+    path.join(ROOT, "scripts", "lib", "load-local-env.mjs"),
+    dir,
+    name,
+  ], { encoding: "utf8" });
+
+  await writeFile(path.join(dir, ".env.local"), "COVE_CHIEF_OF_STAFF=1\n");
+  assert.equal(lookup("COVE_CHIEF_OF_STAFF"), "1");
+  await writeFile(path.join(dir, ".env.local"), "# opt-in absent\n");
+  assert.equal(lookup("COVE_CHIEF_OF_STAFF"), "");
+});
+
 test("installer creates the optional env file safely and treats a slow worker as a warning", () => {
   const installer = readFileSync(path.join(ROOT, "scripts", "install-cove-local.sh"), "utf8");
   assert.match(installer, /install -m 600 \/dev\/null "\$REPO_DIR\/\.env\.local"/);
@@ -86,6 +266,27 @@ test("installer creates the optional env file safely and treats a slow worker as
   assert.match(installer, /Claude worker status: ok/);
   assert.match(installer, /Claude worker status: not started/);
   assert.doesNotMatch(installer, /Claude worker did not become healthy[\s\S]{0,200}exit 1/);
+  assert.match(installer, /com\.cove\.chief-of-staff-drain\.plist/);
+  assert.match(installer, /com\.cove\.chief-of-staff-sweep\.plist/);
+  assert.match(installer, /com\.cove\.chief-of-staff-nightly\.plist/);
+  assert.match(installer, /com\.cove\.chief-of-staff-review\.plist/);
+  assert.match(installer, /CHIEF_OF_STAFF_OPT_IN="\$\(local_env_value COVE_CHIEF_OF_STAFF\)"/);
+  assert.match(installer, /\[ "\$CHIEF_OF_STAFF_OPT_IN" = "1" \][\s\S]{0,180}\[ -n "\$CODEX_BIN" \][\s\S]{0,180}\[ -f "\$LANE_DATA_DIR\/cove-mandate\.md" \]/);
+  assert.match(installer, /Chief of staff: off \(set COVE_CHIEF_OF_STAFF=1 in \.env\.local, install codex, and add data\/cove-mandate\.md to enable\)/);
+  const disabledLaneBlock = installer.match(
+    /if \[ "\$INSTALL_CHIEF_OF_STAFF_LANE" != "1" \]; then([\s\S]*?)\nfi/,
+  )?.[1] ?? "";
+  for (const lane of ["drain", "sweep", "nightly", "review"]) {
+    assert.match(
+      disabledLaneBlock,
+      new RegExp(`launchctl bootout "gui/\\$UID_NUM/com\\.cove\\.chief-of-staff-${lane}" 2>/dev/null \\|\\| true`),
+    );
+  }
+  assert.match(disabledLaneBlock, /rm -f "\$CHIEF_OF_STAFF_DRAIN_PLIST"/);
+  assert.match(installer, /launchctl bootout "gui\/\$UID_NUM\/com\.cove\.attention-sweep"/);
+  assert.match(installer, /rm -f "\$LA_DIR\/com\.cove\.attention-sweep\.plist"/);
+  assert.doesNotMatch(installer, /launchctl bootstrap[^\n]*ATTENTION_SWEEP/);
+  assert.doesNotMatch(installer, /launchctl enable[^\n]*com\.cove\.attention-sweep/);
 });
 
 test("task and contact skills authenticate every documented generic mutation", () => {
@@ -158,6 +359,7 @@ test("the distributed meeting example is disabled and the live config stays igno
   const ignore = readFileSync(path.join(ROOT, ".gitignore"), "utf8");
   assert.equal(example.enabled, false);
   assert.deepEqual(example.active_tools, []);
+  assert.equal(example.window, "newer_than:4d");
   assert.doesNotMatch(ignore, /!\/data\/cove-meetings\.json(?:\n|$)/);
   assert.match(ignore, /!\/data\/cove-meetings\.example\.json/);
 });

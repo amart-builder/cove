@@ -33,11 +33,11 @@ import type {
   TaskSessionLaunchMode,
   TaskSessionRun,
 } from '@/lib/task-sessions/types';
-import { reduceFocusSeats } from '@/lib/tasks/focus-seats';
-import { taskSessionModeButtons } from './TaskSessionLauncher';
+import { reconcileFocusSeatTaskChanges } from '@/lib/tasks/focus-seats';
+import { taskSessionModeButtons, taskSessionRunNeedsEscape } from './TaskSessionLauncher';
 import { OpenInClaudeCode } from './ClaudeRunIndicators';
 import DayRitualLayer from './DayRitualLayer';
-import { ModalScrim } from './arrival/TaskSheet';
+import ModalScrim from './arrival/ModalScrim';
 import {
   beginCompletionMotion,
   beginUndoMotion,
@@ -67,6 +67,7 @@ export type SecondCurrentItemV2 = {
   kicker: string;
   title: string;
   kind: 'email' | 'rhythm';
+  count?: number;
 };
 
 export type TodayRiverStageV2Model = {
@@ -171,10 +172,30 @@ function SessionState({
   const run = task.run;
   if (!run) return null;
   if (run.status === 'running') {
+    const planning = run.permissionMode === 'plan';
+    const mode = planning ? 'Planning' : 'Auto';
+    const showEscape = taskSessionRunNeedsEscape(run);
     return (
-      <span className="today2-task-state">
-        <i aria-hidden="true" />
-        {run.permissionMode === 'plan' ? 'Planning with Claude' : 'Claude working'}
+      <span className="inline-flex items-center gap-2" onClick={(event) => event.stopPropagation()}>
+        <span
+          className={`today2-task-state ${compact ? 'is-compact' : ''}`}
+          title="Claude is working in the background. You'll get a notification when it's ready."
+          aria-label={planning
+            ? 'Planning with Claude in the background'
+            : 'Claude working in the background'}
+        >
+          <i aria-hidden="true" />
+          {mode} · running
+        </span>
+        {showEscape && (
+          <a
+            href={run.resumeUrl}
+            className="press-scale text-[11px] font-medium text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground"
+            onClick={(event) => event.stopPropagation()}
+          >
+            Open in Claude
+          </a>
+        )}
       </span>
     );
   }
@@ -192,22 +213,28 @@ function SessionState({
     ) : <span className="today2-task-state is-needs-you">Needs you</span>;
   }
   if (run.status === 'output_ready') {
+    const mode = run.permissionMode === 'plan' ? 'Planning' : 'Auto';
     return run.claudeSessionId ? (
       <span className="today2-session-link" onClick={(event) => event.stopPropagation()}>
         <OpenInClaudeCode
           sessionId={run.claudeSessionId}
           title={task.title}
-          label="Ready"
+          label={`${mode} finished · Open in Claude`}
           resumeCommand={run.resumeCommand}
-          className="today2-ready-button"
+          className="today2-ready-button press-scale"
         />
       </span>
-    ) : <span className="today2-task-state">Ready</span>;
+    ) : (
+      <span className="today2-task-state">{mode} finished</span>
+    );
   }
   if (run.status === 'failed') {
+    const mode = run.permissionMode === 'plan' ? 'Planning' : 'Auto';
     return (
       <span className={`today2-session-failed ${compact ? 'is-compact' : ''}`}>
-        <a href={run.resumeUrl} onClick={(event) => event.stopPropagation()}>Didn&apos;t finish ·</a>
+        <a className="press-scale" href={run.resumeUrl} onClick={(event) => event.stopPropagation()}>
+          {mode} stopped · Open in Claude
+        </a>
         <button type="button" onClick={(event) => {
           event.stopPropagation();
           onRetry(run.permissionMode === 'plan' ? 'planning' : 'auto');
@@ -471,7 +498,7 @@ function SortableGridCard({
         <h3>{task.title}</h3>
         <div className="today2-grid-card-bottom">
           <span className="today2-owner-chip" data-owner={task.owner}>{task.owner}</span>
-          {state && <span className="today2-grid-state">{state}</span>}
+          {state && <span className="today2-grid-state" title={task.run?.hint ?? state}>{state}</span>}
         </div>
       </article>
     </li>
@@ -868,27 +895,22 @@ const TodayRiverStageV2 = forwardRef<TodayRiverStageV2MotionHandle, TodayRiverSt
   useLayoutEffect(() => {
     if (reorderPendingRef.current || motionBusyRef.current) return;
     const modelIds = model.orderedTasks.map((task) => task.id);
-    const vanishedSeatIds = visualTaskIds
-      .slice(0, model.focusCount)
-      .filter((taskId) => !taskById.has(taskId));
-    if (vanishedSeatIds.length === 0) {
+    const reconciliation = reconcileFocusSeatTaskChanges(
+      visualTaskIds,
+      modelIds,
+      model.focusCount,
+      model.reorderEnabled,
+    );
+    const next = reconciliation.orderedTaskIds;
+    if (!reconciliation.shouldPersist) {
       if (
-        visualTaskIds.length !== modelIds.length ||
-        visualTaskIds.some((taskId, index) => taskId !== modelIds[index])
+        visualTaskIds.length !== next.length ||
+        visualTaskIds.some((taskId, index) => taskId !== next[index])
       ) {
-        setVisualTaskIds(modelIds);
+        setVisualTaskIds(next);
       }
       return;
     }
-
-    let next = visualTaskIds;
-    for (const taskId of vanishedSeatIds) {
-      next = reduceFocusSeats(next, model.focusCount, { type: 'task_vanished', taskId });
-    }
-    next = [
-      ...next.filter((taskId) => taskById.has(taskId)),
-      ...modelIds.filter((taskId) => !next.includes(taskId)),
-    ];
     setVisualTaskIds(next);
     reorderPendingRef.current = true;
     void Promise.resolve()
@@ -903,7 +925,7 @@ const TodayRiverStageV2 = forwardRef<TodayRiverStageV2MotionHandle, TodayRiverSt
             : latest;
         });
       });
-  }, [model.focusCount, model.orderedTasks, taskById, visualTaskIds]);
+  }, [model.focusCount, model.orderedTasks, model.reorderEnabled, visualTaskIds]);
 
   useEffect(() => {
     function handlePointer(event: PointerEvent) {
@@ -1076,12 +1098,20 @@ const TodayRiverStageV2 = forwardRef<TodayRiverStageV2MotionHandle, TodayRiverSt
               <button
                 key={item.id}
                 type="button"
-                className="today2-second-current-item"
+                className={`today2-second-current-item${item.count ? ' has-badge' : ''}`}
                 style={{ '--today2-item-index': index } as CSSProperties}
                 onClick={() => callbacks.onOpenSecondCurrentItem(item)}
               >
                 <span>{item.kicker}</span>
                 <strong>{item.title}</strong>
+                {item.count ? (
+                  <>
+                    <span className="today2-second-current-badge" aria-hidden="true">{item.count}</span>
+                    <span className="sr-only">
+                      {`${item.count} ${item.count === 1 ? 'email needs' : 'emails need'} you`}
+                    </span>
+                  </>
+                ) : null}
               </button>
             ))}
             {rhythmManager && (

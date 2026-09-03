@@ -26,6 +26,10 @@
     <string>/Users/operator/Atlas/Projects/astack/cove/data</string>
     <key>COVE_ATLAS_ROOT</key>
     <string>/Users/operator/Atlas</string>
+    <key>COVE_JOB_RUNNER</key>
+    <string>__COVE_JOB_RUNNER__</string>
+    <key>COVE_CODEX_BIN</key>
+    <string>__COVE_CODEX_BIN__</string>
   </dict>
   <key>StartInterval</key>
   <integer>1800</integer>

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cove.meeting-drain</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__COVE_NODE_REAL__</string>
+    <string>/Users/operator/Atlas/Projects/astack/cove/scripts/cove-meeting-watch.mjs</string>
+    <string>--drain-only</string>
+  </array>
+  <!-- /Users/operator/Atlas/Projects/astack/cove is a placeholder layout.
+       install-cove-local.sh rewrites every absolute repo/data/workspace/home
+       path for the machine it runs on. Edit by hand only if you install this
+       agent without that script. -->
+  <key>WorkingDirectory</key>
+  <string>/Users/operator/Atlas/Projects/astack/cove</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/operator</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/Users/operator/.local/bin:/usr/bin:/bin</string>
+    <key>COVE_DATA_DIR</key>
+    <string>/Users/operator/Atlas/Projects/astack/cove/data</string>
+    <key>COVE_JOB_RUNNER</key>
+    <string>__COVE_JOB_RUNNER__</string>
+    <key>COVE_CODEX_BIN</key>
+    <string>__COVE_CODEX_BIN__</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/Users/operator/Library/Logs/cove-meeting-drain.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/operator/Library/Logs/cove-meeting-drain.log</string>
+</dict>
+</plist>

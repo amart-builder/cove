@@ -1,5 +1,3 @@
-import { existsSync, readFileSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { classifyEmail, type EmailClassification } from "../src/lib/email/classifier";
@@ -21,8 +19,10 @@ import { openLocalDatabase } from "../src/lib/local/database";
 import { resolveEmailRuntimePaths } from "../src/lib/email/runtime-paths";
 import { signatureHtmlToText } from "../src/lib/email/draft-format";
 import { loadSignature } from "../src/lib/email/signature";
+import { readEmailVoiceGuide } from "../src/lib/email/voice-guide";
 import { JobScheduler } from "../src/lib/reliability/jobs";
 import { recordReceipt } from "../src/lib/reliability/receipts";
+import { tryEnqueueChiefOfStaffWake } from "../src/lib/chief-of-staff/hooks";
 import {
   createGoogleWorkspaceGateway,
   readWorkspaceConfig,
@@ -94,11 +94,6 @@ function address(value: string): string {
 
 function isFromAccount(message: MailMessage, accountEmail: string): boolean {
   return address(header(message, "From")) === accountEmail.toLowerCase();
-}
-
-function voiceGuide(): string {
-  const file = path.join(os.homedir(), ".claude", "voice.md");
-  return existsSync(file) ? readFileSync(file, "utf8").slice(0, 12_000) : "";
 }
 
 function emailRows(dbPath: string): Array<{
@@ -232,7 +227,8 @@ async function runEmailTriageUnchecked(
     dbPath,
     repoDir,
     signatureText,
-    voice: voiceGuide,
+    voice: () => readEmailVoiceGuide({ dataDir }),
+    dataDir,
     classifier,
     now,
   }));
@@ -273,7 +269,17 @@ async function runEmailTriageUnchecked(
   }
   reconcileDeadEmailJobs({ dbPath, now: now() });
   syncRollingEmailCard({ dbPath, now: now() });
-  recordReceipt({
+  const surfacedItemIds = (() => {
+    const db = openLocalDatabase(dbPath);
+    try {
+      return (db.prepare(
+        `SELECT id FROM email_items WHERE surfaced_at >= ? ORDER BY surfaced_at, id`,
+      ).all(startedAt) as Array<{ id: string }>).map((row) => row.id);
+    } finally {
+      db.close();
+    }
+  })();
+  const receipt = recordReceipt({
     dbPath,
     source: "email-triage",
     startedAt,
@@ -306,6 +312,13 @@ async function runEmailTriageUnchecked(
             jobsDead,
           })
       : undefined,
+  });
+  tryEnqueueChiefOfStaffWake({
+    reason: "triage",
+    payload: { receiptId: receipt.id, observed, classified, surfacedItemIds },
+    dbPath,
+    now: now(),
+    warn,
   });
   return {
     observed,

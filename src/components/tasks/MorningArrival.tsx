@@ -3,10 +3,16 @@
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react';
 import { useBuddy, useBuddyStream } from '@/components/buddy/BuddyProvider';
 import type { MorningBriefGeneration, PublicMorningBrief } from '@/lib/day-plan/brief';
-import type { DayPlan, DayPlanItem, DayPlanOwner as DayOwner } from '@/lib/day-plan/types';
+import type {
+  DayPlan,
+  DayPlanItem,
+  DayPlanMutationResult,
+  DayPlanOwner as DayOwner,
+} from '@/lib/day-plan/types';
+import type { ArrivalTask } from '@/lib/quiet-current/arrival-cache';
+import type { Task } from './TaskFieldsEditor';
 import {
   arrivalDateLabel,
-  focusBandItems,
   isMorningBriefWriting,
   morningArrivalGreeting,
 } from '@/lib/day-plan/presentation';
@@ -16,6 +22,7 @@ import StepDots, { morningArrivalSteps, type ArrivalStep } from './arrival/StepD
 
 export type MorningArrivalItem = {
   item: DayPlanItem;
+  task?: ArrivalTask;
   title: string;
   summary?: string;
   description?: string;
@@ -34,10 +41,12 @@ export type MorningArrivalBoardTask = {
 };
 
 interface MorningArrivalProps {
+  localDate: string;
   plan: DayPlan;
   focusCount: 1 | 2 | 3;
   items: MorningArrivalItem[];
   notTodayTasks: MorningArrivalBoardTask[];
+  tasksById: ReadonlyMap<string, Task>;
   recommendation: string;
   brief?: PublicMorningBrief;
   briefGeneration?: MorningBriefGeneration;
@@ -46,6 +55,7 @@ interface MorningArrivalProps {
   recap?: string;
   freshnessLabel?: string;
   busy?: boolean;
+  completingTaskId?: string | null;
   error?: string;
   titleId: string;
   descriptionId: string;
@@ -53,10 +63,16 @@ interface MorningArrivalProps {
   onPlanCanvasChange?: (active: boolean) => void;
   onInteract?: () => void;
   onOwnerChange: (itemId: string, owner: DayOwner) => void | Promise<void>;
-  onDragReorder: (activeId: string, overId: string) => void | Promise<void>;
+  onMoveToPosition: (itemId: string, position: number, title: string) => void | Promise<void>;
+  onFocusCountChange: (count: 1 | 2 | 3) => void | Promise<void>;
   onRemove: (itemId: string, title: string, taskBacked: boolean) => void | Promise<void>;
   onComplete: (itemId: string, title: string) => void | Promise<void>;
-  onAddTask: (taskId: string, title: string) => void | Promise<void>;
+  onCompleteBoardTask: (taskId: string, title: string) => void | Promise<void>;
+  onAddTask: (
+    taskId: string,
+    title: string,
+  ) => DayPlanMutationResult | void | Promise<DayPlanMutationResult | void>;
+  onSaveTask: (taskId: string, patch: Partial<Task>) => Promise<void>;
   onSnooze: () => void | Promise<void>;
   onBypass: () => void | Promise<void>;
   onStartDay: () => void | Promise<void>;
@@ -79,10 +95,12 @@ const STEP_ANNOUNCEMENTS: Record<ArrivalStep, string> = {
 };
 
 export default function MorningArrival({
+  localDate,
   plan,
   focusCount,
   items,
   notTodayTasks,
+  tasksById,
   recommendation,
   brief,
   briefGeneration,
@@ -91,6 +109,7 @@ export default function MorningArrival({
   recap,
   freshnessLabel,
   busy = false,
+  completingTaskId,
   error,
   titleId,
   descriptionId,
@@ -98,10 +117,13 @@ export default function MorningArrival({
   onPlanCanvasChange,
   onInteract,
   onOwnerChange,
-  onDragReorder,
+  onMoveToPosition,
+  onFocusCountChange,
   onRemove,
   onComplete,
+  onCompleteBoardTask,
   onAddTask,
+  onSaveTask,
   onSnooze,
   onBypass,
   onStartDay,
@@ -129,12 +151,6 @@ export default function MorningArrival({
         view.item.decision === 'accepted',
     )
     .sort((left, right) => left.item.position - right.item.position);
-  const focusAgentCount = focusBandItems(
-    visibleItems.map((view) => view.item),
-    focusCount,
-  )
-    .filter((item) => item.owner === 'claude' || item.owner === 'together')
-    .length;
   const buddyActive = buddyBusy || Boolean(streamingTurn);
   const currentStepIndex = availableSteps.indexOf(step);
   const isFinalStep = step === 'plan';
@@ -213,7 +229,7 @@ export default function MorningArrival({
           <p id={descriptionId} className="sr-only">
             {STEP_DESCRIPTIONS[step]}{' '}
             {step === 'plan'
-              ? `The first ${focusCount} ${focusCount === 1 ? 'task is' : 'tasks are'} your focus. `
+              ? `The first ${focusCount} ${focusCount === 1 ? 'task is' : 'tasks are'} your initial ${focusCount === 1 ? 'priority' : 'priorities'}. `
               : ''}
             {freshnessLabel}
           </p>
@@ -249,16 +265,22 @@ export default function MorningArrival({
             />
           ) : (
             <ArrivalPlanGrid
+              localDate={localDate}
               todayItems={visibleItems}
               notTodayTasks={notTodayTasks}
+              tasksById={tasksById}
               focusCount={focusCount}
               busy={busy}
+              completingTaskId={completingTaskId}
               onInteract={onInteract}
               onOwnerChange={onOwnerChange}
-              onDragReorder={onDragReorder}
+              onMoveToPosition={onMoveToPosition}
+              onFocusCountChange={onFocusCountChange}
               onRemove={onRemove}
               onComplete={onComplete}
+              onCompleteBoardTask={onCompleteBoardTask}
               onAddTask={onAddTask}
+              onSaveTask={onSaveTask}
               escapeRef={escapeRef}
             />
           )}
@@ -285,11 +307,6 @@ export default function MorningArrival({
             </div>
 
             <div className="flex flex-col items-stretch gap-1.5 sm:ml-auto sm:items-end">
-              {isFinalStep && focusAgentCount > 0 && (
-                <p className="text-center text-[11.5px] leading-[1.35] text-muted-foreground sm:text-right">
-                  Claude will start {focusAgentCount} focus {focusAgentCount === 1 ? 'task' : 'tasks'}.
-                </p>
-              )}
               <button
                 type="button"
                 data-ritual-primary={isFinalStep ? '' : undefined}

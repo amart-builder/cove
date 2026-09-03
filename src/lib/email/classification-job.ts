@@ -8,11 +8,19 @@ import {
   captureEmailCommitments,
   formatEmailCRMContext,
   getEmailCRMContext,
+  recordCRMResolutionFailure,
   recordEmailCorrespondence,
   type EmailCommitmentInput,
 } from "./automation";
 import { handleUrgentEmail } from "../attention/email-urgency";
 import { recordFailure } from "../reliability/failures";
+import type { runJob } from "../model-runner";
+import { readCoveEmailSettings } from "./settings";
+import { readVoiceFingerprint } from "./voice-guide";
+import { judgeDraftVoice } from "./voice-judge";
+import { coveDataDir } from "../operator";
+import { formatOperatorPolicy, readOperatorPolicy } from "../operator-policy";
+import { detectCalendarNotice, summarizeCalendarNotice } from "./calendar-notice";
 
 function header(message: MailMessage, name: string): string {
   return message.headers.find((item) => item.name.toLowerCase() === name.toLowerCase())
@@ -50,6 +58,7 @@ export function createEmailClassificationHandler(input: {
   gateway: RestrictedMailGateway;
   accountEmail: string;
   dbPath?: string;
+  dataDir?: string;
   repoDir?: string;
   signatureText?: string | null;
   voice?: () => string;
@@ -60,9 +69,11 @@ export function createEmailClassificationHandler(input: {
     text: string;
     voice?: string;
     recentContext?: string;
+    policy?: string;
   }) => Promise<EmailClassification>;
   now?: () => Date;
   urgentHandler?: typeof handleUrgentEmail;
+  runJobImpl?: typeof runJob;
 }) {
   const classifier = input.classifier ??
     ((classificationInput) => classifyEmail({
@@ -158,29 +169,108 @@ export function createEmailClassificationHandler(input: {
       format: "full",
     });
     const from = parseFromHeader(header(message, "From"));
-    // Relationship context is best effort: any CRM failure means classifying
-    // without context, never a failed job. Only stored deterministic CRM data
-    // reaches the trusted context slot, never other threads' email bodies.
-    let recentContext: string | undefined;
-    try {
-      recentContext = formatEmailCRMContext(getEmailCRMContext({
-        senderName: from.displayName,
-        senderEmail: from.address,
-        threadId: message.threadId,
-        dbPath: input.dbPath,
-        now: input.now,
-      }));
-    } catch {
-      recentContext = undefined;
-    }
-    const result = await classifier({
-      accountEmail: input.accountEmail,
+    const calendarNotice = detectCalendarNotice({
       sender: header(message, "From"),
       subject: header(message, "Subject"),
-      text: message.text || message.snippet,
-      voice: input.voice?.(),
-      recentContext,
     });
+    const calendarSummary = calendarNotice
+      ? summarizeCalendarNotice(calendarNotice)
+      : undefined;
+    const deterministicCalendarNotice = calendarNotice?.kind === "accepted" ||
+      calendarNotice?.kind === "tentative";
+    // Bucketing remains useful without CRM, but drafting fails closed when
+    // identity is ambiguous or Cove records cannot load.
+    let recentContext: string | undefined;
+    let draftBlockReason: string | undefined;
+    if (!deterministicCalendarNotice) {
+      try {
+        const crmContext = getEmailCRMContext({
+          senderName: from.displayName,
+          senderEmail: from.address,
+          threadId: message.threadId,
+          dbPath: input.dbPath,
+          dataDir: input.dataDir,
+          now: input.now,
+        });
+        recentContext = formatEmailCRMContext(crmContext);
+        if (crmContext.status === "ambiguous") {
+          draftBlockReason = `contact record is ambiguous (${crmContext.candidates?.length ?? 0} candidates)`;
+        }
+      } catch (error) {
+        recentContext = undefined;
+        draftBlockReason = "Cove records were unavailable";
+        recordCRMResolutionFailure({
+          dbPath: input.dbPath,
+          sourceId: `gmail:${message.threadId}`,
+          message: "Email reply draft was withheld because Cove records were unavailable.",
+          details: {
+            threadId: message.threadId,
+            senderEmail: from.address,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          occurredAt: (input.now ?? (() => new Date()))().toISOString(),
+        });
+      }
+    }
+    const classified: EmailClassification = deterministicCalendarNotice
+      ? {
+          bucket: "fyi",
+          summary: calendarSummary!,
+          recommendedAction: null,
+          draftBody: null,
+          commitments: [],
+          recordCorrespondence: false,
+          urgent: false,
+          urgencyReason: null,
+          modelVersion: "deterministic:calendar-notice-v1",
+        }
+      : await classifier({
+          accountEmail: input.accountEmail,
+          sender: header(message, "From"),
+          subject: header(message, "Subject"),
+          text: message.text || message.snippet,
+          voice: input.voice?.(),
+          recentContext,
+          policy: (() => {
+            const value = readOperatorPolicy({ dataDir: coveDataDir(input.dataDir) });
+            return value ? formatOperatorPolicy(value) : undefined;
+          })(),
+        });
+    const modelSummary = classified.summary.trim();
+    const classifiedWithCalendarSummary = calendarNotice && !deterministicCalendarNotice
+      ? {
+          ...classified,
+          summary: modelSummary && modelSummary !== calendarSummary
+            ? `${calendarSummary}. ${modelSummary}`
+            : calendarSummary!,
+        }
+      : classified;
+    const result = classifiedWithCalendarSummary.bucket === "reply" && draftBlockReason
+      ? {
+          ...classifiedWithCalendarSummary,
+          bucket: "action" as const,
+          draftBody: null,
+          recommendedAction: `Cove withheld the reply draft: ${draftBlockReason}. Fix the contact record in CRM, then rerun triage.`,
+        }
+      : classifiedWithCalendarSummary;
+    let voiceJudgeScore: number | null = null;
+    let voiceJudgeVerdict: string | null = null;
+    if (result.draftBody && input.dataDir) {
+      const settings = readCoveEmailSettings({ dataDir: input.dataDir });
+      if (settings.voiceReview.judgeEnabled) {
+        const fingerprint = readVoiceFingerprint(settings.voiceFingerprintPath);
+        if (fingerprint) {
+          const judged = await judgeDraftVoice({
+            fingerprint,
+            draftBody: result.draftBody,
+            repoDir: input.repoDir,
+            runJobImpl: input.runJobImpl,
+          });
+          voiceJudgeScore = judged?.score ?? null;
+          voiceJudgeVerdict = judged?.verdict ?? null;
+        }
+      }
+    }
     const sourceEvidence = normalizedEvidence(message.text || message.snippet);
     const groundedCommitments = (result.commitments ?? []).filter((commitment) => {
       const quote = normalizedEvidence(commitment.sourceQuote);
@@ -194,6 +284,8 @@ export function createEmailClassificationHandler(input: {
       summary: result.summary,
       recommendedAction: result.recommendedAction,
       draftBody: result.draftBody,
+      voiceJudgeScore,
+      voiceJudgeVerdict,
       signatureText: input.signatureText,
       artifactPayload: {
         messageId: message.id,
@@ -256,7 +348,9 @@ export function createEmailClassificationHandler(input: {
     }
     return {
       summary: applied.applied
-        ? "Classified one email through the tool-free model boundary."
+        ? deterministicCalendarNotice
+          ? "Classified one calendar response through the deterministic boundary."
+          : "Classified one email through the tool-free model boundary."
         : permanentlySkipped
           ? "Email classification could no longer apply and its ingestion marker was recorded."
           : "A newer message superseded this email classification.",

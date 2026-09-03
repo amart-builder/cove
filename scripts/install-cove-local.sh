@@ -93,6 +93,20 @@ case "$NODE_REAL" in
     echo "Note: Node is managed by a version manager. If Cove stops starting after you switch Node versions, re-run this script." ;;
 esac
 
+if [ ! -e "$REPO_DIR/.env.local" ]; then
+  install -m 600 /dev/null "$REPO_DIR/.env.local"
+  echo "Created a private empty .env.local. Add optional Cove settings there when needed."
+fi
+local_env_value() {
+  "$NODE_REAL" --input-type=module -e '
+    import { pathToFileURL } from "node:url";
+    const { loadLocalEnv } = await import(pathToFileURL(process.argv[1]).href);
+    const loaded = loadLocalEnv(process.argv[2], { ...process.env });
+    process.stdout.write(loaded[process.argv[3]] ?? "");
+  ' "$REPO_DIR/scripts/lib/load-local-env.mjs" "$REPO_DIR" "$1"
+}
+CHIEF_OF_STAFF_OPT_IN="$(local_env_value COVE_CHIEF_OF_STAFF)"
+
 NEXT_BIN="$REPO_DIR/node_modules/.bin/next"
 if [ ! -x "$NEXT_BIN" ]; then
   echo "Could not find Next.js at $NEXT_BIN. Run 'npm install' and 'npm run build' first." >&2
@@ -111,11 +125,11 @@ if [ -z "$CLAUDE_BIN" ] || [ ! -x "$CLAUDE_BIN" ]; then
   echo "Claude Code is required for Cove execution. Install it or set COVE_CLAUDE_BIN." >&2
   exit 1
 fi
-BRIEF_WRITER="${COVE_BRIEF_WRITER:-claude}"
-case "$BRIEF_WRITER" in
-  claude|codex) ;;
+JOB_RUNNER="${COVE_JOB_RUNNER:-codex-sol-high}"
+case "$JOB_RUNNER" in
+  codex-sol-high|claude) ;;
   *)
-    echo "COVE_BRIEF_WRITER must be 'claude' or 'codex'." >&2
+    echo "COVE_JOB_RUNNER must be 'codex-sol-high' or 'claude'." >&2
     exit 1
     ;;
 esac
@@ -129,8 +143,8 @@ fi
 if [ -z "$CODEX_BIN" ] && [ -x "/usr/local/bin/codex" ]; then
   CODEX_BIN="/usr/local/bin/codex"
 fi
-if [ "$BRIEF_WRITER" = "codex" ] && { [ -z "$CODEX_BIN" ] || [ ! -x "$CODEX_BIN" ]; }; then
-  echo "COVE_BRIEF_WRITER=codex requires an executable Codex CLI. Install it or set COVE_CODEX_BIN." >&2
+if [ "$JOB_RUNNER" = "codex-sol-high" ] && { [ -z "$CODEX_BIN" ] || [ ! -x "$CODEX_BIN" ]; }; then
+  echo "COVE_JOB_RUNNER=codex-sol-high requires an executable Codex CLI. Install it or set COVE_CODEX_BIN." >&2
   exit 1
 fi
 CODEX_PLIST_ENTRY=""
@@ -208,10 +222,6 @@ printf -v NOTIFICATION_PLIST_ENTRY \
   "$NOTIFICATION_APP_XML"
 
 mkdir -p "$LOG_DIR" "$LA_DIR"
-if [ ! -e "$REPO_DIR/.env.local" ]; then
-  install -m 600 /dev/null "$REPO_DIR/.env.local"
-  echo "Created a private empty .env.local. Add optional Cove settings there when needed."
-fi
 LANE_DATA_DIR="${COVE_DATA_DIR:-$REPO_DIR/data}"
 mkdir -p "$LANE_DATA_DIR"
 ATTENTION_CONFIG="$LANE_DATA_DIR/attention-sweep.json"
@@ -282,6 +292,7 @@ STIGNORE_BLOCK
   ATLAS_ROOT="$(resolve_atlas_root)"
   MINI_BRIEF_PLIST="$LA_DIR/com.cove.morning-brief.plist"
   MINI_MEETING_PLIST="$LA_DIR/com.cove.meeting-watch.plist"
+  MINI_MEETING_DRAIN_PLIST="$LA_DIR/com.cove.meeting-drain.plist"
   MINI_PROGRESS_PLIST="$LA_DIR/com.cove.progress.plist"
   claim_lane meeting_watch mini >/dev/null
   claim_lane progress mini >/dev/null
@@ -326,8 +337,8 @@ STIGNORE_BLOCK
     <string>America/Los_Angeles</string>
     <key>COVE_BRIEF_REQUIRE_SOURCE_CHECKPOINT</key>
     <string>1</string>
-    <key>COVE_BRIEF_WRITER</key>
-    <string>$BRIEF_WRITER</string>
+    <key>COVE_JOB_RUNNER</key>
+    <string>$JOB_RUNNER</string>
 $CODEX_PLIST_ENTRY
 $NOTIFICATION_PLIST_ENTRY
     <key>COVE_BRIEF_GOALS_PATH</key>
@@ -352,7 +363,19 @@ EOF
     "$HOME" \
     "$ATLAS_ROOT" \
     "$LANE_DATA_DIR" \
-    "$NODE_REAL"
+    "$NODE_REAL" \
+    "$JOB_RUNNER" \
+    "$CODEX_BIN"
+  "$NODE_REAL" "$LANE_PLIST_RENDERER" \
+    "$REPO_DIR/scripts/launchd/com.cove.meeting-drain.plist" \
+    "$MINI_MEETING_DRAIN_PLIST" \
+    "$REPO_DIR" \
+    "$HOME" \
+    "$ATLAS_ROOT" \
+    "$LANE_DATA_DIR" \
+    "$NODE_REAL" \
+    "$JOB_RUNNER" \
+    "$CODEX_BIN"
   "$NODE_REAL" "$LANE_PLIST_RENDERER" \
     "$REPO_DIR/scripts/launchd/com.cove.progress.plist" \
     "$MINI_PROGRESS_PLIST" \
@@ -360,20 +383,26 @@ EOF
     "$HOME" \
     "$ATLAS_ROOT" \
     "$LANE_DATA_DIR" \
-    "$NODE_REAL"
+    "$NODE_REAL" \
+    "$JOB_RUNNER" \
+    "$CODEX_BIN"
   retire_legacy_agent morning-brief
   retire_legacy_agent meeting-watch
+  retire_legacy_agent meeting-drain
   retire_legacy_agent progress
   launchctl bootout "gui/$UID_NUM/com.cove.morning-brief" 2>/dev/null || true
   launchctl bootout "gui/$UID_NUM/com.cove.meeting-watch" 2>/dev/null || true
+  launchctl bootout "gui/$UID_NUM/com.cove.meeting-drain" 2>/dev/null || true
   launchctl bootout "gui/$UID_NUM/com.cove.progress" 2>/dev/null || true
   launchctl bootstrap "gui/$UID_NUM" "$MINI_BRIEF_PLIST"
   launchctl bootstrap "gui/$UID_NUM" "$MINI_MEETING_PLIST"
+  launchctl bootstrap "gui/$UID_NUM" "$MINI_MEETING_DRAIN_PLIST"
   launchctl bootstrap "gui/$UID_NUM" "$MINI_PROGRESS_PLIST"
   mark_lane_installed meeting_watch
   mark_lane_installed progress_reconcile
   echo "Installed the Mini morning-brief agent (7:30 local): $MINI_BRIEF_PLIST"
-  echo "Installed the Mini meeting watcher (every 5 minutes): $MINI_MEETING_PLIST"
+  echo "Installed the Mini meeting watcher (weekdays every 15 minutes, 08:00-18:00 local, plus login catch-up): $MINI_MEETING_PLIST"
+  echo "Installed the Mini meeting analysis drain (every 15 minutes, always on): $MINI_MEETING_DRAIN_PLIST"
   echo "Installed the Mini progress reconciler (every 30 minutes): $MINI_PROGRESS_PLIST"
   echo "Brief goals: $ATLAS_ROOT/brain/GOALS.md"
   echo "Logs: $LOG_DIR/cove-morning-brief.log"
@@ -452,21 +481,30 @@ if [ "$MINI" = "1" ]; then
   exit 0
 fi
 
-# --- Single-Mac background lanes: meeting watch + progress reconciliation ---
-# StartInterval jobs catch up when the Mac wakes. The same templates also serve
-# the optional Mini profile above; neither feature depends on owning a Mini.
+# --- Single-Mac background lanes: meeting, progress, and weekly voice review ---
+# The meeting calendar keeps weekday working hours while RunAtLoad provides
+# login catch-up. The same templates also serve the optional Mini profile above,
+# so Mini and normal installs retain identical watcher behavior.
 ATLAS_ROOT="$(resolve_atlas_root)"
 MEETING_PLIST="$LA_DIR/com.cove.meeting-watch.plist"
+MEETING_DRAIN_PLIST="$LA_DIR/com.cove.meeting-drain.plist"
 PROGRESS_PLIST="$LA_DIR/com.cove.progress.plist"
+VOICE_REVIEW_PLIST="$LA_DIR/com.cove.voice-review.plist"
+CHIEF_OF_STAFF_DRAIN_PLIST="$LA_DIR/com.cove.chief-of-staff-drain.plist"
+CHIEF_OF_STAFF_SWEEP_PLIST="$LA_DIR/com.cove.chief-of-staff-sweep.plist"
+CHIEF_OF_STAFF_NIGHTLY_PLIST="$LA_DIR/com.cove.chief-of-staff-nightly.plist"
+CHIEF_OF_STAFF_REVIEW_PLIST="$LA_DIR/com.cove.chief-of-staff-review.plist"
 INSTALL_MEETING_LANE=0
 INSTALL_PROGRESS_LANE=0
+INSTALL_VOICE_REVIEW_LANE=0
+INSTALL_CHIEF_OF_STAFF_LANE=0
 MEETING_CLAIM="$(claim_lane meeting_watch plain)"
 case "$MEETING_CLAIM" in
   claimed:*) INSTALL_MEETING_LANE=1 ;;
   skipped:*)
     MEETING_OWNER="${MEETING_CLAIM#skipped:}"
     echo "Skipping meeting watcher: $MEETING_OWNER owns this lane."
-    rm -f "$MEETING_PLIST"
+    rm -f "$MEETING_PLIST" "$MEETING_DRAIN_PLIST"
     ;;
 esac
 PROGRESS_CLAIM="$(claim_lane progress plain)"
@@ -478,19 +516,72 @@ case "$PROGRESS_CLAIM" in
     rm -f "$PROGRESS_PLIST"
     ;;
 esac
+VOICE_REVIEW_CLAIM="$(claim_lane voice_review plain)"
+case "$VOICE_REVIEW_CLAIM" in
+  claimed:*) INSTALL_VOICE_REVIEW_LANE=1 ;;
+  skipped:*)
+    VOICE_REVIEW_OWNER="${VOICE_REVIEW_CLAIM#skipped:}"
+    echo "Skipping weekly voice review: $VOICE_REVIEW_OWNER owns this lane."
+    rm -f "$VOICE_REVIEW_PLIST"
+    ;;
+esac
+if [ "$CHIEF_OF_STAFF_OPT_IN" = "1" ] &&
+   [ -n "$CODEX_BIN" ] && [ -x "$CODEX_BIN" ] &&
+   [ -f "$LANE_DATA_DIR/cove-mandate.md" ]; then
+  CHIEF_OF_STAFF_CLAIM="$(claim_lane chief_of_staff plain)"
+  case "$CHIEF_OF_STAFF_CLAIM" in
+    claimed:*) INSTALL_CHIEF_OF_STAFF_LANE=1 ;;
+    skipped:*)
+      CHIEF_OF_STAFF_OWNER="${CHIEF_OF_STAFF_CLAIM#skipped:}"
+      echo "Skipping chief-of-staff lanes: $CHIEF_OF_STAFF_OWNER owns this lane."
+      ;;
+  esac
+else
+  echo "Chief of staff: off (set COVE_CHIEF_OF_STAFF=1 in .env.local, install codex, and add data/cove-mandate.md to enable)"
+fi
+if [ "$INSTALL_CHIEF_OF_STAFF_LANE" != "1" ]; then
+  launchctl bootout "gui/$UID_NUM/com.cove.chief-of-staff-drain" 2>/dev/null || true
+  launchctl bootout "gui/$UID_NUM/com.cove.chief-of-staff-sweep" 2>/dev/null || true
+  launchctl bootout "gui/$UID_NUM/com.cove.chief-of-staff-nightly" 2>/dev/null || true
+  launchctl bootout "gui/$UID_NUM/com.cove.chief-of-staff-review" 2>/dev/null || true
+  rm -f "$CHIEF_OF_STAFF_DRAIN_PLIST" "$CHIEF_OF_STAFF_SWEEP_PLIST" "$CHIEF_OF_STAFF_NIGHTLY_PLIST" "$CHIEF_OF_STAFF_REVIEW_PLIST"
+fi
 render_lane_plist() {
   "$NODE_REAL" "$LANE_PLIST_RENDERER" \
-    "$1" "$2" "$REPO_DIR" "$HOME" "$ATLAS_ROOT" "$LANE_DATA_DIR" "$NODE_REAL"
+    "$1" "$2" "$REPO_DIR" "$HOME" "$ATLAS_ROOT" "$LANE_DATA_DIR" "$NODE_REAL" \
+    "$JOB_RUNNER" "$CODEX_BIN" "$NOTIFICATION_APP_EXECUTABLE"
 }
 if [ "$INSTALL_MEETING_LANE" = "1" ]; then
   render_lane_plist \
     "$REPO_DIR/scripts/launchd/com.cove.meeting-watch.plist" \
     "$MEETING_PLIST"
+  render_lane_plist \
+    "$REPO_DIR/scripts/launchd/com.cove.meeting-drain.plist" \
+    "$MEETING_DRAIN_PLIST"
 fi
 if [ "$INSTALL_PROGRESS_LANE" = "1" ]; then
   render_lane_plist \
     "$REPO_DIR/scripts/launchd/com.cove.progress.plist" \
     "$PROGRESS_PLIST"
+fi
+if [ "$INSTALL_VOICE_REVIEW_LANE" = "1" ]; then
+  render_lane_plist \
+    "$REPO_DIR/scripts/launchd/com.cove.voice-review.plist" \
+    "$VOICE_REVIEW_PLIST"
+fi
+if [ "$INSTALL_CHIEF_OF_STAFF_LANE" = "1" ]; then
+  render_lane_plist \
+    "$REPO_DIR/scripts/launchd/com.cove.chief-of-staff-drain.plist" \
+    "$CHIEF_OF_STAFF_DRAIN_PLIST"
+  render_lane_plist \
+    "$REPO_DIR/scripts/launchd/com.cove.chief-of-staff-sweep.plist" \
+    "$CHIEF_OF_STAFF_SWEEP_PLIST"
+  render_lane_plist \
+    "$REPO_DIR/scripts/launchd/com.cove.chief-of-staff-nightly.plist" \
+    "$CHIEF_OF_STAFF_NIGHTLY_PLIST"
+  render_lane_plist \
+    "$REPO_DIR/scripts/launchd/com.cove.chief-of-staff-review.plist" \
+    "$CHIEF_OF_STAFF_REVIEW_PLIST"
 fi
 
 # --- Install Cove's skills for Claude and Codex ---
@@ -521,7 +612,6 @@ SERVER_PLIST="$LA_DIR/com.cove.local.plist"
 BACKUP_PLIST="$LA_DIR/com.cove.local.backup.plist"
 JOBS_PLIST="$LA_DIR/com.cove.jobs.plist"
 REMINDERS_PLIST="$LA_DIR/com.cove.reminders.plist"
-ATTENTION_SWEEP_PLIST="$LA_DIR/com.cove.attention-sweep.plist"
 TRIAGE_PLIST="$LA_DIR/com.cove.email-triage.plist"
 WORKER_PLIST="$LA_DIR/com.cove.claude-worker.plist"
 
@@ -566,8 +656,11 @@ cat > "$SERVER_PLIST" <<EOF
     <string>$BUDDY_APP_URL</string>
     <key>COVE_CLAUDE_WORKER_AVAILABLE</key>
     <string>1</string>
-    <key>COVE_BRIEF_WRITER</key>
-    <string>$BRIEF_WRITER</string>
+    <key>COVE_NOTIFY</key>
+    <string>1</string>
+    <key>COVE_JOB_RUNNER</key>
+    <string>$JOB_RUNNER</string>
+$CODEX_PLIST_ENTRY
     <key>COVE_PROGRESS_RELAY_CONSUMER</key>
     <string>1</string>
 $NOTIFICATION_PLIST_ENTRY
@@ -623,8 +716,8 @@ $NOTIFICATION_PLIST_ENTRY
     <string>$BUDDY_DEEPLINKS</string>
     <key>COVE_BRIEF_WEB_BASE</key>
     <string>http://127.0.0.1:3200</string>
-    <key>COVE_BRIEF_WRITER</key>
-    <string>$BRIEF_WRITER</string>
+    <key>COVE_JOB_RUNNER</key>
+    <string>$JOB_RUNNER</string>
 $CODEX_PLIST_ENTRY
 $SUPERNOVA_PLIST_ENTRY
     <key>COVE_CONTENT_QUOTA_POSTS</key>
@@ -707,6 +800,9 @@ cat > "$JOBS_PLIST" <<EOF
     <string>$HOME</string>
     <key>COVE_NOTIFY</key>
     <string>1</string>
+    <key>COVE_JOB_RUNNER</key>
+    <string>$JOB_RUNNER</string>
+$CODEX_PLIST_ENTRY
 $NOTIFICATION_PLIST_ENTRY
   </dict>
 </dict>
@@ -742,44 +838,6 @@ cat > "$REMINDERS_PLIST" <<EOF
   <dict>
     <key>PATH</key>
     <string>$NODE_BIN:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
-$NOTIFICATION_PLIST_ENTRY
-  </dict>
-</dict>
-</plist>
-EOF
-
-# --- Judgment sweep: shadow-tested attention ranking at 11:30 and 16:00 ---
-cat > "$ATTENTION_SWEEP_PLIST" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.cove.attention-sweep</string>
-  <key>WorkingDirectory</key>
-  <string>$REPO_DIR</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>$NODE_REAL</string>
-    <string>--import</string>
-    <string>$REPO_DIR/node_modules/tsx/dist/loader.mjs</string>
-    <string>$REPO_DIR/scripts/cove-attention-sweep.mjs</string>
-  </array>
-  <key>StartCalendarInterval</key>
-  <array>
-    <dict><key>Hour</key><integer>11</integer><key>Minute</key><integer>30</integer></dict>
-    <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>0</integer></dict>
-  </array>
-  <key>StandardOutPath</key>
-  <string>$LOG_DIR/cove-attention-sweep.log</string>
-  <key>StandardErrorPath</key>
-  <string>$LOG_DIR/cove-attention-sweep.log</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key>
-    <string>$NODE_BIN:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
-    <key>HOME</key>
-    <string>$HOME</string>
 $NOTIFICATION_PLIST_ENTRY
   </dict>
 </dict>
@@ -841,6 +899,9 @@ $TRIAGE_CAL_XML
     <string>$HOME</string>
     <key>COVE_NOTIFY</key>
     <string>1</string>
+    <key>COVE_JOB_RUNNER</key>
+    <string>$JOB_RUNNER</string>
+$CODEX_PLIST_ENTRY
 $NOTIFICATION_PLIST_ENTRY
   </dict>
 </dict>
@@ -860,7 +921,13 @@ retire_legacy_agent attention-sweep
 retire_legacy_agent email-triage
 retire_legacy_agent claude-worker
 retire_legacy_agent meeting-watch
+retire_legacy_agent meeting-drain
 retire_legacy_agent progress
+retire_legacy_agent voice-review
+retire_legacy_agent chief-of-staff-drain
+retire_legacy_agent chief-of-staff-sweep
+retire_legacy_agent chief-of-staff-nightly
+retire_legacy_agent chief-of-staff-review
 # com.forge.web is the pre-rename web server on this same port. Leaving it
 # loaded means com.cove.local crash-loops on EADDRINUSE while the readiness
 # probe below happily answers off the old server, so the install looks fine and
@@ -871,10 +938,17 @@ launchctl bootout "gui/$UID_NUM/com.cove.local.backup" 2>/dev/null || true
 launchctl bootout "gui/$UID_NUM/com.cove.jobs" 2>/dev/null || true
 launchctl bootout "gui/$UID_NUM/com.cove.reminders" 2>/dev/null || true
 launchctl bootout "gui/$UID_NUM/com.cove.attention-sweep" 2>/dev/null || true
+rm -f "$LA_DIR/com.cove.attention-sweep.plist"
 launchctl bootout "gui/$UID_NUM/com.cove.email-triage" 2>/dev/null || true
 launchctl bootout "gui/$UID_NUM/com.cove.claude-worker" 2>/dev/null || true
 launchctl bootout "gui/$UID_NUM/com.cove.meeting-watch" 2>/dev/null || true
+launchctl bootout "gui/$UID_NUM/com.cove.meeting-drain" 2>/dev/null || true
 launchctl bootout "gui/$UID_NUM/com.cove.progress" 2>/dev/null || true
+launchctl bootout "gui/$UID_NUM/com.cove.voice-review" 2>/dev/null || true
+launchctl bootout "gui/$UID_NUM/com.cove.chief-of-staff-drain" 2>/dev/null || true
+launchctl bootout "gui/$UID_NUM/com.cove.chief-of-staff-sweep" 2>/dev/null || true
+launchctl bootout "gui/$UID_NUM/com.cove.chief-of-staff-nightly" 2>/dev/null || true
+launchctl bootout "gui/$UID_NUM/com.cove.chief-of-staff-review" 2>/dev/null || true
 # Decommission the retired MBP 7:30 brief agent entirely (bootout + plist
 # removal): the Mini owns scheduled generation now.
 launchctl bootout "gui/$UID_NUM/com.cove.morning-brief" 2>/dev/null || true
@@ -912,7 +986,6 @@ launchctl bootstrap "gui/$UID_NUM" "$SERVER_PLIST"
 launchctl bootstrap "gui/$UID_NUM" "$BACKUP_PLIST"
 launchctl bootstrap "gui/$UID_NUM" "$JOBS_PLIST"
 launchctl bootstrap "gui/$UID_NUM" "$REMINDERS_PLIST"
-launchctl bootstrap "gui/$UID_NUM" "$ATTENTION_SWEEP_PLIST"
 WORKER_START_EPOCH="$(date +%s)"
 if ! launchctl bootstrap "gui/$UID_NUM" "$WORKER_PLIST" 2>/dev/null; then
   # A KeepAlive worker can still be exiting for a moment after bootout. Give
@@ -923,22 +996,43 @@ if ! launchctl bootstrap "gui/$UID_NUM" "$WORKER_PLIST" 2>/dev/null; then
 fi
 if [ "$INSTALL_MEETING_LANE" = "1" ]; then
   launchctl bootstrap "gui/$UID_NUM" "$MEETING_PLIST"
+  launchctl bootstrap "gui/$UID_NUM" "$MEETING_DRAIN_PLIST"
   mark_lane_installed meeting_watch
 fi
 if [ "$INSTALL_PROGRESS_LANE" = "1" ]; then
   launchctl bootstrap "gui/$UID_NUM" "$PROGRESS_PLIST"
   mark_lane_installed progress_reconcile
 fi
+if [ "$INSTALL_VOICE_REVIEW_LANE" = "1" ]; then
+  launchctl bootstrap "gui/$UID_NUM" "$VOICE_REVIEW_PLIST"
+  mark_lane_installed voice_review
+fi
+if [ "$INSTALL_CHIEF_OF_STAFF_LANE" = "1" ]; then
+  launchctl bootstrap "gui/$UID_NUM" "$CHIEF_OF_STAFF_DRAIN_PLIST"
+  launchctl bootstrap "gui/$UID_NUM" "$CHIEF_OF_STAFF_SWEEP_PLIST"
+  launchctl bootstrap "gui/$UID_NUM" "$CHIEF_OF_STAFF_NIGHTLY_PLIST"
+  launchctl bootstrap "gui/$UID_NUM" "$CHIEF_OF_STAFF_REVIEW_PLIST"
+  mark_lane_installed chief_of_staff
+fi
 if [ -f "$TRIAGE_PLIST" ]; then launchctl bootstrap "gui/$UID_NUM" "$TRIAGE_PLIST"; fi
 launchctl enable "gui/$UID_NUM/com.cove.local" 2>/dev/null || true
 launchctl enable "gui/$UID_NUM/com.cove.claude-worker" 2>/dev/null || true
 launchctl enable "gui/$UID_NUM/com.cove.jobs" 2>/dev/null || true
-launchctl enable "gui/$UID_NUM/com.cove.attention-sweep" 2>/dev/null || true
 if [ "$INSTALL_MEETING_LANE" = "1" ]; then
   launchctl enable "gui/$UID_NUM/com.cove.meeting-watch" 2>/dev/null || true
+  launchctl enable "gui/$UID_NUM/com.cove.meeting-drain" 2>/dev/null || true
 fi
 if [ "$INSTALL_PROGRESS_LANE" = "1" ]; then
   launchctl enable "gui/$UID_NUM/com.cove.progress" 2>/dev/null || true
+fi
+if [ "$INSTALL_VOICE_REVIEW_LANE" = "1" ]; then
+  launchctl enable "gui/$UID_NUM/com.cove.voice-review" 2>/dev/null || true
+fi
+if [ "$INSTALL_CHIEF_OF_STAFF_LANE" = "1" ]; then
+  launchctl enable "gui/$UID_NUM/com.cove.chief-of-staff-drain" 2>/dev/null || true
+  launchctl enable "gui/$UID_NUM/com.cove.chief-of-staff-sweep" 2>/dev/null || true
+  launchctl enable "gui/$UID_NUM/com.cove.chief-of-staff-nightly" 2>/dev/null || true
+  launchctl enable "gui/$UID_NUM/com.cove.chief-of-staff-review" 2>/dev/null || true
 fi
 
 # Confirm the server actually came up. This catches the most common failure:
@@ -983,14 +1077,21 @@ if [ -n "$UP" ]; then
     echo "Claude worker status: not started"
   fi
   if [ "$INSTALL_MEETING_LANE" = "1" ]; then
-    echo "Meeting watcher: every 5 minutes while this Mac is awake, with catch-up on wake"
+    echo "Meeting watcher: weekdays every 15 minutes, 08:00-18:00 local, plus login catch-up"
+    echo "Meeting analysis drain: every 15 minutes, always on"
   else
     echo "Meeting watcher: skipped because $MEETING_OWNER owns this lane"
+    echo "Meeting analysis drain: skipped because $MEETING_OWNER owns this lane"
   fi
   if [ "$INSTALL_PROGRESS_LANE" = "1" ]; then
     echo "Progress reconciler: every 30 minutes while this Mac is awake, with catch-up on wake"
   else
     echo "Progress reconciler: skipped because $PROGRESS_OWNER owns this lane"
+  fi
+  if [ "$INSTALL_VOICE_REVIEW_LANE" = "1" ]; then
+    echo "Weekly voice review: Sundays at 18:00 local"
+  else
+    echo "Weekly voice review: skipped because $VOICE_REVIEW_OWNER owns this lane"
   fi
   echo "Morning Brief: on-open backfill/post-settlement; --mini optionally adds a 7:30 always-on lane"
   echo "Day-plan batch execution remains off until COVE_CLAUDE_EXECUTION_ENABLED=1 and an allowlisted workspace config are explicitly added."

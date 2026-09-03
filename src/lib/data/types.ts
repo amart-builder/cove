@@ -14,6 +14,11 @@ export type Task = {
   description: string;
   priority: "low" | "medium" | "high";
   due_at: string | null;
+  brief?: string | null;
+  remind_at?: string | null;
+  nudged_at?: string | null;
+  engaged_at?: string | null;
+  notification_policy?: "none" | "predeadline" | "due" | "both" | null;
   tags: string[];
   project?: string;
   position: number;
@@ -114,6 +119,7 @@ export type EmailItem = {
   priority: number;
   received_at?: string | null;
   account_email?: string | null;
+  actioned_at?: string | null;
   created_at?: string;
   updated_at?: string;
 };

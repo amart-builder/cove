@@ -410,16 +410,29 @@ If the user has a CSV or contacts export, wait to import it until Step 4. Confir
 
 ### Meeting notes
 
-Ask: "Which meeting-notes tool do you use: Gemini, Granola, Fathom, Otter, something else, or none?"
+Ask: "Do you use Granola for meeting notes, another notes tool, or none?"
 
 Copy `data/cove-meetings.example.json` to the private `data/cove-meetings.json`.
 
-- For Gemini, Granola, Fathom, or Otter, set `enabled` to `true` and put the lowercase name in `active_tools`.
-- For more than one, list each tool.
+- Granola is the recommended path. It requires a Business or Enterprise plan.
+  In the Granola desktop app, open Settings, Connectors, API keys and create a
+  personal key. Put it in the mode-0600 `.env.local` file as
+  `COVE_GRANOLA_API_KEY=<key>`. Personal keys expire. A 401 or 403 sets the
+  Granola health status to `failed` so the expired key is visible.
+- For Granola, set `enabled` to `true`, put `granola` in `active_tools`, and set
+  `granola.enabled` to `true`. Add the user's email to
+  `granola.owner_emails`. An empty owner list accepts every note visible to the
+  key.
+- Granola notes come from the read-only Granola API. Notification emails are
+  labelled processed and are not analyzed. One Granola note becomes one Cove
+  meeting.
+- Gemini email ingestion is a legacy path. Use it only for a person who still
+  relies on Gemini meeting-note emails. Fathom and Otter continue to use their
+  configured Gmail patterns.
 - For another tool, ask for one real sender and subject. Add a narrow `sender_regex` or `subject_regex` and `gmail_query`. Test it. Never use a catch-all inbox query.
-- For none, use `enabled:false`, `active_tools:[]`, `window:"newer_than:2d"`, `processed_label:"Cove/Meeting-Processed"`, and `custom_patterns:[]`.
+- For none, use `enabled:false`, `active_tools:[]`, `window:"newer_than:4d"`, `processed_label:"Cove/Meeting-Processed"`, and `custom_patterns:[]`.
 
-Keep the two-day watcher window. The scheduled inbox check catches up after longer sleep. The same meeting is handled only once.
+Keep the four-day watcher window so Friday-evening and weekend notes remain eligible on Monday morning. The watcher polls Granola and Gmail every 15 minutes on weekdays from 08:00 through 18:00 local time, including a final 18:00 run, and also runs once at login. A separate local-only drain checks ready meeting-analysis jobs every 15 minutes at all hours; an idle drain does not invoke a model. After durable Gmail ingestion the watcher applies the processed label and archives the message by removing `INBOX`; it never deletes or marks meeting mail read. Permanently failed re-picks remain in the inbox as a visible signal. The same meeting is handled only once.
 
 The installer in Step 5 follows `scripts/lib/cove-lane-ownership.mjs`. This Mac may claim `meeting_watch` only if another Mac does not own it. After install, verify `data/cove-lane-owners.json`, `data/intake/installed-lanes.json`, and one `node scripts/cove-meeting-watch.mjs --once` run. If another Mac owns the work, verify that Mac. Do not steal the lane.
 
@@ -523,13 +536,13 @@ Morning Brief."
 
 ```bash
 npm run build
-COVE_BRIEF_WRITER=claude bash scripts/install-cove-local.sh
+bash scripts/install-cove-local.sh
 ```
 
 The first production build passed in Step 1. Build again after writing the
 user's private configuration, then run the installer. The installer writes the
-chosen brief writer into the supervised worker, adds the task and contact
-skills, starts Cove at `http://localhost:3200`, starts it at login, restarts it
+shared background model runner into the supervised worker, adds the task and
+contact skills, starts Cove at `http://localhost:3200`, starts it at login, restarts it
 after a crash, checks reminders each minute, and makes a daily database backup.
 Cove binds to `localhost` only.
 
@@ -553,7 +566,7 @@ Do not show the first test brief as the user's brief.
    are deliberately deduplicated.
 5. If email was deliberately connected, run the `cove-voice` skill against 30 to 60 days of sent mail. Tune sample drafts for two or three rounds.
 6. If email was deliberately connected, run the `cove-email` skill once. Show one Gmail draft and the one email card. The user must send any real reply.
-7. If email or meeting notes were deliberately configured, run `COVE_BRIEF_WRITER=claude bash scripts/install-cove-local.sh` again so the saved schedules are installed.
+7. If email or meeting notes were deliberately configured, run `bash scripts/install-cove-local.sh` again so the saved schedules are installed.
 8. If a people import is waiting, run it now. Capture and show one real person.
 9. Check `http://localhost:3200`, the daily backup receipt, and every integration the user chose. Confirm skipped integrations stayed unconfigured.
 10. Read `data/attention-sweep.json`, which the installer creates on a fresh
@@ -621,9 +634,9 @@ Prove which writer produced the successful brief without printing its contents,
 then confirm the installed worker carries the same choice:
 
 ```bash
-npm run check:brief-writer -- --expect claude --expect-local-sources
+npm run check:brief-writer -- --expect-configured --expect-local-sources
 /usr/libexec/PlistBuddy -c \
-  "Print :EnvironmentVariables:COVE_BRIEF_WRITER" \
+  "Print :EnvironmentVariables:COVE_JOB_RUNNER" \
   "$HOME/Library/LaunchAgents/com.cove.claude-worker.plist"
 ```
 

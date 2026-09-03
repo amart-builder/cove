@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import {
   existsSync,
+  readFileSync,
   mkdirSync,
   rmSync,
   statSync,
@@ -13,6 +14,7 @@ import { PassThrough } from 'node:stream';
 import test from 'node:test';
 import Database from 'better-sqlite3';
 import { NextRequest } from 'next/server';
+import { renderToStaticMarkup } from 'react-dom/server';
 import {
   handleTaskSessionRunsGet,
   handleTaskSessionRunsPost,
@@ -30,33 +32,35 @@ import {
   reapSpawnedChildren,
   registerSpawnedChild,
 } from '../src/lib/claude-execution/child-process-registry.ts';
-import { taskSessionOwnerButtons } from '../src/components/tasks/TaskSessionLauncher.tsx';
+import {
+  TaskSessionLauncher,
+  taskSessionOwnerButtons,
+  taskSessionPillLabel,
+  taskSessionRunNeedsEscape,
+} from '../src/components/tasks/TaskSessionLauncher.tsx';
 import { createDayPlanStore } from '../src/lib/day-plan/store.ts';
 import { listFailures } from '../src/lib/reliability/failures.ts';
 import { listRecentReceipts } from '../src/lib/reliability/receipts.ts';
 import {
   EXECUTION_STATUS_POLL_MS,
   executionPollingPolicy,
-  localTaskSessionKickoffItems,
+  LOCAL_START_DAY_RECEIPT,
 } from '../src/components/tasks/useDayRitual.ts';
 
-test('local kickoff launches agent-owned items only inside the configured focus slots', () => {
-  const items = [
-    { id: 'done', position: 0, decision: 'completed', owner: 'claude' },
-    { id: 'first', position: 1, decision: 'accepted', owner: 'claude' },
-    { id: 'later', position: 2, decision: 'later', owner: 'claude' },
-    { id: 'second', position: 3, decision: 'accepted', owner: 'me' },
-    { id: 'third', position: 4, decision: 'accepted', owner: 'together' },
-    { id: 'fourth', position: 5, decision: 'accepted', owner: 'claude' },
-  ];
-  assert.deepEqual(
-    localTaskSessionKickoffItems(items, 3).map((item) => item.id),
-    ['first', 'third'],
+test('source guard: local Start my day does not launch task sessions', () => {
+  const source = readFileSync(
+    new URL('../src/components/tasks/useDayRitual.ts', import.meta.url),
+    'utf8',
   );
-  assert.deepEqual(
-    localTaskSessionKickoffItems(items, 1).map((item) => item.id),
-    ['first'],
+  const todayView = readFileSync(
+    new URL('../src/components/tasks/TodayView.tsx', import.meta.url),
+    'utf8',
   );
+  const ritualCall = todayView.match(/useDayRitual\(\{[\s\S]*?\n  \}\);/)?.[0] ?? '';
+  assert.equal(LOCAL_START_DAY_RECEIPT, 'Your day is set.');
+  assert.doesNotMatch(source, /launchTaskSessionRun|localTaskSessionKickoffItems/);
+  assert.doesNotMatch(source, /focusCount/);
+  assert.doesNotMatch(ritualCall, /focusCount/);
 });
 
 function fakeChild(pid) {
@@ -79,6 +83,8 @@ function fixture(t, options = {}) {
   const dbPath = path.join(dir, 'cove.db');
   const children = [];
   const spawnCalls = [];
+  const notifications = [];
+  const notificationWarnings = [];
   let nextPid = 41000;
   const ids = [
     '11111111-1111-4111-8111-111111111111',
@@ -108,13 +114,31 @@ function fixture(t, options = {}) {
     bootId: options.bootId ?? 'boot-current',
     timeoutMs: options.timeoutMs,
     terminationGraceMs: options.terminationGraceMs,
+    env: options.env ?? {
+      COVE_NOTIFY: '1',
+      COVE_NOTIFICATION_APP: new URL(import.meta.url).pathname,
+    },
+    processExists: options.processExists,
+    processStartedAt: options.processStartedAt,
+    resolveProjectDirectory: options.resolveProjectDirectory,
     routeModel: options.routeModel ?? (({ mode }) => fallbackTaskSessionModel(mode)),
+    notify: options.notify ?? ((input) => notifications.push(input)),
+    notificationOpenUrlSupported: options.notificationOpenUrlSupported,
+    logWarning: (message, error) => notificationWarnings.push([message, error]),
   });
   t.after(() => {
     manager.close();
     rmSync(dir, { recursive: true, force: true });
   });
-  return { dir, dbPath, manager, children, spawnCalls };
+  return {
+    dir,
+    dbPath,
+    manager,
+    children,
+    spawnCalls,
+    notifications,
+    notificationWarnings,
+  };
 }
 
 const SNAPSHOT = {
@@ -132,7 +156,7 @@ const MINIMAL_CHILD_ENVIRONMENT_KEYS = new Set([
 
 test('clicked session modes are structural and never construct bypassPermissions', () => {
   for (const [mode, expected] of [
-    ['auto', 'acceptEdits'],
+    ['auto', 'auto'],
     ['planning', 'plan'],
   ]) {
     for (const title of [
@@ -166,7 +190,14 @@ test('clicked session modes are structural and never construct bypassPermissions
         /do not take binding or final actions/i,
       );
       assert.match(command.stdin, /\[task notes\]/);
-      assert.match(command.stdin, /Cove is Alex's task system/);
+      assert.match(
+        command.args[command.args.indexOf('--append-system-prompt') + 1],
+        /You are working with the Cove operator.*Cove is their task system/,
+      );
+      assert.doesNotMatch(
+        `${command.args[command.args.indexOf('--append-system-prompt') + 1]}\n${command.stdin}`,
+        /Alex|Edge AI/,
+      );
       assert.match(command.stdin, /Put anything you produce in \/tmp\/cove outputs/);
       assert.equal(/[—–]/.test(command.stdin), false);
       const tools = command.args[command.args.indexOf('--tools') + 1];
@@ -181,6 +212,43 @@ test('clicked session modes are structural and never construct bypassPermissions
       );
       assert.equal(command.args[command.args.indexOf('--effort') + 1], 'high');
     }
+  }
+});
+
+test('launched sessions render the configured operator name with a neutral fallback', (t) => {
+  const configured = fixture(t);
+  writeFileSync(
+    path.join(configured.dir, 'cove-profile.json'),
+    JSON.stringify({ name: 'Configured Operator' }),
+  );
+  configured.manager.launch({
+    taskId: 'task-configured-operator',
+    owner: 'together',
+    mode: 'planning',
+    promptSnapshot: SNAPSHOT,
+  });
+  const configuredCommand = configured.spawnCalls[0];
+  const configuredSystemPrompt = configuredCommand.args[
+    configuredCommand.args.indexOf('--append-system-prompt') + 1
+  ];
+  assert.match(configuredSystemPrompt, /You are working with Configured Operator/);
+  assert.match(configuredSystemPrompt, /Cove is their task system/);
+
+  const fallback = fixture(t);
+  fallback.manager.launch({
+    taskId: 'task-fallback-operator',
+    owner: 'claude',
+    mode: 'auto',
+    promptSnapshot: SNAPSHOT,
+  });
+  const fallbackCommand = fallback.spawnCalls[0];
+  const fallbackSystemPrompt = fallbackCommand.args[
+    fallbackCommand.args.indexOf('--append-system-prompt') + 1
+  ];
+  assert.match(fallbackSystemPrompt, /You are working with the Cove operator/);
+  for (const command of [configuredCommand, fallbackCommand]) {
+    const fullPrompt = `${command.args[command.args.indexOf('--append-system-prompt') + 1]}\n${command.child.stdin.read() ?? ''}`;
+    assert.doesNotMatch(fullPrompt, /Alex|Edge AI/);
   }
 });
 
@@ -284,12 +352,68 @@ test('Planning and Auto clicks reach the spawned Claude command as explicit mode
   );
   assert.equal(
     spawnCalls[1].args[spawnCalls[1].args.indexOf('--permission-mode') + 1],
-    'acceptEdits',
+    'auto',
   );
   assert.equal(spawnCalls[0].args[spawnCalls[0].args.indexOf('--model') + 1], 'claude-opus-5');
   assert.equal(spawnCalls[1].args[spawnCalls[1].args.indexOf('--model') + 1], 'claude-sonnet-5');
   assert.equal(spawnCalls[0].args[spawnCalls[0].args.indexOf('--effort') + 1], 'high');
   assert.equal(spawnCalls[1].args[spawnCalls[1].args.indexOf('--effort') + 1], 'high');
+  assert.equal(spawnCalls[0].args[spawnCalls[0].args.indexOf('--max-budget-usd') + 1], '5.00');
+  assert.equal(spawnCalls[1].args[spawnCalls[1].args.indexOf('--max-budget-usd') + 1], '3.00');
+});
+
+test('task session pills distinguish running, finished, and stopped modes', () => {
+  assert.equal(
+    taskSessionPillLabel({ permissionMode: 'plan', status: 'running' }),
+    'Planning · running',
+  );
+  assert.equal(
+    taskSessionPillLabel({ permissionMode: 'acceptEdits', status: 'output_ready' }),
+    'Auto finished · Open in Claude',
+  );
+  assert.equal(
+    taskSessionPillLabel({ permissionMode: 'plan', status: 'failed' }),
+    'Planning stopped · Open in Claude',
+  );
+  const running = TaskSessionLauncher({
+    input: { taskId: 'task-running-pill', promptSnapshot: SNAPSHOT },
+    run: {
+      status: 'running',
+      permissionMode: 'plan',
+      resumeUrl: 'claude://resume?session=running-pill',
+      updatedAt: new Date().toISOString(),
+    },
+    onLaunch: () => undefined,
+  });
+  assert.equal(running.type, 'span');
+  assert.equal(
+    running.props.children[0].props.title,
+    "Claude is working in the background. You'll get a notification when it's ready.",
+  );
+});
+
+test('a running pill exposes Claude after the ten-minute stale threshold', () => {
+  const now = Date.parse('2026-09-03T16:00:00.000Z');
+  const fresh = {
+    status: 'running',
+    permissionMode: 'plan',
+    resumeUrl: 'claude://resume?session=fresh-running-pill',
+    updatedAt: '2026-09-03T15:50:01.000Z',
+  };
+  const stale = {
+    ...fresh,
+    resumeUrl: 'claude://resume?session=stale-running-pill',
+    updatedAt: '2026-09-03T15:49:59.000Z',
+  };
+  assert.equal(taskSessionRunNeedsEscape(fresh, now), false);
+  assert.equal(taskSessionRunNeedsEscape(stale, now), true);
+  const markup = renderToStaticMarkup(TaskSessionLauncher({
+    input: { taskId: 'task-stale-running-pill', promptSnapshot: SNAPSHOT },
+    run: { ...stale, updatedAt: '2000-01-01T00:00:00.000Z' },
+    onLaunch: () => undefined,
+  }));
+  assert.match(markup, /href="claude:\/\/resume\?session=stale-running-pill"/);
+  assert.match(markup, />Open in Claude<\/a>/);
 });
 
 test('the model router runs once for a fresh launch and never for an active resume', (t) => {
@@ -316,7 +440,7 @@ test('the model router runs once for a fresh launch and never for an active resu
   assert.equal(routeCalls, 1);
 });
 
-test('task sessions launch from Cove outputs with no workspace or git requirement', async (t) => {
+test('task sessions fall back to Cove outputs when no Atlas project resolves', async (t) => {
   const previousGithubToken = process.env.GITHUB_TOKEN;
   process.env.GITHUB_TOKEN = 'sol-test-sentinel';
   t.after(() => {
@@ -334,10 +458,14 @@ test('task sessions launch from Cove outputs with no workspace or git requiremen
   assert.equal(run.model, 'claude-sonnet-5');
   assert.equal(run.effort, 'high');
   assert.match(run.modelReason, /fallback/i);
-  assert.equal(
+  assert.match(
     run.resumeCommand,
-    `cd '${run.outputDir}' && claude --resume '${run.claudeSessionId}'`,
+    new RegExp(`^cd '${run.outputDir.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}' && claude --resume '${run.claudeSessionId}' --permission-mode auto --safe-mode`),
   );
+  assert.match(run.resumeCommand, /--tools 'Bash,Edit,Glob,Grep,Read,Skill,WebFetch,WebSearch,Write'/);
+  assert.match(run.resumeCommand, /--strict-mcp-config --mcp-config '[^']+\/scripts\/cove-empty-mcp\.json'/);
+  assert.match(run.resumeCommand, /--settings '[^']+\/scripts\/cove-empty-settings\.json'/);
+  assert.match(run.resumeCommand, /--no-chrome$/);
   assert.match(run.outputDir, new RegExp(`^${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/outputs/`));
   assert.equal(existsSync(run.outputDir), true);
   assert.equal(spawnCalls[0].options.cwd, run.outputDir);
@@ -369,6 +497,38 @@ test('task sessions launch from Cove outputs with no workspace or git requiremen
     { manager, runtimeMode: 'local' },
   );
   assert.equal((await response.json()).runs[0].resumeCommand, run.resumeCommand);
+});
+
+test('task sessions resolve a project from the title and launch from that workspace', (t) => {
+  const projectDir = '/Users/example/Atlas/Projects/newsletter';
+  const hints = [];
+  const { manager, spawnCalls } = fixture(t, {
+    resolveProjectDirectory: (hint) => {
+      hints.push(hint);
+      return hint.includes('newsletter') ? projectDir : null;
+    },
+  });
+  const run = manager.launch({
+    taskId: 'task-newsletter',
+    owner: 'together',
+    mode: 'planning',
+    promptSnapshot: {
+      ...SNAPSHOT,
+      title: 'Finish newsletter issues 2 and 3',
+    },
+  });
+
+  assert.deepEqual(hints, ['Finish newsletter issues 2 and 3']);
+  assert.equal(run.workspacePath, projectDir);
+  assert.equal(spawnCalls[0].options.cwd, projectDir);
+  assert.match(
+    run.resumeCommand,
+    new RegExp(`^cd '${projectDir}' && claude --resume '${run.claudeSessionId}' --permission-mode plan --safe-mode`),
+  );
+  assert.match(run.resumeCommand, /--tools 'Glob,Grep,Read,Skill,WebFetch,WebSearch'/);
+  assert.match(run.resumeCommand, /--strict-mcp-config/);
+  assert.match(run.resumeCommand, /--no-chrome$/);
+  assert.notEqual(run.outputDir, run.workspacePath);
 });
 
 test('task session run payload omits resumeCommand without a Claude session id', async (t) => {
@@ -583,6 +743,167 @@ test('clean completion becomes output ready and failure lands in Issues with a r
   );
 });
 
+test('task session endings notify once while user-abandoned runs stay silent', async (t) => {
+  const { manager, children, notifications } = fixture(t);
+  const planned = manager.launch({
+    taskId: 'task-plan-notification',
+    owner: 'together',
+    mode: 'planning',
+    promptSnapshot: { ...SNAPSHOT, title: 'Review the launch plan' },
+  });
+  children[0].stdout.write(`${JSON.stringify({
+    type: 'result',
+    result: 'The plan is ready for review.',
+  })}\n`);
+  children[0].emit('close', 0, null);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(notifications[0], {
+    title: 'Planning finished: Review the launch plan',
+    body: 'Open it in Claude to review the plan and start.',
+    group: planned.id,
+    openUrl: planned.resumeUrl,
+  });
+
+  const auto = manager.launch({
+    taskId: 'task-auto-notification',
+    owner: 'claude',
+    mode: 'auto',
+    promptSnapshot: { ...SNAPSHOT, title: 'Prepare the finished package' },
+  });
+  const autoSummary = 'Finished the package and checked every requested output before leaving it ready for the operator to inspect in the Claude app.';
+  children[1].stdout.write(`${JSON.stringify({
+    type: 'result',
+    result: autoSummary,
+  })}\n`);
+  children[1].emit('close', 0, null);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(notifications[1], {
+    title: 'Auto finished: Prepare the finished package',
+    body: autoSummary.slice(0, 120),
+    group: auto.id,
+    openUrl: auto.resumeUrl,
+  });
+
+  const failed = manager.launch({
+    taskId: 'task-plan-budget',
+    owner: 'together',
+    mode: 'planning',
+    promptSnapshot: { ...SNAPSHOT, title: 'Build the detailed plan' },
+  });
+  children[2].stdout.write(`${JSON.stringify({
+    type: 'result',
+    subtype: 'error_max_budget_usd',
+    is_error: true,
+  })}\n`);
+  children[2].emit('close', 1, null);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(manager.getRun(failed.id).errorCode, 'error_max_budget_usd');
+  assert.deepEqual(notifications[2], {
+    title: 'Planning stopped: Build the detailed plan',
+    body: 'Budget reached before it finished.',
+    group: failed.id,
+    openUrl: failed.resumeUrl,
+  });
+
+  const abandoned = manager.launch({
+    taskId: 'task-abandoned-notification',
+    owner: 'claude',
+    mode: 'auto',
+    promptSnapshot: { ...SNAPSHOT, title: 'Leave this run quietly' },
+  });
+  manager.abandonForTask(abandoned.taskId, 'user_closed');
+  assert.equal(manager.getRun(abandoned.id).status, 'abandoned');
+  assert.equal(notifications.length, 3);
+});
+
+test('task session notifications stay off unless COVE_NOTIFY is 1', async (t) => {
+  const { manager, children, notifications } = fixture(t, { env: {} });
+  manager.launch({
+    taskId: 'task-notification-disabled',
+    owner: 'claude',
+    mode: 'auto',
+    promptSnapshot: SNAPSHOT,
+  });
+  children[0].stdout.write(`${JSON.stringify({ type: 'result', result: 'Finished.' })}\n`);
+  children[0].emit('close', 0, null);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(notifications.length, 0);
+});
+
+test('task session failure notifications explain step and execution errors', (t) => {
+  const { manager, notifications } = fixture(t);
+  const stepLimited = manager.launch({
+    taskId: 'task-step-limited',
+    owner: 'together',
+    mode: 'planning',
+    promptSnapshot: { ...SNAPSHOT, title: 'Plan within the step limit' },
+  });
+  manager.finish(stepLimited.id, { exitCode: 1, errorCode: 'error_max_turns' });
+  const executionError = manager.launch({
+    taskId: 'task-execution-error',
+    owner: 'claude',
+    mode: 'auto',
+    promptSnapshot: { ...SNAPSHOT, title: 'Complete the automated work' },
+  });
+  manager.finish(executionError.id, { exitCode: 1, errorCode: 'error_during_execution' });
+  assert.equal(notifications[0].body, 'It hit its step limit.');
+  assert.equal(notifications[1].body, 'It hit an error partway.');
+});
+
+test('task session notification failures never change the completed run', async (t) => {
+  const { manager, children, notificationWarnings } = fixture(t, {
+    notify: () => {
+      throw new Error('notification helper unavailable');
+    },
+  });
+  const run = manager.launch({
+    taskId: 'task-notification-failure',
+    owner: 'claude',
+    mode: 'auto',
+    promptSnapshot: SNAPSHOT,
+  });
+  children[0].stdout.write(`${JSON.stringify({ type: 'result', result: 'Finished safely.' })}\n`);
+  children[0].emit('close', 0, null);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(manager.getRun(run.id).status, 'output_ready');
+  assert.equal(notificationWarnings.length, 1);
+});
+
+test('notification fallback bodies include the task title', async (t) => {
+  const { manager, children, notifications } = fixture(t, {
+    notificationOpenUrlSupported: false,
+  });
+  manager.launch({
+    taskId: 'task-notification-fallback',
+    owner: 'together',
+    mode: 'planning',
+    promptSnapshot: { ...SNAPSHOT, title: 'Fallback planning task' },
+  });
+  children[0].stdout.write(`${JSON.stringify({ type: 'result', result: 'Plan complete.' })}\n`);
+  children[0].emit('close', 0, null);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(notifications[0].body, /Fallback planning task/);
+});
+
+test('notification helper detection reads the injected environment', async (t) => {
+  const { manager, children, notifications } = fixture(t, {
+    env: {
+      COVE_NOTIFY: '1',
+      COVE_NOTIFICATION_APP: new URL(import.meta.url).pathname,
+    },
+  });
+  manager.launch({
+    taskId: 'task-notification-injected-env',
+    owner: 'together',
+    mode: 'planning',
+    promptSnapshot: { ...SNAPSHOT, title: 'Injected environment task' },
+  });
+  children[0].stdout.write(`${JSON.stringify({ type: 'result', result: 'Plan complete.' })}\n`);
+  children[0].emit('close', 0, null);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(notifications[0].body, 'Open it in Claude to review the plan and start.');
+});
+
 test('deleting a running task abandons the run without deleting its outputs', (t) => {
   const signals = [];
   const { manager } = fixture(t, {
@@ -764,6 +1085,129 @@ test('a same-generation matching child missing from the manager map is signalled
   assert.equal(reaper.getRun(run.id).status, 'abandoned');
 });
 
+test('a live child with a dead owner server is reaped, terminated, and notified once', (t) => {
+  const original = fixture(t, { serverGeneration: 'generation-owner' });
+  const run = original.manager.launch({
+    taskId: 'task-cross-generation-dead-child',
+    owner: 'together',
+    mode: 'planning',
+    promptSnapshot: { ...SNAPSHOT, title: 'Recover the interrupted plan' },
+  });
+  original.manager.close();
+  const db = new Database(original.dbPath);
+  db.prepare(
+    `UPDATE cove_spawned_children
+     SET server_command = ?, server_started_at = ?
+     WHERE lane = 'session' AND run_id = ?`,
+  ).run('/fake/cove-server', 'owner-start', run.id);
+  db.close();
+  const notifications = [];
+  const signals = [];
+  const reaper = createTaskSessionManager({
+    dbPath: original.dbPath,
+    dataDir: original.dir,
+    claudePath: '/fake/claude',
+    markSession: () => undefined,
+    serverPid: 32000,
+    serverGeneration: 'generation-restarted',
+    bootId: 'boot-current',
+    processExists: () => true,
+    processCommand: (pid) => pid === 31000
+      ? '/recycled/cove-server'
+      : `/fake/claude --session-id ${run.claudeSessionId}`,
+    processStartedAt: () => 'recycled-owner-start',
+    signalGroup: (pid, signal) => signals.push([pid, signal]),
+    notify: (input) => notifications.push(input),
+    notificationOpenUrlSupported: true,
+    env: { COVE_NOTIFY: '1' },
+  });
+  t.after(() => reaper.close());
+  assert.equal(reaper.reapOrphans(), 1);
+  assert.equal(reaper.getRun(run.id).status, 'abandoned');
+  assert.equal(reaper.getRun(run.id).errorCode, 'orphan_reaped');
+  assert.deepEqual(signals, [[41000, 'SIGTERM']]);
+  assert.deepEqual(notifications, [{
+    title: 'Planning stopped: Recover the interrupted plan',
+    body: "It didn't finish.",
+    group: run.id,
+    openUrl: run.resumeUrl,
+  }]);
+  assert.equal(reaper.reapOrphans(), 0);
+  assert.equal(notifications.length, 1);
+  assert.equal(signals.length, 1);
+});
+
+test('registry cleanup still signals a live orphan but skips the duplicate receipt for an already reaped run', (t) => {
+  const original = fixture(t, { serverGeneration: 'generation-owner' });
+  const run = original.manager.launch({
+    taskId: 'task-registry-receipt-dedupe',
+    owner: 'claude',
+    mode: 'auto',
+    promptSnapshot: { ...SNAPSHOT, title: 'Clean up one orphan record' },
+  });
+  original.manager.abandonRun(run.id, 'orphan_reaped');
+  original.manager.close();
+  const signals = [];
+  assert.equal(reapSpawnedChildren({
+    dbPath: original.dbPath,
+    serverGeneration: 'generation-restarted',
+    bootId: 'boot-current',
+    processExists: () => true,
+    commandForPid: () => `/fake/claude --session-id ${run.claudeSessionId}`,
+    startedAtForPid: () => 'recycled-owner-start',
+    signalGroup: (pid, signal) => signals.push([pid, signal]),
+  }), 1);
+  assert.equal(
+    listRecentReceipts({ dbPath: original.dbPath, source: 'task-session' }).length,
+    1,
+  );
+  assert.equal(
+    listRecentReceipts({ dbPath: original.dbPath, source: 'claude-child-reaper' }).length,
+    0,
+  );
+  // The run row was already transitioned by the task-session reaper, but the
+  // registry is the last line of defence for the process itself, so it still
+  // sends one SIGTERM; only the receipt is deduplicated.
+  assert.deepEqual(signals, [[41000, 'SIGTERM']]);
+});
+
+test('a young foreign run without a pid waits for the spawn assignment window', (t) => {
+  const original = fixture(t, { serverGeneration: 'generation-owner' });
+  const run = original.manager.launch({
+    taskId: 'task-foreign-pid-window',
+    owner: 'claude',
+    promptSnapshot: SNAPSHOT,
+  });
+  original.manager.close();
+  const db = new Database(original.dbPath);
+  db.prepare(
+    `UPDATE cove_task_session_runs
+     SET pid = NULL, created_at = ?, updated_at = ?
+     WHERE id = ?`,
+  ).run('2026-09-03T15:59:00.000Z', '2026-09-03T15:59:00.000Z', run.id);
+  db.close();
+  let currentTime = new Date('2026-09-03T16:00:00.000Z');
+  const reaper = createTaskSessionManager({
+    dbPath: original.dbPath,
+    dataDir: original.dir,
+    claudePath: '/fake/claude',
+    markSession: () => undefined,
+    serverPid: 32000,
+    serverGeneration: 'generation-restarted',
+    bootId: 'boot-current',
+    now: () => currentTime,
+    processExists: () => false,
+    notify: () => undefined,
+    env: { COVE_NOTIFY: '1' },
+  });
+  t.after(() => reaper.close());
+  assert.equal(reaper.reapOrphans(), 0);
+  assert.equal(reaper.getRun(run.id).status, 'running');
+  currentTime = new Date('2026-09-03T16:02:01.000Z');
+  assert.equal(reaper.reapOrphans(), 1);
+  assert.equal(reaper.getRun(run.id).errorCode, 'orphan_reaped');
+});
+
 test('a live foreign owner is untouched by init, interval, and GET reaping', async (t) => {
   const original = fixture(t, { serverGeneration: 'generation-owner' });
   const run = original.manager.launch({
@@ -794,6 +1238,8 @@ test('a live foreign owner is untouched by init, interval, and GET reaping', asy
     serverPid: 32000,
     serverGeneration: 'generation-observer',
     bootId: 'boot-current',
+    processExists,
+    processStartedAt: () => 'owner-start',
   });
   t.after(() => observer.close());
 

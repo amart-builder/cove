@@ -1343,6 +1343,223 @@ export const LOCAL_MIGRATIONS: readonly LocalMigration[] = [
       `);
     },
   },
+  {
+    version: 17,
+    name: "task-session-workspace-path",
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE cove_task_session_runs
+          ADD COLUMN workspace_path TEXT;
+      `);
+    },
+  },
+  {
+    version: 18,
+    name: "meeting-intelligence-task-fields",
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE tasks ADD COLUMN brief TEXT;
+        ALTER TABLE tasks ADD COLUMN remind_at TEXT;
+        ALTER TABLE tasks ADD COLUMN nudged_at TEXT;
+        ALTER TABLE tasks ADD COLUMN engaged_at TEXT;
+        ALTER TABLE tasks ADD COLUMN notification_policy TEXT
+          CHECK (notification_policy IS NULL OR notification_policy IN ('none','predeadline','due','both'));
+        CREATE INDEX tasks_open_nudge_candidates_idx
+          ON tasks(remind_at)
+          WHERE status = 'open' AND remind_at IS NOT NULL AND nudged_at IS NULL;
+      `);
+    },
+  },
+  {
+    version: 19,
+    name: "meeting-analysis-workflow",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE meeting_analysis_jobs (
+          id TEXT PRIMARY KEY,
+          group_key TEXT NOT NULL UNIQUE,
+          input_hash TEXT NOT NULL,
+          not_before TEXT NOT NULL,
+          lease TEXT,
+          lease_expires TEXT,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL CHECK (status IN ('pending','held','running','succeeded','failed','dead')),
+          analyst_json TEXT,
+          error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX meeting_analysis_jobs_ready_idx
+          ON meeting_analysis_jobs(status, not_before, lease_expires);
+        CREATE TABLE meeting_analysis_members (
+          job_id TEXT NOT NULL REFERENCES meeting_analysis_jobs(id) ON DELETE CASCADE,
+          gmail_message_id TEXT NOT NULL UNIQUE,
+          tool TEXT NOT NULL,
+          subject TEXT NOT NULL,
+          received_at TEXT NOT NULL,
+          envelope_json TEXT NOT NULL,
+          PRIMARY KEY (job_id, gmail_message_id)
+        );
+        CREATE INDEX meeting_analysis_members_job_idx
+          ON meeting_analysis_members(job_id, received_at, gmail_message_id);
+        CREATE TABLE meeting_analysis_actions (
+          job_id TEXT NOT NULL REFERENCES meeting_analysis_jobs(id) ON DELETE CASCADE,
+          action_key TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK (kind IN ('task','commitment','crm_note','research_note')),
+          target_id TEXT,
+          status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','done','failed')),
+          error TEXT,
+          PRIMARY KEY (job_id, action_key)
+        );
+        CREATE INDEX meeting_analysis_actions_status_idx
+          ON meeting_analysis_actions(job_id, status, kind);
+      `);
+    },
+  },
+  {
+    version: 20,
+    name: "email-draft-outcomes",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE email_draft_outcomes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          email_item_id INTEGER NOT NULL,
+          thread_id TEXT NOT NULL,
+          gmail_draft_id TEXT,
+          draft_body TEXT NOT NULL,
+          draft_body_hash TEXT NOT NULL,
+          drafted_at TEXT NOT NULL,
+          judge_score INTEGER,
+          judge_verdict TEXT,
+          sent_message_id TEXT,
+          sent_at TEXT,
+          sent_body TEXT,
+          outcome TEXT NOT NULL DEFAULT 'pending',
+          reviewed_at TEXT
+        );
+        CREATE INDEX idx_edo_outcome ON email_draft_outcomes(outcome);
+        CREATE INDEX idx_edo_thread ON email_draft_outcomes(thread_id);
+      `);
+    },
+  },
+  {
+    version: 21,
+    name: "pipeline-deals",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE pipeline_deals (
+          id TEXT PRIMARY KEY,
+          contact_id TEXT NOT NULL UNIQUE
+            REFERENCES contacts(id) ON DELETE CASCADE,
+          stage TEXT NOT NULL CHECK (stage IN (
+            'reach_out','keep_warm','interested','call_scheduled','pitched',
+            'discovery_ready','discovery_booked','proposal','client','lost','parked'
+          )),
+          monthly_value INTEGER
+            CHECK (monthly_value IS NULL OR monthly_value >= 0),
+          discovery_price INTEGER
+            CHECK (discovery_price IS NULL OR discovery_price >= 0),
+          next_action TEXT NOT NULL DEFAULT '',
+          next_follow_up_at TEXT,
+          source TEXT NOT NULL DEFAULT '',
+          notes TEXT NOT NULL DEFAULT '',
+          last_touch_at TEXT,
+          stage_changed_at TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX pipeline_deals_stage_idx ON pipeline_deals(stage);
+        CREATE INDEX pipeline_deals_next_follow_up_idx
+          ON pipeline_deals(next_follow_up_at);
+      `);
+    },
+  },
+  {
+    version: 22,
+    name: "chief_of_staff_action_ledger",
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE chief_of_staff_actions (
+          wake_job_id TEXT NOT NULL REFERENCES cove_jobs(id) ON DELETE CASCADE,
+          action_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          status TEXT NOT NULL
+            CHECK (status IN ('applied','rejected','skipped')),
+          error TEXT,
+          applied_at TEXT,
+          PRIMARY KEY (wake_job_id, action_id)
+        );
+        CREATE INDEX chief_of_staff_actions_status_idx
+          ON chief_of_staff_actions(status, applied_at);
+      `);
+    },
+  },
+  {
+    version: 23,
+    name: "chief_of_staff_content_hash_ledger",
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE chief_of_staff_actions RENAME TO chief_of_staff_actions_by_action_id;
+        CREATE TABLE chief_of_staff_actions (
+          wake_job_id TEXT NOT NULL REFERENCES cove_jobs(id) ON DELETE CASCADE,
+          content_hash TEXT NOT NULL,
+          action_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          status TEXT NOT NULL
+            CHECK (status IN ('applied','rejected','skipped')),
+          error TEXT,
+          applied_at TEXT,
+          PRIMARY KEY (wake_job_id, content_hash)
+        );
+        INSERT INTO chief_of_staff_actions
+          (wake_job_id, content_hash, action_id, kind, payload_json, status, error, applied_at)
+        SELECT wake_job_id, 'legacy:' || action_id, action_id, kind, payload_json,
+               status, error, applied_at
+        FROM chief_of_staff_actions_by_action_id;
+        DROP TABLE chief_of_staff_actions_by_action_id;
+        CREATE INDEX chief_of_staff_actions_status_idx
+          ON chief_of_staff_actions(status, applied_at);
+      `);
+    },
+  },
+  {
+    version: 24,
+    name: "chief_of_staff_attention",
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE cove_attention_ledger RENAME TO cove_attention_ledger_before_chief_of_staff;
+        CREATE TABLE cove_attention_ledger (
+          id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL
+            CHECK (kind IN ('sweep_nudge','floor_nudge','urgent_email','chief_of_staff')),
+          ref_kind TEXT NOT NULL
+            CHECK (ref_kind IN ('task','commitment','email','deal')),
+          ref_id TEXT NOT NULL,
+          level TEXT NOT NULL
+            CHECK (level IN ('text','banner','board','suppressed','shadow')),
+          reason TEXT NOT NULL,
+          delivered_at TEXT,
+          suppressed_reason TEXT,
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO cove_attention_ledger
+          (id, kind, ref_kind, ref_id, level, reason, delivered_at,
+           suppressed_reason, created_at)
+        SELECT id, kind, ref_kind, ref_id, level, reason, delivered_at,
+               suppressed_reason, created_at
+        FROM cove_attention_ledger_before_chief_of_staff;
+        DROP TABLE cove_attention_ledger_before_chief_of_staff;
+        CREATE INDEX cove_attention_ledger_ref_idx
+          ON cove_attention_ledger(ref_kind, ref_id, created_at DESC);
+        CREATE INDEX cove_attention_ledger_budget_idx
+          ON cove_attention_ledger(level, delivered_at);
+        CREATE INDEX cove_attention_ledger_kind_idx
+          ON cove_attention_ledger(kind, created_at DESC);
+      `);
+    },
+  },
 ];
 
 function migrationTableExists(db: Database.Database, name: string): boolean {

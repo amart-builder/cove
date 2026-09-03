@@ -88,15 +88,21 @@ transaction.
 
 ## Follow-ups
 
-If the user implies a next step ("follow up Friday", "send him the proposal"),
-also create the task by following the cove-task skill: task on the board, due
-date, reminder. One capture, both systems updated.
+When the sales pipeline is enabled, log the touch through the pipeline API as
+well. Create a Cove board task only when the user explicitly asks for a task or
+reminder in addition to the pipeline follow-up.
 
 ## Answering questions
 
+Before writing about or to anyone, make one context call:
+`GET /api/crm?operation=context&id=<contactId>` or
+`GET /api/crm?operation=context&email=<address>`. Use its `rendered` field as
+stored relationship data. A 409 means the identity is ambiguous and must not be
+guessed. A 404 means Cove has no matching contact.
+
 "Who is Dana?" or "when did I last talk to Steve?": search with
-`GET /api/crm?operation=list&search=dana`, then fetch the selected full record
-with `GET /api/crm?operation=get&id=<id>&limit=20`. Answer in two or three
+`GET /api/crm?operation=list&search=dana`, then make the context call above.
+Answer in two or three
 plain sentences: who they are, the relationship context, and the last
 interaction with its date. If nobody matches, say so and offer to add them.
 

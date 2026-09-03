@@ -21,6 +21,7 @@ export type TaskSessionPromptSnapshot = {
   whyToday?: string;
   project?: string;
   dueAt?: string;
+  brief?: string;
 };
 
 export type TaskSessionRun = {
@@ -36,6 +37,7 @@ export type TaskSessionRun = {
   status: TaskSessionRunStatus;
   claudeSessionId?: string;
   outputDir: string;
+  workspacePath?: string;
   resumeUrl: string;
   resumeCommand?: string;
   promptSnapshot: TaskSessionPromptSnapshot;
@@ -69,3 +71,6 @@ export const ACTIVE_TASK_SESSION_STATUSES = new Set<TaskSessionRunStatus>([
   "running",
   "awaiting_approval",
 ]);
+
+export const TASK_SESSION_TIMEOUT_MS = 45 * 60 * 1000;
+export const TASK_SESSION_STALE_ESCAPE_MS = 10 * 60 * 1000;

@@ -1,117 +1,18 @@
 'use client';
 
 import {
-  useEffect,
   useId,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
-  type ReactNode,
 } from 'react';
-import { createPortal } from 'react-dom';
 import { ownerLabel } from '@/lib/day-plan/presentation';
 import type { DayPlanOwner } from '@/lib/day-plan/types';
+import TaskFieldsEditor, { type Task } from '../TaskFieldsEditor';
 import type { MorningArrivalBoardTask, MorningArrivalItem, MorningArrivalProps } from '../MorningArrival';
-
-const FOCUSABLE_SELECTOR = [
-  'button:not([disabled])',
-  'input:not([disabled])',
-  'select:not([disabled])',
-  'textarea:not([disabled])',
-  'a[href]',
-  '[tabindex]:not([tabindex="-1"])',
-].join(',');
+import ModalScrim from './ModalScrim';
 
 const OWNERS: DayPlanOwner[] = ['me', 'claude', 'together'];
-
-export function ModalScrim({
-  labelledBy,
-  describedBy,
-  returnFocus,
-  onClose,
-  panelClassName,
-  children,
-}: {
-  labelledBy: string;
-  describedBy?: string;
-  returnFocus: HTMLElement | null;
-  onClose: () => void;
-  panelClassName: string;
-  children: ReactNode;
-}) {
-  const dialogRef = useRef<HTMLElement>(null);
-
-  useEffect(() => {
-    const focusFrame = window.requestAnimationFrame(() => {
-      const preferred = dialogRef.current?.querySelector<HTMLElement>('[data-modal-initial-focus]');
-      const first = dialogRef.current?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
-      (preferred ?? first ?? dialogRef.current)?.focus();
-    });
-    return () => {
-      window.cancelAnimationFrame(focusFrame);
-      window.requestAnimationFrame(() => {
-        if (returnFocus?.isConnected) returnFocus.focus();
-      });
-    };
-  }, [returnFocus]);
-
-  function handleKeyDownCapture(event: ReactKeyboardEvent<HTMLDivElement>) {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      event.stopPropagation();
-      (event.nativeEvent as KeyboardEvent).stopImmediatePropagation();
-      onClose();
-      return;
-    }
-    if (event.key !== 'Tab') return;
-    event.stopPropagation();
-    (event.nativeEvent as KeyboardEvent).stopImmediatePropagation();
-
-    const focusable = Array.from(
-      dialogRef.current?.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR) ?? [],
-    ).filter((element) => !element.hasAttribute('disabled') && element.offsetParent !== null);
-    if (focusable.length === 0) {
-      event.preventDefault();
-      dialogRef.current?.focus();
-      return;
-    }
-
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    const active = document.activeElement;
-    const outside = !dialogRef.current?.contains(active);
-    if (event.shiftKey && (active === first || active === dialogRef.current || outside)) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && (active === last || outside)) {
-      event.preventDefault();
-      first.focus();
-    }
-  }
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-[160] flex items-center justify-center bg-black/30 p-4 backdrop-blur-sm dark:bg-black/55"
-      onKeyDownCapture={handleKeyDownCapture}
-      onPointerDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <section
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={labelledBy}
-        aria-describedby={describedBy}
-        tabIndex={-1}
-        className={panelClassName}
-      >
-        {children}
-      </section>
-    </div>,
-    document.body,
-  );
-}
 
 type TodaySheetDetail = {
   kind: 'today';
@@ -135,6 +36,8 @@ export default function TaskSheet({
   onRemove,
   onComplete,
   onAdd,
+  onSaveTask,
+  tasksById,
 }: {
   detail: TaskSheetDetail;
   busy: boolean;
@@ -144,12 +47,16 @@ export default function TaskSheet({
   onRemove: MorningArrivalProps['onRemove'];
   onComplete: MorningArrivalProps['onComplete'];
   onAdd: (task: MorningArrivalBoardTask) => boolean | Promise<boolean>;
+  onSaveTask: (taskId: string, patch: Partial<Task>) => Promise<void>;
+  tasksById: ReadonlyMap<string, Task>;
 }) {
   const titleId = useId();
   const descriptionId = useId();
   const [addMessage, setAddMessage] = useState('');
   const [actionError, setActionError] = useState('');
   const [pendingAction, setPendingAction] = useState<'remove' | 'complete' | 'add'>();
+  const [savingTask, setSavingTask] = useState(false);
+  const [taskError, setTaskError] = useState('');
   const today = detail.kind === 'today' ? detail.view : undefined;
   const task = detail.kind === 'bench' ? detail.task : undefined;
   const title = today?.title ?? task?.title ?? '';
@@ -158,7 +65,8 @@ export default function TaskSheet({
     : task?.description?.trim();
   const project = today?.project ?? task?.project;
   const due = today?.deadline ?? task?.due;
-  const actionBusy = busy || pendingAction !== undefined;
+  const taskRecord = today?.task ?? (task ? tasksById.get(task.id) : undefined);
+  const actionBusy = busy || savingTask || pendingAction !== undefined;
 
   async function runTodayAction(
     action: 'remove' | 'complete',
@@ -180,6 +88,20 @@ export default function TaskSheet({
     }
   }
 
+  async function saveTask(patch: Partial<Task>) {
+    if (!taskRecord) return;
+    setTaskError('');
+    setSavingTask(true);
+    try {
+      await onSaveTask(taskRecord._id, patch);
+      onClose();
+    } catch {
+      setTaskError("Cove couldn't save those task details. Try again.");
+    } finally {
+      setSavingTask(false);
+    }
+  }
+
   async function addBenchTask() {
     if (!task) return;
     setAddMessage('');
@@ -189,7 +111,7 @@ export default function TaskSheet({
       const added = await onAdd(task);
       setPendingAction(undefined);
       if (added) onClose();
-      else setAddMessage('Today is full at 10. Move one task down before adding another.');
+      else setAddMessage('That task was not added. Try again.');
     } catch {
       setActionError("Cove couldn't add this task to today. Try again.");
       setPendingAction(undefined);
@@ -202,8 +124,17 @@ export default function TaskSheet({
       describedBy={description ? descriptionId : undefined}
       returnFocus={returnFocus}
       onClose={onClose}
-      panelClassName="panel-pop-in w-full max-w-[520px] rounded-[22px] border bg-card px-7 py-7 text-foreground shadow-2xl outline-none sm:px-9 sm:pb-7 sm:pt-8 dark:border-white/10"
+      panelClassName="panel-pop-in relative max-h-[calc(100dvh-2rem)] w-full max-w-[520px] overflow-y-auto overscroll-contain rounded-[22px] border bg-card px-7 py-7 text-foreground shadow-2xl outline-none sm:px-9 sm:pb-7 sm:pt-8 dark:border-white/10"
     >
+      <button
+        type="button"
+        data-modal-initial-focus
+        aria-label="Close task details"
+        className="press-scale absolute right-4 top-4 grid size-9 place-items-center rounded-full text-lg leading-none text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent-blue/40 sm:right-5 sm:top-5"
+        onClick={onClose}
+      >
+        <span aria-hidden="true">×</span>
+      </button>
       <p className="text-[10.5px] font-semibold uppercase tracking-[0.24em] text-muted-foreground">
         {detail.kind === 'today'
           ? (detail.focusNumber ? `Focus ${detail.focusNumber}` : 'Today')
@@ -220,6 +151,16 @@ export default function TaskSheet({
       <p className="mt-4 text-xs text-muted-foreground">
         {project ?? 'No project'} <span aria-hidden="true">·</span> {due ? `due ${due}` : 'no due date'}
       </p>
+
+      {taskRecord && (
+        <TaskFieldsEditor
+          task={taskRecord}
+          saving={savingTask}
+          error={taskError}
+          onSave={saveTask}
+          onCancel={onClose}
+        />
+      )}
 
       {today && (
         <OwnerControl
@@ -241,46 +182,35 @@ export default function TaskSheet({
         </p>
       )}
 
-      <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t pt-5">
+      <div className={`mt-6 flex flex-wrap items-center gap-3 border-t pt-5 ${today ? 'justify-start' : 'justify-between'}`}>
         {today ? (
-          <>
-            <div className="flex items-center gap-5">
-              <button
-                type="button"
-                disabled={actionBusy}
-                className="press-scale min-h-9 text-[13px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent-blue/40 disabled:opacity-40"
-                onClick={() => void runTodayAction('remove', () => onRemove(
-                    today.item.id,
-                    today.title,
-                    today.item.sourceRefs.some(
-                      (source) => source.sourceType === 'task' && source.recordId === today.item.taskId,
-                    ),
-                  ))}
-              >
-                {pendingAction === 'remove' ? 'Moving…' : 'Not today'}
-              </button>
-              <button
-                type="button"
-                disabled={actionBusy}
-                className="press-scale min-h-9 text-[13px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent-blue/40 disabled:opacity-40"
-                onClick={() => void runTodayAction(
-                  'complete',
-                  () => onComplete(today.item.id, today.title),
-                )}
-              >
-                {pendingAction === 'complete' ? 'Completing…' : 'Already done'}
-              </button>
-            </div>
+          <div className="flex items-center gap-5">
             <button
               type="button"
-              data-modal-initial-focus
               disabled={actionBusy}
-              className="press-scale min-h-10 rounded-xl border bg-card px-4 text-[13.5px] font-medium text-foreground outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-accent-blue/40 disabled:opacity-40"
-              onClick={onClose}
+              className="press-scale min-h-9 text-[13px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent-blue/40 disabled:opacity-40"
+              onClick={() => void runTodayAction('remove', () => onRemove(
+                today.item.id,
+                today.title,
+                Boolean(taskRecord) || today.item.sourceRefs.some(
+                  (source) => source.sourceType === 'task' && source.recordId === today.item.taskId,
+                ),
+              ))}
             >
-              {detail.kind === 'today' && detail.focusNumber ? 'Keep in focus' : 'Keep for today'}
+              {pendingAction === 'remove' ? 'Moving…' : 'Not today'}
             </button>
-          </>
+            <button
+              type="button"
+              disabled={actionBusy}
+              className="press-scale min-h-9 text-[13px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent-blue/40 disabled:opacity-40"
+              onClick={() => void runTodayAction(
+                'complete',
+                () => onComplete(today.item.id, today.title),
+              )}
+            >
+              {pendingAction === 'complete' ? 'Completing…' : 'Already done'}
+            </button>
+          </div>
         ) : task ? (
           <>
             <button

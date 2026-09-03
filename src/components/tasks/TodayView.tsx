@@ -12,6 +12,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useDataChanged } from '@/lib/data/refresh-bus';
+import { listEmailItems } from '@/lib/data/email';
 import { retryBoardRequest } from '@/lib/data/board-refresh';
 import {
   createTask as createRestTask,
@@ -53,7 +54,6 @@ import {
   focusBandItems,
   formatArrivalDueDate,
   helpfulProjectLabel,
-  reorderDayPlanItems,
   selectShelfTasks,
   selectBoardExecutionPresentation,
   selectCurrentExecutionRow,
@@ -76,6 +76,7 @@ import { OpenInClaudeCode, RunStatusChip } from './ClaudeRunIndicators';
 import ExecutionConfigPanel from './ExecutionConfigPanel';
 import CurrentCanvas, { type CurrentPoint, type Tributary } from './CurrentCanvas';
 import TaskDetail from './TaskDetail';
+import type { Task as EditableTask } from './TaskFieldsEditor';
 import {
   confirmTaskRecurrence,
   listRecurringTemplates,
@@ -83,7 +84,10 @@ import {
 import { getRuntimeMode } from '@/lib/runtime/mode';
 import type { RecurringTemplate } from '@/lib/tasks/recurrence';
 import { getTaskSettings, updateTaskSettings } from '@/lib/data/task-settings';
-import { reduceFocusSeats } from '@/lib/tasks/focus-seats';
+import {
+  reduceFocusSeats,
+  shouldSurfaceTodayOrderError,
+} from '@/lib/tasks/focus-seats';
 import RhythmManager, { cadenceDisplay } from './RhythmManager';
 import useDayRitual from './useDayRitual';
 import useTaskSessionRuns from './useTaskSessionRuns';
@@ -321,6 +325,7 @@ function normalizeRestTask(task: RestTask): TaskData {
     dueDate: task.due_at?.slice(0, 10),
     dueAt: task.due_at ?? undefined,
     tags,
+    project: task.project,
     status: task.status,
     proposedRecurrenceCadence: task.proposed_recurrence_cadence ?? undefined,
     recurringTemplateId: task.recurring_template_id ?? undefined,
@@ -863,9 +868,10 @@ function TodayExperience({
     enabled: !loading && Boolean(todayColumn && doneColumn),
     candidates: dayPlanCandidates,
     candidatesReady: candidateEvidence?.freshness === 'current',
-    focusCount,
     onBriefPicksChange,
   });
+  const dayRitualPlanRef = useRef(dayRitual.plan);
+  dayRitualPlanRef.current = dayRitual.plan;
   const ritualView: OverlayRitualView | undefined =
     dayRitual.view === 'arrival' ||
     dayRitual.view === 'settlement'
@@ -1823,6 +1829,17 @@ function TodayExperience({
     }
   }
 
+  async function saveRitualTask(taskId: string, patch: Partial<EditableTask>) {
+    await updateTask(taskId, {
+      title: patch.title,
+      description: patch.description,
+      priority: patch.priority,
+      dueDate: patch.dueDate,
+      tags: patch.tags,
+    });
+    await retry();
+  }
+
   async function deleteDetail() {
     if (!detailTask) return;
     const archived = detailTask;
@@ -1947,6 +1964,10 @@ function TodayExperience({
     () => [...(dayRitual.plan?.items ?? [])].sort((left, right) => left.position - right.position),
     [dayRitual.plan?.items],
   );
+  const tasksById = useMemo(
+    () => new Map(tasks.map((task) => [task._id, task])),
+    [tasks],
+  );
   const arrivalPlanItems = useMemo(
     () => orderedPlanItems.filter(
       (item) =>
@@ -1964,7 +1985,7 @@ function TodayExperience({
       id: task._id,
       title: task.title,
       description: task.description,
-      project: helpfulProjectLabel(task.tags[0]),
+      project: helpfulProjectLabel(task.project) ?? helpfulProjectLabel(task.tags[0]),
       due: task.dueAt
         ? formatArrivalDueDate(task.dueAt)
         : task.dueDate
@@ -1975,24 +1996,27 @@ function TodayExperience({
   );
   const arrivalItems = useMemo<MorningArrivalItem[]>(
     () => arrivalPlanItems.map((item) => {
-      const sourceTask = tasks.find((task) => task._id === item.taskId);
+      const sourceTask = tasksById.get(item.taskId);
       const fullDescription = sourceTask?.description || item.outcome;
+      const title = sourceTask?.title || item.title;
+      const due = sourceTask?.dueAt ?? sourceTask?.dueDate ?? item.dueAt;
       return {
         item,
-        title: item.title,
-        summary: shortArrivalSummary(fullDescription, item.title),
+        task: sourceTask,
+        title,
+        summary: shortArrivalSummary(fullDescription, title),
         description: fullDescription,
         // The Morning Brief's rationale wins the card copy when this item was
         // brief-ranked; the deterministic evidence line remains the fallback.
         whyToday: item.brief?.whyToday ?? item.whyToday,
         definitionOfDone: item.definitionOfDone,
-        project: helpfulProjectLabel(item.project),
-        deadline: item.dueAt
-          ? formatArrivalDueDate(item.dueAt)
+        project: helpfulProjectLabel(sourceTask?.project) ?? helpfulProjectLabel(item.project),
+        deadline: due
+          ? formatArrivalDueDate(due)
           : undefined,
       };
     }),
-    [arrivalPlanItems, tasks],
+    [arrivalPlanItems, tasksById],
   );
   const recommendation = arrivalPlanItems[0]
     ? `Start with ${arrivalPlanItems[0].title}. ${arrivalPlanItems[0].whyToday}`
@@ -2015,7 +2039,7 @@ function TodayExperience({
         config,
       );
       const run = currentRun ?? latestRun;
-      const task = tasks.find((candidate) => candidate._id === item.taskId);
+      const task = tasksById.get(item.taskId);
       const taskDone = task?.status === 'done' || task?.columnId === doneColumn?._id;
       map.set(item.taskId, {
         item,
@@ -2040,7 +2064,7 @@ function TodayExperience({
     dayRitual.executionState,
     dayRitual.startDayApplying,
     doneColumn?._id,
-    tasks,
+    tasksById,
   ]);
   const boardSessionByTaskId = useMemo(() => {
     const map = new Map<string, {
@@ -2118,10 +2142,11 @@ function TodayExperience({
   const completedForSettlement = orderedPlanItems
     .filter((item) => item.decision === 'completed')
     .map((item) => {
-      const task = tasks.find((candidate) => candidate._id === item.taskId);
+      const task = tasksById.get(item.taskId);
       return {
         id: item.taskId,
-        title: item.title,
+        itemId: item.id,
+        title: task?.title || item.title,
         sessionStatus: localMode
           ? taskSessions.latestByTaskId.get(item.taskId)?.status
           : undefined,
@@ -2137,14 +2162,17 @@ function TodayExperience({
     });
   const unresolvedForSettlement = orderedPlanItems
     .filter((item) => item.decision === 'accepted')
-    .map((item) => ({
-      item,
-      title: item.title,
-      outcome: item.outcome,
-      sessionStatus: localMode
-        ? taskSessions.latestByTaskId.get(item.taskId)?.status
-        : undefined,
-    }));
+    .map((item) => {
+      const task = tasksById.get(item.taskId);
+      return {
+        item,
+        title: task?.title || item.title,
+        outcome: task?.description || item.outcome,
+        sessionStatus: localMode
+          ? taskSessions.latestByTaskId.get(item.taskId)?.status
+          : undefined,
+      };
+    });
   const settlementDecisions = Object.fromEntries(
     orderedPlanItems.map((item) => [item.id, item.settlementDecision?.disposition]),
   );
@@ -2172,6 +2200,20 @@ function TodayExperience({
     })),
     [localMode, taskSessions.latestByTaskId, taskSessions.launchingTaskIds, today2PlanEntries],
   );
+  // Count of pending email items (reply or action). Shown as a badge on the
+  // Email needs you card and refreshed on the same bus the email card uses.
+  const [emailNeedsYouCount, setEmailNeedsYouCount] = useState(0);
+  const loadEmailNeedsYouCount = useCallback(async () => {
+    try {
+      setEmailNeedsYouCount((await listEmailItems('pending')).length);
+    } catch {
+      // Leave the last known count; the email card reports load errors itself.
+    }
+  }, []);
+  useEffect(() => {
+    void loadEmailNeedsYouCount();
+  }, [loadEmailNeedsYouCount]);
+  useDataChanged(['email_items', 'drafts'], () => void loadEmailNeedsYouCount());
   const today2SecondCurrentItems = useMemo<SecondCurrentItemV2[]>(
     () => jarvisTasks
       .filter((task) => isEmailDigest(task) || isRecurringTask(task))
@@ -2180,8 +2222,9 @@ function TodayExperience({
         kicker: isEmailDigest(task) ? 'Email needs you' : 'Rhythm',
         title: task.title,
         kind: isEmailDigest(task) ? 'email' : 'rhythm',
+        ...(isEmailDigest(task) && emailNeedsYouCount > 0 ? { count: emailNeedsYouCount } : {}),
       })),
-    [jarvisTasks],
+    [jarvisTasks, emailNeedsYouCount],
   );
   const today2SunPoint = useMemo(
     () => pointOnCubicDayArc(progress, TODAY2_DAY_ARC),
@@ -2204,6 +2247,7 @@ function TodayExperience({
           ? nextError.message
           : "Cove couldn't save the focus count.",
       );
+      throw nextError;
     } finally {
       setFocusCountBusy(false);
     }
@@ -2358,7 +2402,12 @@ function TodayExperience({
             onStartSession: (taskId, owner) => void launchToday2Session(taskId, owner),
             onRetrySession: (taskId, owner) => void launchToday2Session(taskId, owner),
             onReorder: (orderedTaskIds) => {
+              const startingPlanId = dayRitual.plan?.id;
               return persistToday2Order(orderedTaskIds).catch((nextError) => {
+                const currentPlan = dayRitualPlanRef.current;
+                if (!shouldSurfaceTodayOrderError(startingPlanId, currentPlan)) {
+                  return;
+                }
                 setSurfaceError(
                   nextError instanceof Error
                     ? nextError.message
@@ -2366,7 +2415,7 @@ function TodayExperience({
                 );
               });
             },
-            onFocusCountChange: (count) => void changeToday2FocusCount(count),
+            onFocusCountChange: (count) => void changeToday2FocusCount(count).catch(() => undefined),
             onGridOpenChange: setToday2GridOpen,
             onOpenSecondCurrentItem: (item) => setDetailTaskId(item.id),
             onEditTask: (taskId) => setDetailTaskId(taskId),
@@ -3093,10 +3142,12 @@ function TodayExperience({
           >
             {ritualView === 'arrival' ? (
               <MorningArrival
+                localDate={dayRitual.plan.localDate}
                 plan={dayRitual.plan}
                 focusCount={focusCount}
                 items={arrivalItems}
                 notTodayTasks={notTodayTasks}
+                tasksById={tasksById}
                 recommendation={recommendation}
                 brief={dayRitual.morningBrief}
                 briefGeneration={dayRitual.briefGeneration}
@@ -3111,7 +3162,8 @@ function TodayExperience({
                       minute: '2-digit',
                     })}`
                   : 'Using the latest verified task evidence'}
-                busy={dayRitual.busy}
+                busy={dayRitual.busy || focusCountBusy}
+                completingTaskId={completingTaskId}
                 error={combineSurfaceErrors(dayRitual.error, surfaceError)}
                 titleId={RITUAL_TITLE_IDS.arrival}
                 descriptionId={RITUAL_DESCRIPTION_IDS.arrival}
@@ -3119,22 +3171,32 @@ function TodayExperience({
                 onPlanCanvasChange={setArrivalPlanCanvas}
                 onInteract={dayRitual.markArrivalInteraction}
                 onOwnerChange={(itemId, owner) => dayRitual.setOwner(itemId, owner)}
-                onDragReorder={async (activeId, overId) => {
-                  const next = reorderDayPlanItems(arrivalPlanItems, activeId, overId);
-                  const position = next.findIndex((item) => item.id === activeId);
-                  const title = next[position]?.title ?? 'Task';
-                  if (position >= 0) await dayRitual.reorder(activeId, position, title);
+                onMoveToPosition={(itemId, position, title) => dayRitual.reorder(itemId, position, title)}
+                onFocusCountChange={changeToday2FocusCount}
+                onRemove={(itemId, title, legacyTaskBacked) => {
+                  const item = dayRitual.plan?.items.find((candidate) => candidate.id === itemId);
+                  const taskBacked = Boolean(item && tasksById.has(item.taskId)) ||
+                    legacyTaskBacked ||
+                    Boolean(item?.sourceRefs.some(
+                      (source) => source.sourceType === 'task' && source.recordId === item.taskId,
+                    ));
+                  return taskBacked
+                    ? dayRitual.laterItem(itemId, title)
+                    : dayRitual.dismissItem(itemId, title);
                 }}
-                onRemove={(itemId, title, taskBacked) => taskBacked
-                  ? dayRitual.laterItem(itemId, title)
-                  : dayRitual.dismissItem(itemId, title)}
                 onComplete={async (itemId, title) => {
                   await dayRitual.completeItem(itemId, title);
                   await retry();
                 }}
-                onAddTask={async (taskId, title) => {
-                  await dayRitual.addTask(taskId, title);
+                onCompleteBoardTask={async (taskId) => {
+                  const task = tasks.find((candidate) => candidate._id === taskId);
+                  if (!task) throw new Error('That task is no longer available.');
+                  await completeTask(task);
                 }}
+                onAddTask={async (taskId, title) => {
+                  return dayRitual.addTask(taskId, title);
+                }}
+                onSaveTask={saveRitualTask}
                 onSnooze={() => dayRitual.snooze().catch(() => undefined)}
                 onBypass={() => dayRitual.bypass().catch(() => undefined)}
                 onStartDay={startPlannedDay}
@@ -3144,6 +3206,7 @@ function TodayExperience({
                 plan={dayRitual.plan}
                 completed={completedForSettlement}
                 unresolved={unresolvedForSettlement}
+                tasksById={tasksById}
                 decisions={settlementDecisions}
                 proposedTomorrowTitle={proposedTomorrow?.title}
                 savingItemIds={dayRitual.savingItemIds}
@@ -3160,6 +3223,15 @@ function TodayExperience({
                   }
                   return dayRitual.decideSettlement(itemId, disposition, progress);
                 }}
+                onComplete={async (itemId, title) => {
+                  await dayRitual.completeSettlementItem(itemId, title);
+                  await retry();
+                }}
+                onReopen={async (itemId, title) => {
+                  await dayRitual.reopenSettlementItem(itemId, title);
+                  await retry();
+                }}
+                onSaveTask={saveRitualTask}
                 onCancel={dayRitual.cancelSettlement}
                 onNoteChange={setSettlementNote}
                 onCloseDay={closeSettledDay}
