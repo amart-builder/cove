@@ -1,10 +1,10 @@
 {
   "version": 1,
   "product": "Cove",
-  "source_sha": "01a73f2b3437f5bead0b879986f80412b5ff51d8",
+  "source_sha": "d6c4f95f259b7ae67e68df9454af2fb4995d61d2",
   "source_worktree_dirty": false,
   "allow_dirty": false,
-  "exported_at": "2026-09-03T20:10:54.059Z",
+  "exported_at": "2026-09-03T23:40:14.935Z",
   "file_count": 500,
   "files": [
     {
@@ -809,8 +809,8 @@
     },
     {
       "path": "src/app/globals.css",
-      "bytes": 104459,
-      "sha256": "a6803478fb5bb88750f2bfb5c65a873cd479c08376cd94d93e573a651caa2460"
+      "bytes": 105508,
+      "sha256": "5b906f969a7bba95092c1aa05cb2330126bbde4484cb5aa83908894080689bc0"
     },
     {
       "path": "src/app/guide/content.tsx",
@@ -1024,8 +1024,8 @@
     },
     {
       "path": "src/components/tasks/TaskSessionLauncher.tsx",
-      "bytes": 6952,
-      "sha256": "f92d8554eee65ab8938e3ffa2a759f86d393229ebb9c567e5b91b5514d327f11"
+      "bytes": 6968,
+      "sha256": "08c7d66b012aceaa0717c2b81142d060e2adfbbae5c34f3308ef71336d290c0b"
     },
     {
       "path": "src/components/tasks/TaskWorkspace.tsx",
@@ -1034,8 +1034,8 @@
     },
     {
       "path": "src/components/tasks/TodayRiverStageV2.tsx",
-      "bytes": 49714,
-      "sha256": "0383ce8132ec3ccf2902e0b0a89064c4f5063970f277d80e36d5854b674f4687"
+      "bytes": 50191,
+      "sha256": "50348b76f5fbe97863ed8b9dc780d79715491fae8f486799999b0c0ed68e8517"
     },
     {
       "path": "src/components/tasks/TodayView.tsx",
@@ -2449,8 +2449,8 @@
     },
     {
       "path": "tests/round6-ui-source.test.mjs",
-      "bytes": 2134,
-      "sha256": "af87d01040e1b653e35934ffecde536cafcd104068bd422fba5c2adf0fe7bade"
+      "bytes": 2128,
+      "sha256": "76833f9cdfcc5963181348edc6d7225c6c168bfa72e7b1495b171ae8d71479f6"
     },
     {
       "path": "tests/tab-nav.test.mjs",
@@ -2469,8 +2469,8 @@
     },
     {
       "path": "tests/task-session-runs.test.mjs",
-      "bytes": 59303,
-      "sha256": "27ca07edf96b0925c9736c5d5ca0cec29661a27005a63bc1c26e02ae2bead184"
+      "bytes": 59283,
+      "sha256": "1ca84b7291af1d6e82ab42c6f043d38654f8f8543587c0823f414e6f2b5afe74"
     },
     {
       "path": "tests/task-settings.test.mjs",
