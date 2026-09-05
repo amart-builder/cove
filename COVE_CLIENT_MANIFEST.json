@@ -1,10 +1,10 @@
 {
   "version": 1,
   "product": "Cove",
-  "source_sha": "617b2ecb0cfa942944e70871318913924ddbab55",
+  "source_sha": "f9ca7262b32a426c592f137f0da708907d46bbb6",
   "source_worktree_dirty": false,
   "allow_dirty": false,
-  "exported_at": "2026-09-05T19:47:53.084Z",
+  "exported_at": "2026-09-05T23:22:02.068Z",
   "file_count": 541,
   "files": [
     {
@@ -74,8 +74,8 @@
     },
     {
       "path": "OPERATIONS.md",
-      "bytes": 5329,
-      "sha256": "048a5b6022ccee15cca54cd7b594fc642c65a67f1cc26780e0ab1af5dc542688"
+      "bytes": 5906,
+      "sha256": "5bc39fbc49ee1b1fddfe9cf9ed3571251477191b2873e141d6843505c8d830f7"
     },
     {
       "path": "README.md",
@@ -249,8 +249,8 @@
     },
     {
       "path": "prompts/chief-of-staff-mandate.md",
-      "bytes": 2233,
-      "sha256": "d1baaf1c2d2ce111d761818d3bf409c9b948c20ac17ff63604e9f6aa3419f502"
+      "bytes": 2747,
+      "sha256": "f81f2e104cbdd2c037cdaed228ddd297ac9b9bf2ca01057499175ba7d899dbc6"
     },
     {
       "path": "prompts/chief-of-staff-output.schema.json",
@@ -444,8 +444,8 @@
     },
     {
       "path": "scripts/cove-reminders.mjs",
-      "bytes": 29462,
-      "sha256": "72b475dde34fabe1a6c2e7ea703636bd9757a1d49b959b4231cf31ca8a2a0a5e"
+      "bytes": 29720,
+      "sha256": "b77eca762d7b77f65d6f95378cbd56b3dca9b5fe7eafd0383e46acde7913b8d1"
     },
     {
       "path": "scripts/cove-restore-backup.sh",
@@ -1194,8 +1194,8 @@
     },
     {
       "path": "src/lib/attention/delivery.ts",
-      "bytes": 12541,
-      "sha256": "3d5e7dcf241c6cabd220248e76e9aeea1e3c9d43cef917f0bf9729c50aa5f7c5"
+      "bytes": 12582,
+      "sha256": "6d440af81686dd7e8395fcd0c34f63746d125682cc0843852a34a4f92a7924f8"
     },
     {
       "path": "src/lib/attention/email-urgency.ts",
@@ -1204,8 +1204,8 @@
     },
     {
       "path": "src/lib/attention/follow-through.mjs",
-      "bytes": 12612,
-      "sha256": "10a273735d72b05ab0ff3520fdf883396343d62daf050cf3f11871924503c08f"
+      "bytes": 12941,
+      "sha256": "cc890ef0567f114f060cc9f1d11038b70997314fb64e1f88738c88711546a98a"
     },
     {
       "path": "src/lib/attention/ledger.d.mts",
@@ -1249,8 +1249,8 @@
     },
     {
       "path": "src/lib/attention/transport.mjs",
-      "bytes": 2690,
-      "sha256": "2fab159b31da69895c10c4c2d6b569b34dcf20ed51b1983f42c5c0a0a9a98852"
+      "bytes": 2695,
+      "sha256": "9ffe16164196def4cc0a21e22584338a9717d734da4f674b01046cdb97b617d0"
     },
     {
       "path": "src/lib/autonomy/groundwork.ts",
@@ -1344,8 +1344,8 @@
     },
     {
       "path": "src/lib/chief-of-staff/driver.ts",
-      "bytes": 39346,
-      "sha256": "d7ad38d2a79887ca3dc4864bc6633945ae9104b72f68c4db627988e4d67cd671"
+      "bytes": 39387,
+      "sha256": "14c786200169a26347aa91c5cec6a723bd32d160dd9dc6443c1188365a370ecb"
     },
     {
       "path": "src/lib/chief-of-staff/hooks.ts",
@@ -2044,8 +2044,8 @@
     },
     {
       "path": "tests/attention-floor.test.mjs",
-      "bytes": 8375,
-      "sha256": "712308a61cf1872e9a3703b19757d0fd5eb5c8c5e165c27f18a9b7db3105cf7e"
+      "bytes": 8414,
+      "sha256": "816b6b9354c2c8e29c28436e292e73b9ac25a7724c4cbced72f3d0c06f47f8bd"
     },
     {
       "path": "tests/attention-ledger.test.mjs",
@@ -2144,8 +2144,8 @@
     },
     {
       "path": "tests/chief-of-staff-notify.test.mjs",
-      "bytes": 25445,
-      "sha256": "ffd2a6f1b254b2627aab61278ba8b7acb037888d70e8ece08b892d11ed42480d"
+      "bytes": 26596,
+      "sha256": "963f0668e79a74e15eff8356a1d26d78fd9e43406aaba81c16aadb8acfe0707f"
     },
     {
       "path": "tests/chief-of-staff.test.mjs",
@@ -2399,8 +2399,8 @@
     },
     {
       "path": "tests/follow-through.test.mjs",
-      "bytes": 9519,
-      "sha256": "878742f22f6262406df911f8f69869c8be9b332853afe7d23e919463b0c4eb70"
+      "bytes": 9521,
+      "sha256": "18c9ea0012cb18fca17aa14574aff1430f769e5c4b9af1efe3bd46bf8f1a6910"
     },
     {
       "path": "tests/gap-detectors.test.mjs",
@@ -2489,8 +2489,8 @@
     },
     {
       "path": "tests/meeting-intelligence-foundations.test.mjs",
-      "bytes": 24372,
-      "sha256": "bb924d2cf0e3e83177bea72ed8738d93ce2f8a3b6e6d45b26f770b0b04a1b4f0"
+      "bytes": 24366,
+      "sha256": "b4176e80fe931d7308111e75d77c9dadb7a27860cca99df4d0b9423e9175df66"
     },
     {
       "path": "tests/meeting-watch.test.mjs",
@@ -2539,8 +2539,8 @@
     },
     {
       "path": "tests/notification-routing.test.mjs",
-      "bytes": 19426,
-      "sha256": "5aebd1fbda26bd711ff9b8a2f6357ab832984c03f0d0213732616453e7d3cce3"
+      "bytes": 19478,
+      "sha256": "6cef1abb0ff96fc3f5c1c2ac34fba28d2c699511bfa7ef4cbec57fd051e17d7a"
     },
     {
       "path": "tests/operator-policy.test.mjs",
