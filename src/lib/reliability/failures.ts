@@ -8,6 +8,7 @@
 import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import { openLocalDatabase } from "../local/database";
+import { jobFailureDetail } from "./job-failure-copy";
 
 export type FailureInboxItem = {
   id: string;
@@ -36,11 +37,16 @@ function decodeFailure(row: FailureRow): FailureInboxItem {
   } catch {
     details = { raw: row.details_json };
   }
+  // Older scheduler records retain their diagnostics for investigation, while
+  // the product view explains the affected work with a cause and recovery step.
+  const job = row.source === "job" && details && typeof details === "object" && "type" in details && typeof details.type === "string"
+    ? details as { type: string; retrying?: boolean; error?: unknown }
+    : undefined;
   return {
     id: row.id,
     source: row.source,
     sourceId: row.source_id,
-    message: row.message,
+    message: job ? jobFailureDetail(job.type, typeof job.error === "string" ? job.error : row.message, job.retrying ?? row.message.includes("job will retry:")) : row.message,
     details,
     occurredAt: row.occurred_at,
     dismissedAt: row.dismissed_at,

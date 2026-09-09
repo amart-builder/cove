@@ -909,7 +909,7 @@ export async function runWake(
         claudeMcpConfigPath: path.join(options.repoDir, "scripts", "cove-empty-mcp.json"),
         claudeNoChrome: true,
         claudeDisableSlashCommands: true,
-        timeoutMs: options.timeoutMs,
+        timeoutMs: options.timeoutMs ?? WAKE_TIMEOUT_MS,
         spawnImpl: options.spawnImpl,
         validate: (_text, value) => validateChiefOfStaffOutput(value),
       });

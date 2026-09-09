@@ -78,8 +78,8 @@ and the chief of staff, Buddy conversation/replan, and task sessions. Without th
 file, existing lane settings remain active.
 Current supported selection fields are `version: 1`, `provider: "claude"` or
 `"codex"`, the exact `model` ID, and `effort: "low"`, `"medium"` or `"high"`.
-`backgroundLimits` can override the provisional limits: `callsPerHour: 6`,
-`callsPerDay: 24`, `callsPerWeek: 100`, `inputBytesPerCall: 96000`,
+`backgroundLimits` can override the provisional limits: `callsPerHour: 12`,
+`callsPerDay: 96`, `callsPerWeek: 400`, `inputBytesPerCall: 96000`,
 `outputBytesPerCall: 64000`, `timeoutMs: 120000`. A provider/model mismatch or invalid limit
 stops jobs instead of silently choosing another model.
 
@@ -91,6 +91,20 @@ first and verify the CLI's billing mode. No service is installed or restarted.
 `node scripts/cove-agent-settings.mjs status` prints the saved selection and local
 usage. The Issues page shows rolling call usage. Model availability is verified
 only at configuration time; revoked access becomes a visible job failure.
+
+Call limits apply independently to two pools: daily planning (Morning Brief and
+closeout) and background review (including the chief). Neither pool can consume
+the other's allowance. Routine background work leaves a quarter of its pool for
+chief reviews. Existing saved limits remain explicit; upgrading code alone does
+not replace them.
+
+Daily planning is exempt from the small per-call input and output limits and uses
+its own writing timeout. Source selection and freshness rules still apply, as do
+schema/evidence validation and a 4 MiB technical response boundary. Codex progress
+output is drained separately from its final brief. This is not a brief-length
+instruction. Chief reviews retain the chief driver's fifteen-minute timeout
+(or an explicit caller override), while retaining background call and byte limits.
+Other background jobs retain all their per-call limits.
 
 These limits cover the shared runner and selected-provider chief, including
 manually requested jobs through those paths. They do not yet cover interactive

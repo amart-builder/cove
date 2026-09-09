@@ -9,9 +9,9 @@ export const RECOMMENDED_AGENTS = Object.freeze({
 
 // Provisional workload ceilings, not subscription percentages or token prices.
 export const DEFAULT_BACKGROUND_LIMITS = Object.freeze({
-  callsPerHour: 6,
-  callsPerDay: 24,
-  callsPerWeek: 100,
+  callsPerHour: 12,
+  callsPerDay: 96,
+  callsPerWeek: 400,
   inputBytesPerCall: 96_000,
   outputBytesPerCall: 64_000,
   timeoutMs: 120_000,
