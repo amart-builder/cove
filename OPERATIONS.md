@@ -39,13 +39,19 @@ optional follow-through checker fails.
 
 The deterministic checker runs without AI tokens. It checks connected meetings
 at most every five minutes and eligible approaching/overdue tasks during local
-8am to 6pm hours. It shares cooldowns and banner limits with existing reminders.
+8am to 6pm hours. It shares cooldowns and banner limits with existing reminders. Approaching
+deadlines can use a reserved slot after ordinary overdue reminders, while the
+final slot stays available for meetings or urgent email. A morning deadline
+warning preserves the noon check-in slot. The daily total remains six.
+Task reminder clicks open the matching task details in Today or All Work.
 One-hour snooze persists across restarts. A notification with an uncertain
 handoff is shown for review, never blindly retried.
 
-Background AI shows rolling attempt limits and the selected model. Hitting a
-limit pauses model review, not deterministic reminders. Failures and retries
-count; interactive Buddy and task sessions are outside these background limits.
+Background AI shows the selected model and separate rolling usage for background
+reviews and daily planning. Defaults are 12 calls/hour, 96/day and 400/week per
+pool. Background reviews cannot spend the Morning Brief and closeout allowance.
+Failures and retries count within their pool; interactive Buddy and task sessions
+are outside these background limits. Deterministic reminders remain available.
 Neither tokens observed nor calls remaining measure a subscription balance.
 
 When a Codex task needs permission, use its Continue button to resume in an
@@ -77,8 +83,11 @@ acceptance.
 
 AI-capacity denial keeps a queued job until the indicated rolling window clears;
 it does not spend execution retries. Actual process failures still count. Routine
-work leaves a quarter of the same bounded allowance for chief-of-staff and brief
-calls, while total hourly, daily and weekly caps remain authoritative. This is a
+work leaves a quarter of the background pool for chief-of-staff calls. Daily
+planning has a separate pool with the same configured hourly, daily and weekly
+caps. A brief denied by its own pool stays queued across restarts, shows its
+next eligible time, and retries automatically. Input-size errors are distinct
+from usage denial, and the UI displays only safe failure explanations. This is a
 call allowance, not a provider subscription balance or a guarantee of equal token
 cost. Check pending reviews and Issues when the allowance is resting.
 
@@ -91,3 +100,10 @@ item and explain why it needs attention now, using plain language. For example:
 Use the actual schedule, never invent a deadline or claim that open work is
 definitely unfinished. Keep source labels and content sanitization for inferred
 work. Routine reminders use local templates and require no extra model calls.
+
+Scheduler failures name the affected work and link to Issues. The Issues entry
+explains a safe cause and whether Cove is retrying. Once retries stop, it gives
+the person an immediate fallback and directs repair to their setup agent. Raw
+provider diagnostics stay in stored job and failure details, not banner text.
+Chief reviews use their fifteen-minute driver timeout rather than the shared
+two-minute monitoring timeout; the scheduler renews its lease during execution.

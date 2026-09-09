@@ -85,3 +85,25 @@ test('confirmed commitments receive deadline coverage without being copied to ta
 test('responsibility acknowledgement quiets the native follow-through for one hour',async t=>{
  const db=fixture(t);task(db,'proposal',new Date(+instant+20*60000).toISOString());const {reconcileResponsibilities,listResponsibilities,acknowledgeResponsibility}=await import('../src/lib/responsibility/store.ts');reconcileResponsibilities(db,instant);const row=listResponsibilities(db)[0];acknowledgeResponsibility(db,'task','proposal',row.revision,instant);let sends=0;await run(db,new Date(+instant+60000),{notify:()=>sends++});assert.equal(sends,0);
 });
+
+
+test('routine reminders cannot consume the approaching-deadline slot or final meeting slot', async t => {
+ const db=fixture(t);const morning=new Date('2026-09-03T15:00:00Z');
+ for(let i=0;i<4;i++)task(db,`backlog-${i}`,'2026-08-01');
+ const messages=[];await run(db,morning,{notify:x=>messages.push(x)});assert.equal(messages.length,3);
+ db.prepare("INSERT INTO cove_attention_ledger(id,kind,ref_kind,ref_id,level,reason,delivered_at,created_at) VALUES('floor','floor_nudge','task','floor','banner','daily floor',?,?)").run(instant.toISOString(),instant.toISOString());
+ task(db,'deadline',new Date(+instant+30*60000).toISOString());
+ await run(db,instant,{notify:x=>messages.push(x)});
+ assert.equal(messages.length,4);assert.match(messages[3].message,/Due in 30 minutes: Prepare deadline/);
+ task(db,'another-deadline',new Date(+instant+40*60000).toISOString());
+ await run(db,new Date(+instant+5*60000),{calendar:async()=>({listEvents:async()=>[{id:'meeting',summary:'Client call',start:new Date(+instant+15*60000).toISOString()}]}),notify:x=>messages.push(x)});
+ assert.equal(messages.length,5);assert.match(messages[4].message,/Client call/);
+ assert.equal(db.prepare("SELECT COUNT(*) FROM cove_attention_ledger WHERE level='banner' AND delivered_at IS NOT NULL").pluck().get(),6);
+ assert.equal(db.prepare("SELECT status FROM cove_follow_through_notices WHERE ref_id='another-deadline'").pluck().get(),'pending');
+});
+
+test('an approaching deadline is handled before older overdue work in the same check',async t=>{
+ const db=fixture(t);task(db,'old','2026-08-01');task(db,'soon',new Date(+instant+30*60000).toISOString());
+ const messages=[];await run(db,instant,{notify:x=>messages.push(x)});
+ assert.equal(messages[0].taskId,'soon');assert.equal(messages[1].taskId,'old');
+});

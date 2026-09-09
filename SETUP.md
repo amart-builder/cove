@@ -503,8 +503,10 @@ Buddy, task sessions and enabled email/meeting jobs. The installer reads it and
 requires only the selected CLI. Do not hand-write this file to bypass the model
 access check. Existing installs without the file keep their legacy lane settings.
 
-Default background limits are 6 calls/hour, 24/day and 100/week, with bounded
-input, output and runtime. Retries and failures count. Issues shows actual calls
+Default limits are 12 calls/hour, 96/day and 400/week for each of the separate
+background-review and daily-planning pools. Daily planning keeps its own writing
+timeout and is not subject to the small monitoring input/output caps. Schema
+validation and a technical response-size boundary still apply. Retries and failures count. Issues shows actual calls
 and whether AI reviews are paused. These are workload limits, not a measurement
 of the provider's subscription balance. Interactive Buddy and user-assigned task
 sessions consume the subscription separately. Explain that distinction once.

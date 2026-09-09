@@ -1,5 +1,7 @@
 'use client';
 
+import { useTaskLink } from './useTaskLink';
+
 import { taskEditError, type TaskEditGuard } from '@/lib/tasks/edit-conflict';
 
 /**
@@ -751,6 +753,7 @@ function TodayExperience({
   const [showAllDownstream, setShowAllDownstream] = useState(false);
   const [expandedSuggestionId, setExpandedSuggestionId] = useState<string | null>(null);
   const [detailTaskId, setDetailTaskId] = useState<string | null>(null);
+  useTaskLink('today', tasks, setDetailTaskId);
   const [completingTaskId, setCompletingTaskId] = useState<string | null>(null);
   const [undo, setUndo] = useState<UndoAction | null>(null);
   const [undoPaused, setUndoPaused] = useState(false);

@@ -87,8 +87,9 @@ export async function runFollowThrough({ db, now = new Date(), timezone, calenda
   const until=Date.parse(event.start)-now;
   if (event.id && until>0 && until<=15*MINUTE) candidates.push({kind:'meeting',ref:event.id,due:event.start,stage:'meeting',title:event.title});
  }
- // Meetings first; never flood a busy day with a banner for every task.
- candidates.sort((a,b)=>(a.kind==='meeting'?0:1)-(b.kind==='meeting'?0:1) || a.due.localeCompare(b.due));
+ // Prioritize meetings and approaching deadlines before the overdue backlog.
+ const priority = candidate => candidate.kind === 'meeting' ? 0 : candidate.stage === 'advance' ? 1 : 2;
+ candidates.sort((a,b)=>priority(a)-priority(b) || Date.parse(a.due)-Date.parse(b.due));
  for (const candidate of candidates) {
   const id=noticeId(candidate.kind,candidate.ref,candidate.due,candidate.stage);
   db.prepare("INSERT OR IGNORE INTO cove_follow_through_notices(id,ref_kind,ref_id,title,stage,due_at,status,updated_at) VALUES(?,?,?,?,?,?,'pending',?)").run(id,candidate.kind,candidate.ref,candidate.title,candidate.stage,candidate.due,nowIso);
@@ -99,7 +100,7 @@ export async function runFollowThrough({ db, now = new Date(), timezone, calenda
    if (candidate.kind==='task' && !db.prepare("SELECT 1 FROM tasks WHERE id=? AND status='open' AND archived_at IS NULL AND due_at=? AND remind_native=1 AND (? <> 'advance' OR remind_at IS NULL OR remind_at = '') AND (notification_policy IS NULL OR notification_policy IN ('both', ?)) AND (engaged_at IS NULL OR julianday(engaged_at) <= julianday(?))").get(candidate.ref,candidate.due,candidate.stage,candidate.stage==='advance'?'predeadline':'due',new Date(now-60*MINUTE).toISOString())) return null;
    if(candidate.kind==='commitment'&&!db.prepare("SELECT 1 FROM commitments WHERE id=? AND status='open' AND confirmed=1 AND kind<>'idea' AND due_at=?").get(candidate.ref,candidate.due))return null;
    if (db.prepare("SELECT 1 FROM sqlite_master WHERE name='cove_responsibilities' AND type='table'").get() && db.prepare("SELECT 1 FROM cove_responsibilities WHERE ref_kind=? AND ref_id=? AND acknowledged_at>?").get(candidate.kind,candidate.ref,new Date(+now-60*MINUTE).toISOString())) return null;
-   const allocation=allocateAttention(db,{kind:'chief_of_staff',refKind:candidate.kind,refId:row.snoozed_until ? `${candidate.ref}:snooze:${row.snoozed_until}` : candidate.kind==='meeting'?`${candidate.ref}:${candidate.due}`:candidate.ref,requestedLevel:'banner',reason:'Scheduled follow-through',now});
+   const allocation=allocateAttention(db,{kind:'chief_of_staff',refKind:candidate.kind,refId:row.snoozed_until ? `${candidate.ref}:snooze:${row.snoozed_until}` : candidate.kind==='meeting'?`${candidate.ref}:${candidate.due}`:candidate.ref,requestedLevel:'banner',deadlineReminder:candidate.stage==='advance',reason:'Scheduled follow-through',now});
    if (!allocation.row || allocation.finalLevel!=='banner') {
     db.prepare("UPDATE cove_follow_through_notices SET error=? WHERE id=?").run('Reminder held by the attention allowance or a prior alert. Review this item in Cove.',id);
     return null;
