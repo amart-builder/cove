@@ -1,11 +1,11 @@
 {
   "version": 1,
   "product": "Cove",
-  "source_sha": "f1b84f74f8dffd8b2a2fccab9a06a085d50800dc",
+  "source_sha": "dfcb2e74759768de1f8a90406c92148553e11d99",
   "source_worktree_dirty": false,
   "allow_dirty": false,
-  "exported_at": "2026-09-10T20:06:55.307Z",
-  "file_count": 563,
+  "exported_at": "2026-09-10T20:30:40.075Z",
+  "file_count": 572,
   "files": [
     {
       "path": ".claude/skills/cove-morning-brief/SKILL.md",
@@ -54,8 +54,8 @@
     },
     {
       "path": "CODEBASE_GUIDE.md",
-      "bytes": 37976,
-      "sha256": "162c2790eb69eddff3fe03636d99eeb2b17cefad81b1dbd430c20a3360611819"
+      "bytes": 38593,
+      "sha256": "139988771c1c9f88d6d4beedbef877c6893a6ee8bf551a668e3ec87416b6bb3b"
     },
     {
       "path": "CONFIGURATION.md",
@@ -464,8 +464,8 @@
     },
     {
       "path": "scripts/cove-reminders.mjs",
-      "bytes": 30570,
-      "sha256": "ab6195b0386f2d1ad278ef3d3ae73101c082340f784c54c2d4d2dd75c5f63286"
+      "bytes": 31490,
+      "sha256": "c5f03240c462e18a2be31335f73b08f198f0df5c8e093fccf5db4ce8a8daf740"
     },
     {
       "path": "scripts/cove-restore-backup.sh",
@@ -838,6 +838,11 @@
       "sha256": "ee4eb4e6131411e09709706d5b541e5b4e08a10469cb2b22dbbd757f847d507c"
     },
     {
+      "path": "src/app/api/notifications/route.ts",
+      "bytes": 2431,
+      "sha256": "dceab553fd7944201473d6f3e8279bea2858c55d761ee8646f96c569e878ef7e"
+    },
+    {
       "path": "src/app/api/quiet-current/route.ts",
       "bytes": 7464,
       "sha256": "0a475ece7e426e527589a9a5a42ddf901377958f05ef722e55870b7e0fa10652"
@@ -899,8 +904,8 @@
     },
     {
       "path": "src/app/globals.css",
-      "bytes": 114250,
-      "sha256": "aef9474b7966f2640307b7d72fea20c68b0ff436e52ecc926f8bdc2aadbee0fa"
+      "bytes": 116413,
+      "sha256": "4eb5d68e32575a4452d7c5f28e48c71abc437c9ca779e5dca373dd6e55d23dbf"
     },
     {
       "path": "src/app/guide/content.tsx",
@@ -1103,6 +1108,11 @@
       "sha256": "fd39d37d64912094af631aa0c9c75977f300b7a1370804a49091ba437b1ca57d"
     },
     {
+      "path": "src/components/tasks/NotificationTaskSheet.tsx",
+      "bytes": 4954,
+      "sha256": "66866ec1d67bb34b4f5f6d5d3d58047e3509b2f4e757adc03235771e624da62e"
+    },
+    {
       "path": "src/components/tasks/RecentlyDeleted.tsx",
       "bytes": 4286,
       "sha256": "f01d5543f994913dc4da70a7852d3a72d4c3419115ae790445262c05a14c06ba"
@@ -1144,8 +1154,8 @@
     },
     {
       "path": "src/components/tasks/TodayView.tsx",
-      "bytes": 134008,
-      "sha256": "31cc26a3817c56b74e28e6b68eddba9e98332fd31354a3ed1bb3c80b000f04a7"
+      "bytes": 136760,
+      "sha256": "268f2ec95849674de2535226e4836347fe26eaacd9d9b566af4caae0da3e3254"
     },
     {
       "path": "src/components/tasks/arrival/ArrivalPlanGrid.tsx",
@@ -1204,8 +1214,8 @@
     },
     {
       "path": "src/components/tasks/useTaskLink.ts",
-      "bytes": 1041,
-      "sha256": "3b0290d22217e4f6fceb5117d2a06ddefac4d424ae1ed676d798f16a4f547cff"
+      "bytes": 1174,
+      "sha256": "c297d4ec02a241ecacdf26469d066bdf04e6de1845ca119526f3dbacdcf4a2f2"
     },
     {
       "path": "src/components/tasks/useTaskSessionRuns.ts",
@@ -1239,13 +1249,13 @@
     },
     {
       "path": "src/lib/attention/delivery.ts",
-      "bytes": 12582,
-      "sha256": "6d440af81686dd7e8395fcd0c34f63746d125682cc0843852a34a4f92a7924f8"
+      "bytes": 12747,
+      "sha256": "c5798e6283c1a692a23a661ec80fb7aec5912160eda3fad66b25545ac5d35dfd"
     },
     {
       "path": "src/lib/attention/email-urgency.ts",
-      "bytes": 7220,
-      "sha256": "4fc871d7b4ff195088fe39ad07201ebb7a175e8279127c5d58431f192d43a470"
+      "bytes": 7365,
+      "sha256": "1a7a2fdc49706652ce93a6eac2c46547920ef6ceed90c51d7dd8afb9622a874d"
     },
     {
       "path": "src/lib/attention/follow-through.mjs",
@@ -1261,6 +1271,16 @@
       "path": "src/lib/attention/ledger.mjs",
       "bytes": 12745,
       "sha256": "77cb9a7020dd5eea1bc42ae35b3b6fa3022da6a73cfad1559ba191848fae9f12"
+    },
+    {
+      "path": "src/lib/attention/notification-links.d.mts",
+      "bytes": 168,
+      "sha256": "1702fc90a164b60b2b37b27873ebf25381fe32621aeba50fcd92d51c1a010c33"
+    },
+    {
+      "path": "src/lib/attention/notification-links.mjs",
+      "bytes": 697,
+      "sha256": "ed267a1c544329cc086edbeda39c84df11ad36b15b92dfba98304af2afb41997"
     },
     {
       "path": "src/lib/attention/quiet-current.ts",
@@ -1289,13 +1309,13 @@
     },
     {
       "path": "src/lib/attention/transport.d.mts",
-      "bytes": 460,
-      "sha256": "12fd3d4cd198e35362645cf7e2226876599a7a051afd5da0559dffb3224d381f"
+      "bytes": 478,
+      "sha256": "b0656865150c261ec6d2fc0e7c9d890e5c5632b11c3336bd87fa87c612ad4f9a"
     },
     {
       "path": "src/lib/attention/transport.mjs",
-      "bytes": 2745,
-      "sha256": "97eeeeb4b2bd0a858045b381ca743e3dc34402e8ed909fc9e15fb1b86eb14264"
+      "bytes": 2771,
+      "sha256": "d96b4af3f862feec5916ac6dbe0228f4590cace26ac855feeaa30d06e331d48f"
     },
     {
       "path": "src/lib/autonomy/groundwork.ts",
@@ -1819,8 +1839,8 @@
     },
     {
       "path": "src/lib/intake/run.ts",
-      "bytes": 20177,
-      "sha256": "7d945dbfec36097da8666cf2a570502688c1ae25a25cbe5a89d9cf0879dbba49"
+      "bytes": 20392,
+      "sha256": "4bfee15daff27fafbabc54d45aa88aaf912d38d02c54056171e9f4510b907525"
     },
     {
       "path": "src/lib/intake/task-writer.ts",
@@ -1856,6 +1876,21 @@
       "path": "src/lib/model-runner.ts",
       "bytes": 1992,
       "sha256": "f703ff4ddbfd6533c15dafe58c304169ced27fd351eaec5290743bc9442bb766"
+    },
+    {
+      "path": "src/lib/notifications/context.ts",
+      "bytes": 2803,
+      "sha256": "ed66dac66e4317edf562ff08fe229e49ec546c1840d0adb45f4e0897a8493534"
+    },
+    {
+      "path": "src/lib/notifications/reminders.d.mts",
+      "bytes": 394,
+      "sha256": "896c2391c87491df1f2a69a8de0716f81302b27a19ec0665f6fec80d6b5a940b"
+    },
+    {
+      "path": "src/lib/notifications/reminders.mjs",
+      "bytes": 3127,
+      "sha256": "247b98c06a4f4c3ef75a849758d868d715679eae9ecd6b38cd6ea519c89fc596"
     },
     {
       "path": "src/lib/operator-policy.ts",
@@ -2636,6 +2671,16 @@
       "path": "tests/notification-branding.test.mjs",
       "bytes": 2917,
       "sha256": "fe2412aae4cbb118126c923384cfae80e19858c503ccd38de43d2001f2671b52"
+    },
+    {
+      "path": "tests/notification-context.test.mjs",
+      "bytes": 6916,
+      "sha256": "c52c50386cb62ff3bfff3d77f37d2da383299f359fd14d6891b4a9614e4877f9"
+    },
+    {
+      "path": "tests/notification-route.test.mjs",
+      "bytes": 1605,
+      "sha256": "9cee4f308a2d31c4407c44a792d60149032d90386c991f3cfc251a3e5251769b"
     },
     {
       "path": "tests/notification-routing.test.mjs",
