@@ -1,11 +1,11 @@
 {
   "version": 1,
   "product": "Cove",
-  "source_sha": "30710bf5c7a377ab12e1305270986ebf14d3fa34",
+  "source_sha": "38c99a9622d6794f87337398011a61dd91b86799",
   "source_worktree_dirty": false,
   "allow_dirty": false,
-  "exported_at": "2026-09-10T21:06:59.250Z",
-  "file_count": 572,
+  "exported_at": "2026-09-10T21:56:58.902Z",
+  "file_count": 574,
   "files": [
     {
       "path": ".claude/skills/cove-morning-brief/SKILL.md",
@@ -64,8 +64,8 @@
     },
     {
       "path": "DATA.md",
-      "bytes": 17516,
-      "sha256": "48b4e9cbe85711ef34760a8a0eb46d6a9efe9dd0aaf3e19baa41b8bf2adabafe"
+      "bytes": 17864,
+      "sha256": "1c3032c99635333dd11559f9e1aabf791d693175045b6601b094d646988989f5"
     },
     {
       "path": "LICENSE",
@@ -1718,14 +1718,19 @@
       "sha256": "0e92369bdbb20f1e09e0712eb544bb3a3b13535313b62b48c5964e30e301d15e"
     },
     {
+      "path": "src/lib/email/charge-notice.ts",
+      "bytes": 3035,
+      "sha256": "eeb455a662dd395c6ea4673dad87e58b556ee27623d5c84e830a8f497b9a6188"
+    },
+    {
       "path": "src/lib/email/classification-job.ts",
-      "bytes": 16458,
-      "sha256": "beabe20be46abf47555b35c96870eb1d9e5a6cdcfb66ee419c64ce1628b3cf96"
+      "bytes": 16642,
+      "sha256": "e35cbb09e8694325c0ad3b2ceda2d5745b78e205557027449f03b8506c9640fb"
     },
     {
       "path": "src/lib/email/classifier.ts",
-      "bytes": 9539,
-      "sha256": "ae3911b28b29c3a9d7a480d79f6e9b101259c108b17d8d4c6c077edf566f4c9c"
+      "bytes": 9988,
+      "sha256": "0a5c356ddff646e28dbac7a953a797407cbdaadb0c2958d42988d8220de9a63e"
     },
     {
       "path": "src/lib/email/draft-format.ts",
@@ -2426,6 +2431,11 @@
       "path": "tests/email-automation-route.test.mjs",
       "bytes": 1847,
       "sha256": "3eb2deffb4b82a540a025e427fff89968c4ffa9312debd5e94a52f279a1f6303"
+    },
+    {
+      "path": "tests/email-charge-notice.test.mjs",
+      "bytes": 5108,
+      "sha256": "63d30961365812847705792a0c24e08911beea5eae2be5de154e3b1416085174"
     },
     {
       "path": "tests/email-crm-context.test.mjs",

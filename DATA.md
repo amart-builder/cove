@@ -138,6 +138,12 @@ query filters and sorts on `actioned_at`, which is set when Gmail confirms the
 archive. Accepted and tentative calendar responses use deterministic summaries.
 Other calendar notices keep the model context after a deterministic event line.
 
+Outgoing charge notices have a review floor in `email/charge-notice.ts`.
+Recognized charges, card spending, ACH debits, payment confirmations and
+subscription renewals cannot become passive FYI or noise. They remain open
+reply/action items until reviewed. This is review-list placement, not an
+immediate native notification or urgency escalation.
+
 Resolved rows remain durable review evidence after `reviewed_at` is set. Weekly
 markdown digests under `data/voice-reviews/` are also retained until the
 operator removes them. There is no automatic deletion in this version because
