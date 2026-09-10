@@ -1,10 +1,10 @@
 {
   "version": 1,
   "product": "Cove",
-  "source_sha": "dfcb2e74759768de1f8a90406c92148553e11d99",
+  "source_sha": "ffb054ba2d06b7c3e4d4c68621ecd47befee74b0",
   "source_worktree_dirty": false,
   "allow_dirty": false,
-  "exported_at": "2026-09-10T20:30:40.075Z",
+  "exported_at": "2026-09-10T20:37:29.948Z",
   "file_count": 572,
   "files": [
     {
@@ -904,8 +904,8 @@
     },
     {
       "path": "src/app/globals.css",
-      "bytes": 116413,
-      "sha256": "4eb5d68e32575a4452d7c5f28e48c71abc437c9ca779e5dca373dd6e55d23dbf"
+      "bytes": 116581,
+      "sha256": "c7fb364a60e63957ac1dd12d09042b266e020826cc4919a64e00cdf202f2fe94"
     },
     {
       "path": "src/app/guide/content.tsx",
@@ -1149,8 +1149,8 @@
     },
     {
       "path": "src/components/tasks/TodayRiverStageV2.tsx",
-      "bytes": 53805,
-      "sha256": "c8c872d74ca0aeb1b01fe72491ffcf08aa1a452e61b7665780639f4f51899b31"
+      "bytes": 54362,
+      "sha256": "2475cfc4c8fa74285d8b1b27e2da27e46ff1c0ef8ea1bd3e409920927303e5ac"
     },
     {
       "path": "src/components/tasks/TodayView.tsx",
