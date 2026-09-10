@@ -9,6 +9,7 @@ import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import { openLocalDatabase } from "../local/database";
 import { jobFailureDetail } from "./job-failure-copy";
+import { reconcileRecoveredFailures } from "./recoveries";
 
 export type FailureInboxItem = {
   id: string;
@@ -42,11 +43,20 @@ function decodeFailure(row: FailureRow): FailureInboxItem {
   const job = row.source === "job" && details && typeof details === "object" && "type" in details && typeof details.type === "string"
     ? details as { type: string; retrying?: boolean; error?: unknown }
     : undefined;
+  const delivery = row.source === "reminder-delivery" && details && typeof details === "object"
+    ? details as { title?: string; channel?: string; error?: string } : undefined;
   return {
     id: row.id,
     source: row.source,
     sourceId: row.source_id,
-    message: job ? jobFailureDetail(job.type, typeof job.error === "string" ? job.error : row.message, job.retrying ?? row.message.includes("job will retry:")) : row.message,
+    message: job ? jobFailureDetail(job.type, typeof job.error === "string" ? job.error : row.message, job.retrying ?? row.message.includes("job will retry:"))
+      : row.source === "receipt" && /^Meeting analysis jobs failed=\d+ dead=\d+\.$/.test(row.message)
+        ? "Some meeting reviews did not finish. Cove will retry eligible reviews automatically; older stopped reviews need recovery."
+      : row.source === "meeting-analysis-degraded"
+        ? "A meeting review stopped before the deeper analysis finished. Any work already extracted is preserved."
+      : delivery
+        ? `${delivery.channel === "native" ? "Mac" : "Text"} reminder ${/\b(?:ETIMEDOUT|timeout)\b|timed? out/i.test(delivery.error ?? "") ? "delivery could not be confirmed" : "delivery failed"}${delivery.title ? ` for “${delivery.title}”` : ""}. Check the item in Cove. ${delivery.channel === "imessage" ? "The Mini connection and Messages must be available for text delivery. " : ""}Check the item before requesting another reminder.`
+      : row.message,
     details,
     occurredAt: row.occurred_at,
     dismissedAt: row.dismissed_at,
@@ -143,6 +153,7 @@ export function listFailures(
 ): FailureInboxItem[] {
   const db = openLocalDatabase(options.dbPath);
   try {
+    reconcileRecoveredFailures(db);
     const limit = Math.min(200, Math.max(1, options.limit ?? 50));
     const where = options.includeDismissed ? "" : "WHERE dismissed_at IS NULL";
     const rows = db.prepare(

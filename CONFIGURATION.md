@@ -76,6 +76,10 @@ Set `shadow` to `false` only after the 11:30 and 16:00 attention sweep has shown
 `data/agent-settings.json` is an explicit selection for shared bounded model jobs
 and the chief of staff, Buddy conversation/replan, and task sessions. Without this
 file, existing lane settings remain active.
+The saved primary is the default for new tasks. `providers` optionally maps
+`claude` and/or `codex` to their verified `{provider, model, effort}` selection.
+Older files register only their saved primary. Unconnected task choices are
+disabled and rejected by the task manager. CLI presence is not verification.
 Current supported selection fields are `version: 1`, `provider: "claude"` or
 `"codex"`, the exact `model` ID, and `effort: "low"`, `"medium"` or `"high"`.
 `backgroundLimits` can override the provisional limits: `callsPerHour: 12`,
@@ -88,6 +92,17 @@ For development acceptance, `node scripts/cove-agent-settings.mjs configure
 Use `--model` and `--effort` for an explicitly chosen supported alternative.
 Verification makes a real CLI model call. Sign into the intended subscription
 first and verify the CLI's billing mode. No service is installed or restarted.
+`connect --provider claude|codex` verifies an additional provider and preserves
+this primary. `primary --provider claude|codex` switches to an already verified
+selection without changing its exact model, effort, or background limits.
+Buddy uses `agent status` and `agent primary --provider claude|codex` through
+its existing data tool and the local CSRF-protected `/api/agent-settings` route.
+Use primary changes only on explicit user request. New tasks and subsequent
+chief/Buddy turns pick up the preference; running task sessions retain their
+original provider. Both connected providers can run separate tasks concurrently.
+Model verification records past access, not a guarantee that a subscription
+has not expired; launch failures remain visible.
+
 `node scripts/cove-agent-settings.mjs status` prints the saved selection and local
 usage. The Issues page shows rolling call usage. Model availability is verified
 only at configuration time; revoked access becomes a visible job failure.
@@ -162,3 +177,25 @@ The retired day-plan execution queue remains a Claude compatibility path.
 Saved Codex configurations reject queued legacy execution instead of invoking
 Claude. Use the current task Planning/Auto controls for either provider. Briefs,
 dumps, enabled groundwork, email and meeting jobs use the shared selected runner.
+
+## Optional Apple Reminders phone beta
+
+This personal beta is not enabled by the standard installer. Its private
+`data/apple-reminders.json` must contain `enabled`, `allowAgentJudgment`, the
+exact iCloud Cove `calendarId`, operator `timezone`, loopback `appUrl`, approved
+`conversationUrl`, absolute `stateDir` and the installed app's `helperPath`.
+Discover those values on the person's Mac. Do not reuse another person's file.
+
+Automatic judgments default to two per target day, routine daytime hours of
+8am to 9pm, and a six-hour repeat guard. Explicit reminder requests are exempt
+from the automatic budget. Existing explicit reminders cannot be changed by
+agent judgment. The model chooses whether an interruption is useful; a task's
+priority alone does not decide. `urgentAlarmSupported` remains false with the
+current public EventKit API. An `alarm_pending` result means an ordinary
+notification was scheduled and the Urgent switch still needs a manual step.
+
+The phone MCP process uses `COVE_MOBILE_APP_URL`, `COVE_MOBILE_STATE_DIR` and
+`COVE_MOBILE_DATA_DIR`. It receives only the six named Cove tools, no shell or
+browser. Real task context reaches the selected model provider only with the
+operator's consent. Runtime configuration changes require restarting that MCP
+process; preserve the existing saved conversation ID when resuming the chat.

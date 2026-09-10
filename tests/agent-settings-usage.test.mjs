@@ -281,3 +281,21 @@ test('planning and chief reviews keep their own deadlines while monitoring uses 
   const monitoring = await runJob({ lane: 'test', kind: 'structured', prompt: 'Review', schema, env, timeoutMs: 500, spawnImpl: delayedSpawn });
   assert.equal(monitoring.error.code, 'runner_timeout');
 });
+
+test('connecting both preserves primary and exact models; switching keeps limits and failed probes keep all settings', async t => {
+  const { env, dir, settings } = fixture(t, 'claude', { callsPerDay: 35 });
+  const { connectedAgents, setPrimaryAgent, agentProviderStatus } = await import('../src/lib/agent-settings.mjs');
+  assert.deepEqual(agentProviderStatus(readAgentSettings(env)).connectedProviders, ['claude']);
+  assert.throws(() => setPrimaryAgent('codex', env), /Connect and verify/);
+  const connected = await configureAgent({ provider: 'codex', model: 'gpt-6-astra', effort: 'high', makePrimary: false, env, runner: async () => ({ ok: true }) });
+  assert.equal(connected.provider, 'claude');
+  assert.deepEqual(Object.keys(connectedAgents(connected)).sort(), ['claude', 'codex']);
+  const switched = setPrimaryAgent('codex', env);
+  assert.equal(switched.model, 'gpt-6-astra'); assert.equal(switched.effort, 'high');
+  assert.deepEqual(switched.backgroundLimits, settings.backgroundLimits);
+  assert.equal(setPrimaryAgent('claude', env).model, settings.model);
+  const before = readFileSync(path.join(dir, 'agent-settings.json'), 'utf8');
+  await assert.rejects(configureAgent({ provider: 'codex', model: 'gpt-unavailable', makePrimary: false, env, runner: async () => ({ ok: false, error: { message: 'denied' } }) }), /Settings were not changed/);
+  assert.equal(readFileSync(path.join(dir, 'agent-settings.json'), 'utf8'), before);
+  assert.throws(() => validateAgentSettings({ ...switched, providers: { claude: switched.providers.claude } }), /must match a connected/);
+});
