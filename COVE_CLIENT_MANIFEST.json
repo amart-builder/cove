@@ -1,10 +1,10 @@
 {
   "version": 1,
   "product": "Cove",
-  "source_sha": "ffb054ba2d06b7c3e4d4c68621ecd47befee74b0",
+  "source_sha": "30710bf5c7a377ab12e1305270986ebf14d3fa34",
   "source_worktree_dirty": false,
   "allow_dirty": false,
-  "exported_at": "2026-09-10T20:37:29.948Z",
+  "exported_at": "2026-09-10T21:06:59.250Z",
   "file_count": 572,
   "files": [
     {
@@ -1049,8 +1049,8 @@
     },
     {
       "path": "src/components/reliability/ResponsibilityOverview.tsx",
-      "bytes": 11195,
-      "sha256": "bdad881fe56da51f7693a59f91d96d7300357be9a041bd898a6d245052e4cf5d"
+      "bytes": 11218,
+      "sha256": "ffe095125ebb0db1c87621f3f7b910811d06af7f348211c1a8e2f9b6351d3a33"
     },
     {
       "path": "src/components/tasks/ClaudeDeskStrip.tsx",
@@ -1079,8 +1079,8 @@
     },
     {
       "path": "src/components/tasks/DayRitualLayer.tsx",
-      "bytes": 7620,
-      "sha256": "833b693adde6ac183bbfb3d891f877ac1a8f2d728027a76b8206daa743ff28f5"
+      "bytes": 7811,
+      "sha256": "851ab634fa3d94e29b5243dd4e2c7c16dc9098273318437cd99e077259f833eb"
     },
     {
       "path": "src/components/tasks/DaySettlement.tsx",
@@ -1109,8 +1109,8 @@
     },
     {
       "path": "src/components/tasks/NotificationTaskSheet.tsx",
-      "bytes": 4954,
-      "sha256": "66866ec1d67bb34b4f5f6d5d3d58047e3509b2f4e757adc03235771e624da62e"
+      "bytes": 5711,
+      "sha256": "24a0030d59e49424fa49892748e459361e7aba1a4e2a11c76f4bedff5fb70e8b"
     },
     {
       "path": "src/components/tasks/RecentlyDeleted.tsx",
@@ -1129,8 +1129,8 @@
     },
     {
       "path": "src/components/tasks/TaskDetail.tsx",
-      "bytes": 15963,
-      "sha256": "ca457767ef8003172f3868666aa531c61ffc09074368dd8c54ce43cf5f658b06"
+      "bytes": 15269,
+      "sha256": "3e96a366be924c8d3491c0b92c5675152bd4bc6c8663eecf595c76a97177803f"
     },
     {
       "path": "src/components/tasks/TaskFieldsEditor.tsx",
@@ -1154,8 +1154,8 @@
     },
     {
       "path": "src/components/tasks/TodayView.tsx",
-      "bytes": 136760,
-      "sha256": "268f2ec95849674de2535226e4836347fe26eaacd9d9b566af4caae0da3e3254"
+      "bytes": 136849,
+      "sha256": "55c9050e3ea265a36e71eb7bb6233a967ca05578fc6c2be21710f8f8e765dad1"
     },
     {
       "path": "src/components/tasks/arrival/ArrivalPlanGrid.tsx",
@@ -1174,8 +1174,8 @@
     },
     {
       "path": "src/components/tasks/arrival/ModalScrim.tsx",
-      "bytes": 3059,
-      "sha256": "1916c7250dd5fd3ee45619487e753a78e7144a7c97e20bdb6b246d2c2ca4d068"
+      "bytes": 3083,
+      "sha256": "d49bf483de1d52c50c311cd481377ae448ac01a04ee9a393f8d0db2c7e14ae18"
     },
     {
       "path": "src/components/tasks/arrival/StepDots.tsx",
@@ -1234,8 +1234,8 @@
     },
     {
       "path": "src/lib/apple-reminders/bridge.mjs",
-      "bytes": 29027,
-      "sha256": "059d2ca4be8f8d5f7eae9d4f37636159226daf8bcbe9d325b3f1d1cd8f60d046"
+      "bytes": 29330,
+      "sha256": "eae806ecaa90a2992d0b3178a55eebe55db02fde74d482dfe12d726ec333bb36"
     },
     {
       "path": "src/lib/apple-reminders/queue.mjs",
@@ -1889,8 +1889,8 @@
     },
     {
       "path": "src/lib/notifications/reminders.mjs",
-      "bytes": 3127,
-      "sha256": "247b98c06a4f4c3ef75a849758d868d715679eae9ecd6b38cd6ea519c89fc596"
+      "bytes": 3772,
+      "sha256": "9b8eef3f98cd15de6b19acf1fda57099164d65eb54a14008e76f455d9054d468"
     },
     {
       "path": "src/lib/operator-policy.ts",
@@ -2144,8 +2144,8 @@
     },
     {
       "path": "tests/apple-reminders.test.mjs",
-      "bytes": 20296,
-      "sha256": "aca4579f660a23427163bfdd3acfa0cc17a6e5e0dc767ffe416c2288123bd720"
+      "bytes": 21868,
+      "sha256": "17bc5575e325f4a09292f6495120d83041b7f06af5be70a6ca7619ce90c46718"
     },
     {
       "path": "tests/arrival-card-editing.test.mjs",
@@ -2674,8 +2674,8 @@
     },
     {
       "path": "tests/notification-context.test.mjs",
-      "bytes": 6916,
-      "sha256": "c52c50386cb62ff3bfff3d77f37d2da383299f359fd14d6891b4a9614e4877f9"
+      "bytes": 8782,
+      "sha256": "f23f38ca176faa40383e690c2269994c73c9a8af18c730057258e4c4b4f2ebb6"
     },
     {
       "path": "tests/notification-route.test.mjs",
