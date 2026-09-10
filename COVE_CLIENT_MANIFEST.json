@@ -1,11 +1,11 @@
 {
   "version": 1,
   "product": "Cove",
-  "source_sha": "71033079c8e7b42a45f0dc23cdfd80657014e39a",
+  "source_sha": "f1b84f74f8dffd8b2a2fccab9a06a085d50800dc",
   "source_worktree_dirty": false,
   "allow_dirty": false,
-  "exported_at": "2026-09-10T19:41:12.191Z",
-  "file_count": 560,
+  "exported_at": "2026-09-10T20:06:55.307Z",
+  "file_count": 563,
   "files": [
     {
       "path": ".claude/skills/cove-morning-brief/SKILL.md",
@@ -54,8 +54,8 @@
     },
     {
       "path": "CODEBASE_GUIDE.md",
-      "bytes": 37210,
-      "sha256": "b63f38d420dcd474346556623cd00d143534d18e7f0fcb64f044b6dc04aacb7b"
+      "bytes": 37976,
+      "sha256": "162c2790eb69eddff3fe03636d99eeb2b17cefad81b1dbd430c20a3360611819"
     },
     {
       "path": "CONFIGURATION.md",
@@ -99,8 +99,8 @@
     },
     {
       "path": "buddy/CLAUDE.md.template",
-      "bytes": 9716,
-      "sha256": "7fd0fab78c47201fe0661992280be45851764e17cb93d0acde0704dc9b4ecbb4"
+      "bytes": 14960,
+      "sha256": "4f31a8c1d0f4e4240cc382b3caeeb1b14618cd0fa4b8464a966a6fc49f566c23"
     },
     {
       "path": "convex/_generated/api.d.ts",
@@ -264,8 +264,8 @@
     },
     {
       "path": "prompts/operator-policy.template.md",
-      "bytes": 114,
-      "sha256": "a85e632b4a0637dfb3ac2b136e4a94d08ff2d715b7f1f9776e6f5724da7af4af"
+      "bytes": 1036,
+      "sha256": "43477f278a3fea427a29b0b756bf43582294af8d540b80b058c89faea613634f"
     },
     {
       "path": "prompts/phone-reminder-contract.md",
@@ -274,8 +274,8 @@
     },
     {
       "path": "prompts/responsibility-contract.md",
-      "bytes": 2985,
-      "sha256": "c4b2f83a8f4658dc761eff5aa7e76e77a672e5e75591f5adc1b43139858932d6"
+      "bytes": 4084,
+      "sha256": "5cc888621e39c07535b5f8665f87dea0223f1ea3e6c85d0265c057b069b67da6"
     },
     {
       "path": "prompts/triage.md",
@@ -349,8 +349,8 @@
     },
     {
       "path": "scripts/cove-buddy-data.ts",
-      "bytes": 22416,
-      "sha256": "45f4cbda0ddda04014b1577604706c579d0c83b9071dda4cab59c4dc8d82c9b3"
+      "bytes": 24358,
+      "sha256": "1519137dadd921847631b9e2f3ac52d54505231c9e5e400b454223f90a8c4662"
     },
     {
       "path": "scripts/cove-buddy-mcp.ts",
@@ -644,8 +644,8 @@
     },
     {
       "path": "skills/cove-task/SKILL.md",
-      "bytes": 4753,
-      "sha256": "9c97873f2e0a942d5cee1822f1de41545d90ac720fead746bfd6cef7610012b0"
+      "bytes": 6314,
+      "sha256": "3cd94f40e68a0a1f437568b6a8dc8e02e7f8450d2839ec6590eb6c9aa0335549"
     },
     {
       "path": "skills/cove-voice-note/SKILL.md",
@@ -899,8 +899,8 @@
     },
     {
       "path": "src/app/globals.css",
-      "bytes": 113025,
-      "sha256": "ff1272e156c68b52f1ce1faf75ddbddb050356b77f7fa36a9bce057ca60e707a"
+      "bytes": 114250,
+      "sha256": "aef9474b7966f2640307b7d72fea20c68b0ff436e52ecc926f8bdc2aadbee0fa"
     },
     {
       "path": "src/app/guide/content.tsx",
@@ -1324,13 +1324,18 @@
     },
     {
       "path": "src/lib/buddy/codex.ts",
-      "bytes": 4622,
-      "sha256": "64abf0f691bbae1f3d1ad394ccb7b5cdcb330ee1dc6fb4515444affe9f96171a"
+      "bytes": 4503,
+      "sha256": "8374b1f69b252cc52463004b04dc567975a1843ea4e3515c77bc999a9a0a41dc"
     },
     {
       "path": "src/lib/buddy/commands.ts",
-      "bytes": 9483,
-      "sha256": "40b7dd4755fb4835d8a741a70fbcc050fe2c2a7dfc7f5e1366e3564571c5d622"
+      "bytes": 9585,
+      "sha256": "5096099ee3bfe2ce0cf77e9018ebc90e5812fec7cc58390b7b64d8490697626f"
+    },
+    {
+      "path": "src/lib/buddy/environment.ts",
+      "bytes": 1335,
+      "sha256": "d8f5d28df98e69275207db2e3fe4cadb5ebda27c21a21b43061d1e92c3d44f6e"
     },
     {
       "path": "src/lib/buddy/errors.ts",
@@ -1343,9 +1348,14 @@
       "sha256": "e4361be536a807ead9de1affa80aa6d09e4a82e8398748d528abfa4e8c2cd652"
     },
     {
+      "path": "src/lib/buddy/knowledge.ts",
+      "bytes": 12613,
+      "sha256": "a0d7df77e2b5a64fda3b78d9ab4277932e79cc991b4ba34cc00e2df4cb127ad0"
+    },
+    {
       "path": "src/lib/buddy/mcp.ts",
-      "bytes": 3743,
-      "sha256": "ddd6e602732886dde50fa55671425aa3005f6aff07e7af375e1e48dbd3b50c47"
+      "bytes": 4409,
+      "sha256": "baadf1c0b8a29e2ec5585f38af7e7e21a50d8926dac671eb95768064febb0cd9"
     },
     {
       "path": "src/lib/buddy/receipts.ts",
@@ -1819,8 +1829,8 @@
     },
     {
       "path": "src/lib/local/database.ts",
-      "bytes": 2269,
-      "sha256": "2b7d9caa62f863c5dd2426cd3e4821fa6e93cbd48570d67b1e4d488f82727688"
+      "bytes": 2280,
+      "sha256": "6f29a4631a631b36ee39cf46b61ffe85a398d9b733c369d69cf3b6ec3d89e7fd"
     },
     {
       "path": "src/lib/local/db.ts",
@@ -2176,6 +2186,11 @@
       "path": "tests/buddy-feedback.test.mjs",
       "bytes": 4696,
       "sha256": "f053e57b31278907da5dd6d50fb6efd96c18721bcdc96bdeaafbe351bcd5a6ca"
+    },
+    {
+      "path": "tests/buddy-knowledge.test.mjs",
+      "bytes": 10695,
+      "sha256": "8d874ff03addb6fba77477a58e45b439a97314c4134bc79ab5d1e00c7ccb66ff"
     },
     {
       "path": "tests/buddy-receipts.test.mjs",
