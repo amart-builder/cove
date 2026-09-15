@@ -1,11 +1,11 @@
 {
   "version": 1,
   "product": "Cove",
-  "source_sha": "e95e1c5e4a7e3528f148b28da192ceca1d0879db",
+  "source_sha": "a152b69022ee1f6606ba766509312951a10ed10a",
   "source_worktree_dirty": false,
   "allow_dirty": false,
-  "exported_at": "2026-09-15T20:14:33.490Z",
-  "file_count": 612,
+  "exported_at": "2026-09-15T21:06:13.173Z",
+  "file_count": 621,
   "files": [
     {
       "path": ".claude/skills/cove-morning-brief/SKILL.md",
@@ -54,8 +54,8 @@
     },
     {
       "path": "CODEBASE_GUIDE.md",
-      "bytes": 42369,
-      "sha256": "3d6172af055acbaeac97ec3b7fa5d2246c888cdaa077998791a80594d96969e7"
+      "bytes": 42646,
+      "sha256": "022dc117fca3224e48d6c6e494b5b9a9d0d412cabd6c6a0e07e2d0f1cd21442a"
     },
     {
       "path": "CONFIGURATION.md",
@@ -66,6 +66,11 @@
       "path": "DATA.md",
       "bytes": 19071,
       "sha256": "986d2565f7569c034ba3852aaa6528fc5d6927ff0cc5f4efd79b788709b5deb1"
+    },
+    {
+      "path": "EVALUATION.md",
+      "bytes": 6426,
+      "sha256": "f2794268af356b6abd69f1ebc4665c54eee40bcd63e1f96ca31e6a9db4be2f69"
     },
     {
       "path": "LICENSE",
@@ -79,8 +84,8 @@
     },
     {
       "path": "README.md",
-      "bytes": 11124,
-      "sha256": "2ca12e9cc73f5f7fa20dd7d0dfe20519d37c71ca19cd2ea7098e93961e6fdd39"
+      "bytes": 11541,
+      "sha256": "c3a569bc4539622d7f8d4a5460fdce5356f08363fc7f650f787e01b16c76e828"
     },
     {
       "path": "SECURITY_AND_INTEGRATIONS.md",
@@ -226,6 +231,16 @@
       "path": "fixtures/email-triage.sample.json",
       "bytes": 5187,
       "sha256": "452f356e998397502c71b02a99e6932c956b4013554bbaf6392d16c198ce27e7"
+    },
+    {
+      "path": "fixtures/working-week/holdouts.json",
+      "bytes": 3563,
+      "sha256": "f925d553a18f71806d5e1c3804ca4b457b716517342feab44f3d0b7c72f85b2a"
+    },
+    {
+      "path": "fixtures/working-week/scenarios.json",
+      "bytes": 7777,
+      "sha256": "beb6317370ddcf82d4185025e253bdfb2f7fb83d2f7c6023f14a4913ea2043f2"
     },
     {
       "path": "next.config.ts",
@@ -503,9 +518,24 @@
       "sha256": "5b6787a254afbec02bd4b480342c6cecdd95efc7afb986d31bad88ac27423b96"
     },
     {
+      "path": "scripts/evaluation/working-week-models.mjs",
+      "bytes": 12107,
+      "sha256": "16ac962b30354af9e8155ba5ff27e91d42c8c9d466a7e61600cd75b2d62f21db"
+    },
+    {
+      "path": "scripts/evaluation/working-week-roundtrip.mjs",
+      "bytes": 6766,
+      "sha256": "723ca975bf6d18a992173f4ab49109ae564512d3e11670e4218e90aad7ffba23"
+    },
+    {
+      "path": "scripts/evaluation/working-week-state.mjs",
+      "bytes": 25000,
+      "sha256": "e537af35ba087bf9ac27cf381e1b418c9a74e3da3d3fae1230eea142c6d8b270"
+    },
+    {
       "path": "scripts/export-cove-client.mjs",
-      "bytes": 7935,
-      "sha256": "626dab116d3e3bc0b81f3a9cfd37393ca88b6c2b6df70ce316c73f65ddc24679"
+      "bytes": 7954,
+      "sha256": "fb8d68611903cac81bcb9ad9f3f4e34eb384c616f776962cb09cacc0c13fde18"
     },
     {
       "path": "scripts/hooks/cove-orchestrator.sh",
@@ -1119,8 +1149,8 @@
     },
     {
       "path": "src/components/tasks/MorningArrival.tsx",
-      "bytes": 12635,
-      "sha256": "647d6a755641552b58b8988459febd136fac5a166a8c454f75d721cd0dcfe56c"
+      "bytes": 12569,
+      "sha256": "66d0ea55b465cb55c847442473684272f41dc6b51cfdce7c78370d7b06715e1b"
     },
     {
       "path": "src/components/tasks/NotificationTaskSheet.tsx",
@@ -1174,8 +1204,8 @@
     },
     {
       "path": "src/components/tasks/TodayView.tsx",
-      "bytes": 136519,
-      "sha256": "0d4558e6833e9ab6852242fc03753770ec286b58e63530b8e9e11f15ec1ca374"
+      "bytes": 135568,
+      "sha256": "f5a73afb6a847eb3e6acd96b2404726570c5be9ba0a136574b20c1ca59bba9db"
     },
     {
       "path": "src/components/tasks/arrival/ArrivalPlanGrid.tsx",
@@ -1459,13 +1489,13 @@
     },
     {
       "path": "src/lib/chief-of-staff/daily-planning.ts",
-      "bytes": 19434,
-      "sha256": "9b979b3fc854f828c9ce84396af015e3972dc77c9a2b0bcaeeca3ec86ba1c7f5"
+      "bytes": 23047,
+      "sha256": "baae31f641ed3612c567ed8789c3b94594da28f458fa5689cdedd09fe971c262"
     },
     {
       "path": "src/lib/chief-of-staff/driver.ts",
-      "bytes": 43393,
-      "sha256": "e4a0651bdf477655b366d93da0990106bc707e378c23b99a86499f249148d976"
+      "bytes": 43544,
+      "sha256": "9bc76a59f74439f6f68e569dcfbaf3c6d750e9a119f2348803f8d05b9064440a"
     },
     {
       "path": "src/lib/chief-of-staff/hooks.ts",
@@ -1474,8 +1504,8 @@
     },
     {
       "path": "src/lib/chief-of-staff/planning-contract.ts",
-      "bytes": 3632,
-      "sha256": "8af363bd0df42f54ebbe9ca77d64aa5e5421ce1ed155ce0b9c2d3809218221f2"
+      "bytes": 5362,
+      "sha256": "eae6eb1a2f4ceb1d1790457950ac470e1d1c5fd4e4ccc946fa464798e6005a60"
     },
     {
       "path": "src/lib/chief-of-staff/questions.ts",
@@ -1554,8 +1584,8 @@
     },
     {
       "path": "src/lib/claude-execution/worker.ts",
-      "bytes": 60487,
-      "sha256": "ab534ad36bfe52955ab30479fab3896ef1d5226e2e32792523c12d76af0189b4"
+      "bytes": 60618,
+      "sha256": "bb8f6e23d4d1efaa3464247c185a031bee59583467a94a6748094f18b0275e0f"
     },
     {
       "path": "src/lib/crm/contact-context.ts",
@@ -1699,8 +1729,8 @@
     },
     {
       "path": "src/lib/day-plan/brief-triggers.ts",
-      "bytes": 7188,
-      "sha256": "e5e5eda0a05aa8ce9e3ba8104cc0e25e5d21ed2e636dc3d5120a0dc3bf252270"
+      "bytes": 7273,
+      "sha256": "c0acdb09be8882c4608a0c72d0d7f0faa7aab1b62ffc7898f7f7dbec329ece9b"
     },
     {
       "path": "src/lib/day-plan/brief-view.ts",
@@ -1709,8 +1739,8 @@
     },
     {
       "path": "src/lib/day-plan/brief.ts",
-      "bytes": 57294,
-      "sha256": "ba893e484c0f09d519d733a66774d0caa97879658345946692959190b3df0771"
+      "bytes": 57554,
+      "sha256": "0ce6b7fc23147cb0bcac910afa4d5b027e3c6ae1cefa69692d52af061410edc7"
     },
     {
       "path": "src/lib/day-plan/candidates.ts",
@@ -1754,8 +1784,8 @@
     },
     {
       "path": "src/lib/day-plan/store.ts",
-      "bytes": 217285,
-      "sha256": "0a569d5d2301fee3fdd2f756fd39740fa0afb27d7138829a1d4389d59a522b62"
+      "bytes": 218111,
+      "sha256": "602157d32d4fa7151565e2a2de50313654bfc9ca31d3343adfaf81fc14af729f"
     },
     {
       "path": "src/lib/day-plan/types.ts",
@@ -2369,8 +2399,8 @@
     },
     {
       "path": "tests/chief-of-staff.test.mjs",
-      "bytes": 59089,
-      "sha256": "bc099b1b1dc8e65d9b3ab6ffbad48cf6036cfa547045c9c085ee4d86d57685d9"
+      "bytes": 60602,
+      "sha256": "d590234863f5f662f383173220d8c8ca0bb3f9add4309205f114554ab8936523"
     },
     {
       "path": "tests/chief-replan-config.regression-1.test.mjs",
@@ -2454,8 +2484,8 @@
     },
     {
       "path": "tests/daily-planning.test.mjs",
-      "bytes": 30157,
-      "sha256": "754bbe300f67cf58fa45aed493ced016a6e7e7aa51985e3a2b8a68397f5b0617"
+      "bytes": 35100,
+      "sha256": "1840e071c514d6c30ba70cdbc966a47b7a8016a34f49b92c97aa9b94caaf342f"
     },
     {
       "path": "tests/day-arc.test.mjs",
@@ -2469,8 +2499,8 @@
     },
     {
       "path": "tests/day-plan-brief-gate.test.mjs",
-      "bytes": 18484,
-      "sha256": "12561473d425670ec90ba926f12aadb8be6c2a7673fe8466b0acfe8b76fb5af6"
+      "bytes": 19010,
+      "sha256": "1aa12592159b68988914eec64d2304b87cfa40923ba191b113659fc829e309ba"
     },
     {
       "path": "tests/day-plan-brief-relay.test.mjs",
@@ -2484,8 +2514,8 @@
     },
     {
       "path": "tests/day-plan-brief.test.mjs",
-      "bytes": 127302,
-      "sha256": "c3b4bc2046d50e3b040b01563d3d932b1e94250fb2c967863978b7d50e853245"
+      "bytes": 128426,
+      "sha256": "66dda84110ddc9afc54e5dbbce8c1ebb1b5b3fe6e51025cc0594b0128c93c5bc"
     },
     {
       "path": "tests/day-plan-candidates.test.mjs",
@@ -2499,8 +2529,8 @@
     },
     {
       "path": "tests/day-plan-navigation.test.mjs",
-      "bytes": 1314,
-      "sha256": "655b0f07465697301e4d64ef463341ed85224097143e00aaf83dc8f2d4875273"
+      "bytes": 1695,
+      "sha256": "0e50292f7d1c43e93a207fbf9f7b108beed31afb458a6bf0765fb5be07ef2a31"
     },
     {
       "path": "tests/day-plan-next-routes.test.mjs",
@@ -2520,7 +2550,7 @@
     {
       "path": "tests/day-plan-store.test.mjs",
       "bytes": 95583,
-      "sha256": "fb0997b02371c169cdc6135727b2075c5b55bdf9e2a177b8456797bbfcd48a3c"
+      "sha256": "09b63fe58565ccae15651e1b83698ca95cbfbb0f4bab6833f550c9c69524cf6a"
     },
     {
       "path": "tests/day-settlement-complete-controls.test.mjs",
@@ -2863,9 +2893,19 @@
       "sha256": "903c6ead5314f07fb935f262ec51b5f12686cc88b382b305543315872c87d970"
     },
     {
+      "path": "tests/planning-local-dates.test.mjs",
+      "bytes": 4865,
+      "sha256": "60fb31ca423f506e7455dbf40a759b961d7d290d9e800f92820f7e21f31458a1"
+    },
+    {
       "path": "tests/planning-review-ui.test.mjs",
       "bytes": 4614,
       "sha256": "2fdac5cb91b47b9907aecc076caa93033037b3e3bd863fa84ef018f86a280bc3"
+    },
+    {
+      "path": "tests/planning-timestamp-contract.test.mjs",
+      "bytes": 1514,
+      "sha256": "ea2c40f18c20e7a882912053f0a79a36dcfef776865b43c67267d206e407546a"
     },
     {
       "path": "tests/progress-reconcile.test.mjs",
@@ -3056,6 +3096,11 @@
       "path": "tests/voice-samples-paths.regression-1.test.mjs",
       "bytes": 3125,
       "sha256": "a03333ccfbbd8383659698904fe21b6ef68908e749c195d74552bc55d055cbfe"
+    },
+    {
+      "path": "tests/working-week-evaluation.test.mjs",
+      "bytes": 5250,
+      "sha256": "73b77df4cc01b3a1b9de43b34f770bf16a525d8b5876908dadf49c622b83fb58"
     },
     {
       "path": "tests/workspace-google-gateway.test.mjs",
