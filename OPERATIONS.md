@@ -2,7 +2,7 @@
 
 ## Install and start
 
-Follow `SETUP.md`. The installer renders absolute Node paths into LaunchAgents, creates a private empty `.env.local` when needed, starts the localhost app and background lanes, and reports a slow worker heartbeat as a warning with a retry command.
+Follow `SETUP.md`. The installer renders absolute Node paths into LaunchAgents, creates a private empty `.env.local` when needed, and starts the localhost app and background lanes. A missing fresh worker heartbeat fails installation with diagnostics and a retry command. A responding website alone does not prove the worker is healthy.
 
 The supported app URL is `http://127.0.0.1:3200` (or `http://localhost:3200`). Logs live in `~/Library/Logs/` with `cove` in the filename.
 
@@ -11,6 +11,16 @@ The supported app URL is `http://127.0.0.1:3200` (or `http://localhost:3200`). L
 The Current displays live readiness for email, the brief writer, and the background worker. Empty and unavailable are different states. `/api/health` exposes the same read model to trusted local requests, plus the latest periodic health snapshot.
 
 Failures that need attention are recorded in Cove's Issues surface. A partial receipt means useful work completed but the named remainder needs a later run or operator action.
+
+## Morning Brief schedule
+
+The existing Claude worker starts the Morning Brief at 08:00 on weekdays in
+Cove's brief timezone once the previous workday is closed. Closing an overdue
+day after 08:00 starts today's brief automatically after reconciliation.
+Evening closeout and closeout before 08:00 wait for the scheduled morning.
+An asleep Mac catches up when it wakes; the browser does not need to be open.
+A failed attempt stays in Issues and Morning Arrival for manual retry instead
+of repeatedly spending model capacity. Explicit Brief me anyway remains available.
 
 ## Recovery
 
