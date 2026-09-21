@@ -389,7 +389,7 @@ test('buddy data CLI emits one machine-readable receipt after a mocked mutation'
       : new Response(JSON.stringify([{ id: 't1', title: 'Gym' }]), { status: 200 });
   };
   const code = await runBuddyDataCommand(
-    parseBuddyDataArgs(['update', 'tasks', '--id', 't1', '--json', '{"position":5}']),
+    parseBuddyDataArgs(['update', 'tasks', '--id', 't1', '--json', '{"position":5,"_expected":{"updatedAt":"2026-09-15T16:00:00Z"}}']),
     { fetch: fetchMock, appUrl: 'http://127.0.0.1:3200', write: (line) => lines.push(line) },
   );
   assert.equal(code, 0);
@@ -453,7 +453,7 @@ test('confirmed delete keeps its receipt when post-delete verification throws', 
 test('buddy data CLI does not claim a zero-row update succeeded', async () => {
   let call = 0;
   await assert.rejects(runBuddyDataCommand(
-    parseBuddyDataArgs(['update', 'tasks', '--id', 'missing', '--json', '{"title":"Nope"}']),
+    parseBuddyDataArgs(['update', 'tasks', '--id', 'missing', '--json', '{"title":"Nope","_expected":{"updatedAt":"2026-09-15T16:00:00Z","title":"Old"}}']),
     { fetch: async () => ++call === 1
       ? new Response('{"csrfToken":"token"}', { status: 200 })
       : new Response('[]', { status: 200 }) },
@@ -488,4 +488,17 @@ test('buddy contact insert explains ambiguous candidates from a 409', async () =
     ),
     /Possible matches: John Smith <one@example\.com> \(john-1\), John Smith <two@example\.com> \(john-2\)/,
   );
+});
+
+test('Buddy can read providers and change primary through the CSRF-protected local API', async () => {
+  assert.throws(() => parseBuddyDataArgs(['agent','primary','--provider','other']), /Use agent/);
+  const calls = []; const lines = [];
+  await runBuddyDataCommand(parseBuddyDataArgs(['agent','primary','--provider','codex']), {
+    appUrl: 'http://127.0.0.1:3200', write: line => lines.push(line),
+    fetch: async (url, init) => { calls.push({url,init}); return Response.json(url.endsWith('/api/day-plan') ? {csrfToken:'test-csrf'} : {defaultProvider:'codex',connectedProviders:['claude','codex']}); },
+  });
+  assert.equal(calls[1].url, 'http://127.0.0.1:3200/api/agent-settings');
+  assert.equal(calls[1].init.headers['X-Cove-CSRF'], 'test-csrf');
+  assert.deepEqual(JSON.parse(calls[1].init.body), {provider:'codex'});
+  assert.equal(JSON.parse(lines[0]).defaultProvider, 'codex');
 });

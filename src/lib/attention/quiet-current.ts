@@ -1,11 +1,10 @@
 import type { AttentionLedgerRow } from "./ledger.mjs";
 import { createWorkSuggestion } from "../quiet-current/store";
+import { operatorTimezone } from "../operator";
+import { localDateKey as dateInTimezone } from "../local-time.mjs";
 
 function localDateKey(now: Date): string {
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+  return dateInTimezone(now, operatorTimezone());
 }
 
 export function surfaceAttentionSuggestion(input: {
@@ -48,13 +47,18 @@ export function surfaceAttentionSuppression(input: {
   ) {
     return;
   }
-  // One id per local day keeps concurrent cap hits to one Quiet Current line.
+  const reservedForMeetings = input.row.suppressedReason === "reserved_upcoming_meetings";
+  // One id per local day keeps concurrent policy holds to one Quiet Current line.
   createWorkSuggestion({
     id: `attention-suppressed-${localDateKey(now)}`,
     kind: "attention_nudge",
-    title: "Nudges were suppressed",
-    description: "Cove reached an interruption limit. The underlying work is still on the board.",
-    reason: "The daily attention budget protected your focus.",
+    title: reservedForMeetings ? "Upcoming meetings have priority" : "Nudges were suppressed",
+    description: reservedForMeetings
+      ? "Other reminders are available here."
+      : "Cove reached an interruption limit. The underlying work is still on the board.",
+    reason: reservedForMeetings
+      ? "Cove is keeping room for your meeting reminders."
+      : "The daily attention budget protected your focus.",
     source: "Cove attention ledger",
     priority: "medium",
     expiresAt: new Date(now.getTime() + 2 * 24 * 60 * 60 * 1_000).toISOString(),

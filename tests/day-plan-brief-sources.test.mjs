@@ -1572,13 +1572,13 @@ test('recent brief receipts distinguish decisions and settlements', () => {
         date: '2026-07-28',
         headline: 'Finish the install preparation.',
         candidates: [
-          'task-gary',
+          'task-harbor',
           'task-zac',
           'task-done',
           'task-preselected',
           'task-later',
           'task-missing',
-          'task-gary',
+          'task-harbor',
         ],
         finishedAt: '2026-07-28T14:00:00.000Z',
       }),
@@ -1634,7 +1634,7 @@ test('recent brief receipts distinguish decisions and settlements', () => {
       id: 'plan-tue',
       briefId: 'brief-tue',
       items: [
-        { taskId: 'task-gary', title: 'Harbor install prep', decision: 'accepted' },
+        { taskId: 'task-harbor', title: 'Harbor install prep', decision: 'accepted' },
         { taskId: 'task-zac', title: 'Zac call plan', decision: 'dismissed' },
         { taskId: 'task-done', title: 'Send final scope', decision: 'completed' },
         { taskId: 'task-preselected', title: 'Unopened arrival item', decision: 'preselected' },
@@ -1667,7 +1667,7 @@ test('recent brief receipts distinguish decisions and settlements', () => {
             body: {
               completedHumanTaskIds: ['task-done'],
               unresolvedItems: [
-                { taskId: 'task-gary', disposition: 'carry' },
+                { taskId: 'task-harbor', disposition: 'carry' },
               ],
             },
           }
@@ -2109,4 +2109,27 @@ test('a tight budget drops the lowest-ranked sources and keeps the highest intac
     assembled.sections.find((section) => section.id === 'goals').text,
     'A'.repeat(300),
   );
+});
+
+test('calendar evidence distinguishes complete empty, failed and oversized compact schedules', async (t) => {
+  const { dir, options } = fixture(t);
+  disableExternalSources(t, dir);
+  const collect = (listEvents) => collectMorningBriefSources({ ...options, fetchImpl: async (url) => coveRowsResponse(url) ?? new Response('{}'), workspaceGateway: { calendar: { listEvents } } });
+  const empty = await collect(async () => []);
+  assert.equal(empty.calendarObservation.complete, true);
+  assert.equal(empty.calendarObservation.calendarId, 'primary');
+  assert.equal(empty.calendarObservation.timeMin, '2026-07-16T00:00:00-07:00');
+  const failed = await collect(async () => { throw Error('Calendar unavailable'); });
+  assert.equal(failed.calendarObservation, undefined);
+  const many = Array.from({ length: 70 }, (_, index) => ({ id: `event-${index}`, summary: `Meeting ${index} ${'long title '.repeat(20)}`, status: 'confirmed', start: '2026-07-16T16:00:00Z', end: '2026-07-16T17:00:00Z', attendees: [], meetingUrl: '' }));
+  const large = await collect(async () => [...many, { ...many[0], id: 'cancelled', summary: 'Cancelled meeting', status: 'cancelled' }]);
+  const source = large.sources.find(s => s.id === 'calendar');
+  assert.ok(source.content.length > 5000);
+  const assembled = assembleMorningBriefContext([source]);
+  assert.equal(assembled.manifest.sources[0].trimmed, false);
+  assert.match(assembled.sections[0].text, /Meeting 69/);
+  assert.doesNotMatch(source.content, /Cancelled meeting/);
+  assert.equal(large.calendarObservation.complete, true);
+  const malformed = await collect(async () => [{ ...many[0], start: 'not-a-date' }]);
+  assert.equal(malformed.calendarObservation.complete, false);
 });

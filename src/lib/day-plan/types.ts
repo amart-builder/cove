@@ -62,6 +62,12 @@ export type RecommendationSourceRef = {
   supports: RecommendationSupport[];
 };
 
+export type PlanningSupportRef = {
+  kind: "task" | "commitment" | "calendar" | "suggestion";
+  id: string;
+  version: string;
+};
+
 export type RecommendationCandidate = {
   candidateId: string;
   taskId: string;
@@ -71,7 +77,20 @@ export type RecommendationCandidate = {
   definitionOfDone?: string;
   project?: string;
   owner: DayPlanOwner;
-  commitment: "ink";
+  commitment: "ink" | "pencil";
+  planningRef?: {
+    kind: "task" | "commitment" | "suggestion";
+    id: string;
+    revision: number;
+  };
+  planningState?: "ready" | "waiting" | "blocked" | "deferred" | "resolved";
+  // Schedule evidence this recommendation depended on without owning: the
+  // meeting a reused preparation was timed against. It is not a second work
+  // record and never becomes the item's identity. A change here invalidates the
+  // timing rationale for a fresh recommendation; it cannot resolve the work.
+  planningSupport?: PlanningSupportRef[];
+  planningAssumptions?: string[];
+  planningStale?: boolean;
   whyToday: string;
   priority: "low" | "medium" | "high";
   dueAt?: string;
@@ -97,6 +116,7 @@ export type DayPlanItem = RecommendationCandidate & {
   decision: DayPlanItemDecision;
   brief?: DayPlanItemBriefAnnotation;
   preCompletionPlanPosition?: number;
+  completionSourceVersion?: string;
   preCompletionBoardPlacement?: {
     columnId: string;
     position: number;
@@ -216,6 +236,7 @@ export type DayPlanEvent = {
 export type DayPlanEventType =
   | "ensure"
   | "brief_attach"
+  | "source_reconcile"
   | "arrival_interact"
   | "assistant_patch"
   | "item_kickoff"
@@ -236,6 +257,7 @@ export type DayPlanMutationAction =
   | "item_reopen"
   | "item_owner"
   | "item_reorder"
+  | "plan_revision_accept"
   | "start_day"
   | "settlement_offer"
   | "settlement_skip"
@@ -260,6 +282,7 @@ export type EnsureDayPlanInput = {
 };
 
 export type DayPlanMutationInput = {
+  briefId?: string;
   planId: string;
   mutationId: string;
   expectedVersion: number;
@@ -305,7 +328,8 @@ export type DayPlanWeekendGateResult = {
   replayed: false;
 };
 
-export type EnsureDayPlanResult = DayPlanMutationResult | DayPlanWeekendGateResult;
+export type EnsureDayPlanResult =
+  | DayPlanMutationResult | DayPlanWeekendGateResult;
 
 export type DayPlanReconciliationResult = {
   reconciliation: DayPlanReconciliation;
@@ -329,7 +353,7 @@ export type DayPlanTaskMutation = {
   description?: string;
   priority?: "low" | "medium" | "high";
   project?: string;
-  state: "pending" | "applied";
+  state: "pending" | "applied" | "blocked";
   createdAt: string;
   appliedAt?: string;
 };

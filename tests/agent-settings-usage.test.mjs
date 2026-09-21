@@ -55,11 +55,16 @@ for (const provider of ['claude', 'codex']) {
     const calls = [];
     const result = await runJob({ lane: 'test', kind: 'structured', prompt: 'Review this desk', schema, env,
       backend: provider === 'claude' ? 'codex-sol-high' : 'claude',
-      codexPath: process.execPath, claudePath: process.execPath, spawnImpl: fakeSpawn(calls, []) });
+      codexConfigProbe: () => ({ status: 0, stdout: '{"name":"1password"}' }), codexPath: process.execPath, claudePath: process.execPath, spawnImpl: fakeSpawn(calls, []) });
     assert.equal(result.ok, true);
     assert.equal(calls.length, 1);
     assert.ok(calls[0].args.includes(settings.model));
     assert.ok(calls[0].args.includes(provider === 'claude' ? 'low' : 'model_reasoning_effort=low'));
+    if (provider === 'codex') {
+      const connectorSetting = calls[0].args.indexOf('mcp_servers.1password.enabled=false');
+      assert.ok(connectorSetting > 0, 'background jobs must not start the inherited password manager');
+      assert.equal(calls[0].args[connectorSetting - 1], '-c');
+    }
     const usage = readBackgroundUsage(env);
     assert.equal(usage.windows.day.calls, 1);
     assert.equal(usage.windows.day.inputTokens, 120);
@@ -204,7 +209,7 @@ for (const provider of ['claude', 'codex']) {
     const calls = [];
     const answer = 'Relevant detail. '.repeat(6000);
     const result = await runJob({ lane: 'morning-brief', kind: 'structured', prompt: 'Context '.repeat(15000), schema, env,
-      codexPath: process.execPath, claudePath: process.execPath, spawnImpl: fakeSpawn(calls, [{ answer }]) });
+      codexConfigProbe: () => ({ status: 0, stdout: '{"name":"1password"}' }), codexPath: process.execPath, claudePath: process.execPath, spawnImpl: fakeSpawn(calls, [{ answer }]) });
     assert.equal(result.ok, true, JSON.stringify(result.error));
     assert.equal(result.value.answer, answer);
     assert.equal(calls.length, 1);
@@ -240,7 +245,7 @@ test('long Codex diagnostic chatter cannot kill a valid brief artifact', async t
   const calls = [];
   const normal = fakeSpawn(calls, []);
   const result = await runJob({ lane: 'morning-brief', kind: 'structured', prompt: 'Review', schema, env,
-    codexPath: process.execPath, spawnImpl: (...args) => {
+    codexConfigProbe: () => ({ status: 0, stdout: '{"name":"1password"}' }), codexPath: process.execPath, spawnImpl: (...args) => {
       const child = normal(...args);
       child.stdin.prependListener('finish', () => child.stdout.write('x'.repeat(5 * 1024 * 1024) + '\n'));
       return child;
@@ -255,7 +260,7 @@ for (const provider of ['claude', 'codex']) {
     const calls = [];
     const normal = fakeSpawn(calls, [{ answer: 'x'.repeat(4 * 1024 * 1024) }]);
     const result = await runJob({ lane: 'morning-brief', kind: 'structured', prompt: 'Review', schema, env,
-      codexPath: process.execPath, claudePath: process.execPath, spawnImpl: normal });
+      codexConfigProbe: () => ({ status: 0, stdout: '{"name":"1password"}' }), codexPath: process.execPath, claudePath: process.execPath, spawnImpl: normal });
     assert.equal(result.error.code, 'runner_output_too_large');
     assert.equal(readBackgroundUsage(env).recent[0].status, 'failed');
   });
@@ -280,4 +285,22 @@ test('planning and chief reviews keep their own deadlines while monitoring uses 
   assert.equal(chief.ok, true);
   const monitoring = await runJob({ lane: 'test', kind: 'structured', prompt: 'Review', schema, env, timeoutMs: 500, spawnImpl: delayedSpawn });
   assert.equal(monitoring.error.code, 'runner_timeout');
+});
+
+test('connecting both preserves primary and exact models; switching keeps limits and failed probes keep all settings', async t => {
+  const { env, dir, settings } = fixture(t, 'claude', { callsPerDay: 35 });
+  const { connectedAgents, setPrimaryAgent, agentProviderStatus } = await import('../src/lib/agent-settings.mjs');
+  assert.deepEqual(agentProviderStatus(readAgentSettings(env)).connectedProviders, ['claude']);
+  assert.throws(() => setPrimaryAgent('codex', env), /Connect and verify/);
+  const connected = await configureAgent({ provider: 'codex', model: 'gpt-6-astra', effort: 'high', makePrimary: false, env, runner: async () => ({ ok: true }) });
+  assert.equal(connected.provider, 'claude');
+  assert.deepEqual(Object.keys(connectedAgents(connected)).sort(), ['claude', 'codex']);
+  const switched = setPrimaryAgent('codex', env);
+  assert.equal(switched.model, 'gpt-6-astra'); assert.equal(switched.effort, 'high');
+  assert.deepEqual(switched.backgroundLimits, settings.backgroundLimits);
+  assert.equal(setPrimaryAgent('claude', env).model, settings.model);
+  const before = readFileSync(path.join(dir, 'agent-settings.json'), 'utf8');
+  await assert.rejects(configureAgent({ provider: 'codex', model: 'gpt-unavailable', makePrimary: false, env, runner: async () => ({ ok: false, error: { message: 'denied' } }) }), /Settings were not changed/);
+  assert.equal(readFileSync(path.join(dir, 'agent-settings.json'), 'utf8'), before);
+  assert.throws(() => validateAgentSettings({ ...switched, providers: { claude: switched.providers.claude } }), /must match a connected/);
 });

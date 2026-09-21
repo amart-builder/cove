@@ -1,10 +1,14 @@
 export type AttentionTransport = {
-  banner(message: string, subtitle?: string): void;
+  banner(message: string, subtitle?: string, openUrl?: string): void;
   text(message: string): boolean;
   textConfigured: boolean;
 };
 
+export function attentionReminderConfigPath(input?: {dataDir?: string; repoDir?: string; env?: NodeJS.ProcessEnv}): string;
+
 export function createAttentionTransport(input?: {
+  dataDir?: string;
+  env?: NodeJS.ProcessEnv;
   repoDir?: string;
   execFileSyncImpl?: (
     executable: string,

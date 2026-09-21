@@ -32,7 +32,7 @@ flowchart LR
 | Domain | Primary code | Durable state |
 | --- | --- | --- |
 | Tasks and Quiet Current | `src/components/tasks`, `src/lib/day-plan`, `src/lib/quiet-current` | tasks, day plans, ritual decisions |
-| Morning Brief | `src/lib/day-plan/brief*`, `src/lib/claude-execution/worker.ts` | immutable brief artifacts and exact input manifests |
+| Daily planning and brief | `src/lib/chief-of-staff/daily-planning.ts`, `src/lib/day-plan/planning.ts`, `src/lib/claude-execution/worker.ts` | one model decision, linked proposals/checks, atomic plan and brief projection |
 | Email | `src/lib/email`, `scripts/cove-email-runner.ts` | thread ledger, Gmail operation outbox, receipts |
 | Meetings and progress | `src/lib/intake`, meeting and progress scripts | tasks, digests, relays, heartbeats |
 | Reliability | `src/lib/reliability`, `src/lib/health` | jobs, receipts, failures, backups, readiness |
@@ -79,7 +79,9 @@ The meeting and progress LaunchAgent plists are templates under
 from discovered machine paths and enabled integrations. See the Background
 processes table in `CODEBASE_GUIDE.md` for the authoritative labels and
 conditions. `--mini` is a separate legacy profile: it installs the Mini brief
-agent and the two rendered lane plists, then stops.
+agent and the two rendered lane plists, then stops. `--mini` is the author's
+personal profile: it hard-codes paths under `~/Atlas` and a Pacific timezone,
+and must not be used for any client install, laptop or Mini.
 
 ## Selected agent and follow-through
 

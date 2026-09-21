@@ -1,3 +1,4 @@
+import { notificationUrl } from "./notification-links.mjs";
 import Database from "better-sqlite3";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -62,6 +63,7 @@ export function handleUrgentEmail(input: {
   const shadow = input.shadow ?? shadowSetting(dataDir);
   const transport = dependencies.transport ?? createAttentionTransport({
     repoDir: input.repoDir,
+    dataDir,
   });
   const surface = dependencies.surface ?? surfaceAttentionSuggestion;
   const surfaceSuppression = dependencies.surfaceSuppression ??
@@ -112,7 +114,7 @@ export function handleUrgentEmail(input: {
     });
     for (const row of allocation.suppressionRows) {
       try {
-        surfaceSuppression({ row, now });
+        surfaceSuppression({ row, now, dataDir });
       } catch {
         // The ledger remains the source of truth if the file-backed board is busy.
       }
@@ -151,6 +153,7 @@ export function handleUrgentEmail(input: {
           title: `Would have alerted: ${title}`,
           reason: input.urgencyReason,
           source: "Cove email urgency shadow",
+          dataDir,
           now,
         });
       } catch {
@@ -173,7 +176,7 @@ export function handleUrgentEmail(input: {
         transport.banner(sanitizeNonDirectBanner(
           `Urgent message. ${input.urgencyReason}`,
           "from email",
-        ));
+        ), "Email needs you", notificationUrl({ attentionId: allocation.row.id, email: true }));
         bannerDelivered = true;
       } catch {
         bannerDelivered = false;
@@ -194,6 +197,7 @@ export function handleUrgentEmail(input: {
         title,
         reason: input.urgencyReason,
         source: "Cove email urgency",
+        dataDir,
         now,
       });
       boardDelivered = true;

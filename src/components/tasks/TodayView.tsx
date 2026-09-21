@@ -1,5 +1,6 @@
 'use client';
 
+import NotificationTaskSheet from './NotificationTaskSheet';
 import { useTaskLink } from './useTaskLink';
 
 import { taskEditError, type TaskEditGuard } from '@/lib/tasks/edit-conflict';
@@ -29,6 +30,8 @@ import {
 import type { Task as RestTask, TaskColumn as RestTaskColumn } from '@/lib/data/types';
 import {
   getQuietCurrent,
+  acceptSuggestion,
+  undoSuggestionAcceptance,
   recordDecision,
   reopenSuggestion,
   resolveSuggestion,
@@ -55,6 +58,8 @@ import {
 import {
   canStartDayPlanSettlement,
   combineSurfaceErrors,
+  completedTasksForToday,
+  currentDayPlanItems,
   firstContinuingItem,
   focusBandItems,
   formatArrivalDueDate,
@@ -76,6 +81,7 @@ import MorningArrival, {
   type MorningArrivalItem,
 } from './MorningArrival';
 import DaySettlement from './DaySettlement';
+import useCloseoutDraft from './useCloseoutDraft';
 import DayRitualLayer, { DayRitualContentSwap } from './DayRitualLayer';
 import { OpenInClaudeCode, RunStatusChip } from './ClaudeRunIndicators';
 import ExecutionConfigPanel from './ExecutionConfigPanel';
@@ -109,6 +115,7 @@ import CoveReadinessStrip from './CoveReadinessStrip';
 import ClaudeDeskStrip from './ClaudeDeskStrip';
 import FollowThrough from '../reliability/FollowThrough';
 import TodayRiverStageV2, {
+  TODAY_CLOSED_MESSAGE,
   type SecondCurrentItemV2,
   type TodayRiverStageV2MotionHandle,
   type TodayRiverTaskV2,
@@ -159,6 +166,7 @@ interface TodayExperienceProps {
   loading: boolean;
   error?: string;
   retry: () => Promise<void>;
+  hasLoadedTask: (taskId: string) => boolean;
   createTask: (input: CreateTaskInput) => Promise<string>;
   updateTask: (id: string, patch: UpdateTaskInput) => Promise<TaskData>;
   deleteTask: (id: string) => Promise<void>;
@@ -166,6 +174,7 @@ interface TodayExperienceProps {
 
 type UndoAction = {
   message: string;
+  completionPlanId?: string;
   run: () => Promise<void>;
 };
 
@@ -581,6 +590,7 @@ function RestTodayView() {
       loading={loading}
       error={error}
       retry={reload}
+      hasLoadedTask={(taskId) => tasksRef.current.some(task => task._id === taskId)}
       createTask={async (input) => {
         beginMutation();
         let forceRefresh = false;
@@ -711,6 +721,7 @@ function TodayExperience({
   loading,
   error,
   retry,
+  hasLoadedTask,
   createTask,
   updateTask,
   deleteTask,
@@ -726,7 +737,6 @@ function TodayExperience({
   const [rhythmTemplates, setRhythmTemplates] = useState<RecurringTemplate[]>([]);
   const [suggestionsLoading, setSuggestionsLoading] = useState(true);
   const [surfaceError, setSurfaceError] = useState<string>();
-  const [settlementNote, setSettlementNote] = useState('');
   const [now, setNow] = useState(() => new Date());
   const [focusCount, setFocusCount] = useState<1 | 2 | 3>(1);
   const [focusCountBusy, setFocusCountBusy] = useState(false);
@@ -750,9 +760,13 @@ function TodayExperience({
   const [focusExpanded, setFocusExpanded] = useState(false);
   const [wakeOpen, setWakeOpen] = useState(false);
   const [arrivalPlanCanvas, setArrivalPlanCanvas] = useState(false);
+  const [arrivalEntry, setArrivalEntry] = useState<{ planId: string; step: 'brief' | 'plan' }>();
   const [showAllDownstream, setShowAllDownstream] = useState(false);
   const [expandedSuggestionId, setExpandedSuggestionId] = useState<string | null>(null);
+  const [notificationQuery, setNotificationQuery] = useState<string | null>(null);
+  const notificationLinkConsumed = useRef(false);
   const [detailTaskId, setDetailTaskId] = useState<string | null>(null);
+  const [suggestionDetailTaskId, setSuggestionDetailTaskId] = useState<string | null>(null);
   useTaskLink('today', tasks, setDetailTaskId);
   const [completingTaskId, setCompletingTaskId] = useState<string | null>(null);
   const [undo, setUndo] = useState<UndoAction | null>(null);
@@ -884,8 +898,11 @@ function TodayExperience({
     candidatesReady: candidateEvidence?.freshness === 'current',
     onBriefPicksChange,
   });
+  const { note: settlementNote, setNote: setSettlementNote, clearSavedDraft: clearCloseoutDraft, error: closeoutDraftError } = useCloseoutDraft(dayRitual.plan?.id);
   const dayRitualPlanRef = useRef(dayRitual.plan);
   dayRitualPlanRef.current = dayRitual.plan;
+  const completionUndoDisabled = Boolean(undo?.completionPlanId &&
+    (dayRitual.plan?.id !== undo.completionPlanId || dayRitual.plan.state === 'settled'));
   const ritualView: OverlayRitualView | undefined =
     dayRitual.view === 'arrival' ||
     dayRitual.view === 'settlement'
@@ -893,27 +910,17 @@ function TodayExperience({
       : undefined;
 
   const doneToday = useMemo(() => {
-    const today = new Date();
-    return tasks
-      .filter((task) => {
-        if (task.columnId !== doneColumn?._id && task.status !== 'done') return false;
-        const updated = new Date(task.updatedAt);
-        return (
-          updated.getFullYear() === today.getFullYear() &&
-          updated.getMonth() === today.getMonth() &&
-          updated.getDate() === today.getDate()
-        );
-      })
-      .sort((left, right) => right.updatedAt - left.updatedAt);
-  }, [doneColumn?._id, tasks]);
+    return completedTasksForToday(tasks, doneColumn?._id,
+      dayRitual.plan?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone);
+  }, [dayRitual.plan?.timezone, doneColumn?._id, tasks]);
 
   const today2PlanEntries = useMemo(() => {
     const taskById = new Map(openTasks.map((task) => [task._id, task]));
-    return [...(dayRitual.plan?.items ?? [])]
+    return currentDayPlanItems(dayRitual.plan)
       .filter((item) => item.decision === 'accepted' && taskById.has(item.taskId))
       .sort((left, right) => left.position - right.position)
       .map((item) => ({ item, task: taskById.get(item.taskId)! }));
-  }, [dayRitual.plan?.items, openTasks]);
+  }, [dayRitual.plan, openTasks]);
   const today2FocusTasks = useMemo(
     () => today2PlanEntries.slice(0, focusCount).map((entry) => entry.task),
     [focusCount, today2PlanEntries],
@@ -1138,9 +1145,10 @@ function TodayExperience({
     if (searchOpen) closeSearch(false);
   }, [closeSearch, searchOpen]);
 
-  const openMorningArrival = useCallback(async () => {
+  const openMorningArrival = useCallback(async (step: 'brief' | 'plan' = 'brief') => {
     closeTransientSurfaces();
     setSurfaceError(undefined);
+    if (dayRitual.plan) setArrivalEntry({ planId: dayRitual.plan.id, step });
     try {
       await dayRitual.openArrival();
     } catch (nextError) {
@@ -1149,6 +1157,27 @@ function TodayExperience({
       );
     }
   }, [closeTransientSurfaces, dayRitual]);
+
+  useEffect(() => {
+    if (!localMode || !dayRitual.plan || notificationLinkConsumed.current) return;
+    const params = new URLSearchParams(window.location.search);
+    if (!params.has('notice') && params.get('email') !== '1') return;
+    const query = new URLSearchParams();
+    for (const key of ['task', 'notice', 'email']) {
+      const value = params.get(key);
+      if (value) query.set(key, value);
+    }
+    const timer = window.setTimeout(() => {
+      notificationLinkConsumed.current = true;
+      void openMorningArrival('plan').then(() => {
+        setNotificationQuery(query.toString());
+        const url = new URL(window.location.href);
+        for (const key of ['task', 'notice', 'email']) url.searchParams.delete(key);
+        window.history.replaceState(window.history.state, '', url);
+      });
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [localMode, dayRitual.plan, openMorningArrival]);
 
   const openDaySettlement = useCallback(async () => {
     closeTransientSurfaces();
@@ -1166,13 +1195,14 @@ function TodayExperience({
     setSurfaceError(undefined);
     try {
       const taskId = await dayRitual.startDay();
+      await retry();
       if (taskId) focusTask(taskId, 'start_my_day');
     } catch (nextError) {
       setSurfaceError(
         nextError instanceof Error ? nextError.message : "Cove couldn't start the planned day.",
       );
     }
-  }, [dayRitual, focusTask]);
+  }, [dayRitual, focusTask, retry]);
 
   const reconcileDayPlanActions = useCallback(async (
     reconciliations = dayRitual.pendingReconciliations,
@@ -1287,8 +1317,8 @@ function TodayExperience({
     setSurfaceError(undefined);
     try {
       const result = await dayRitual.commitSettlement(completedHumanTaskIds, settlementNote);
+      clearCloseoutDraft(currentPlan.id, settlementNote);
       await retry();
-      setSettlementNote('');
       const reconciliations = result.pendingReconciliations ?? [];
       await reconcileDayPlanActions(reconciliations);
       const excludedTaskIds = new Set(
@@ -1310,7 +1340,7 @@ function TodayExperience({
           : "Cove couldn't finish reconciling the closed day.",
       );
     }
-  }, [candidateEvidence?.freshness, dayRitual, notStartedColumn, reconcileDayPlanActions, retry, settlementNote]);
+  }, [candidateEvidence?.freshness, clearCloseoutDraft, dayRitual, notStartedColumn, reconcileDayPlanActions, retry, settlementNote]);
 
   useEffect(() => {
     if (
@@ -1453,7 +1483,7 @@ function TodayExperience({
   }
 
   async function runUndo() {
-    if (!undo || undoRunningRef.current) return;
+    if (!undo || completionUndoDisabled || undoRunningRef.current) return;
     undoRunningRef.current = true;
     const action = undo;
     setUndo(null);
@@ -1470,127 +1500,36 @@ function TodayExperience({
     suggestion: WorkSuggestion,
     source: 'explicit_accept' | 'began_work',
   ) {
-    if (!todayColumn) return;
     setSurfaceError(undefined);
-    let resolvedTaskId: string | undefined;
-    const targetTask = suggestion.targetTaskId
-      ? tasks.find((task) => task._id === suggestion.targetTaskId)
-      : undefined;
-    if (
-      (
-        suggestion.kind === 'returned_work' ||
-        suggestion.kind === 'observed_progress' ||
-        suggestion.kind === 'stale_task'
-      ) &&
-      !targetTask
-    ) {
-      setSurfaceError('The task this suggestion refers to no longer exists.');
-      return;
-    }
-    const targetBefore = targetTask
-      ? {
-          columnId: targetTask.columnId,
-          // Returned work is still Jarvis-held until the human accepts it. Keep
-          // that ownership marker explicit so compensation and Undo restore the
-          // handoff even if a stale client snapshot omitted the tag.
-          tags:
-            suggestion.kind === 'returned_work'
-              ? withTag([...targetTask.tags], JARVIS_HELD_TAG)
-              : [...targetTask.tags],
-          status: targetTask.status,
-          position: targetTask.position,
-        }
-      : undefined;
-
-    async function rollBackTaskMutation() {
-      if (targetTask && targetBefore) {
-        await updateTask(targetTask._id, targetBefore);
-      } else if (resolvedTaskId) {
-        await deleteTask(resolvedTaskId);
-      }
-    }
-
     try {
-      if (targetTask && suggestion.kind === 'returned_work') {
-        resolvedTaskId = targetTask._id;
-        await updateTask(targetTask._id, {
-          tags: withoutTag(targetTask.tags, JARVIS_HELD_TAG),
-        });
-        focusTask(targetTask._id, 'returned_work');
-      } else if (targetTask && suggestion.kind === 'observed_progress') {
-        resolvedTaskId = targetTask._id;
-        if (source === 'explicit_accept') {
-          await updateTask(targetTask._id, { status: 'done' });
-        }
-        focusTask(targetTask._id, 'observed_progress');
-      } else if (targetTask && suggestion.kind === 'stale_task') {
-        resolvedTaskId = targetTask._id;
-        if (source === 'explicit_accept') {
-          await updateTask(targetTask._id, {});
-        }
-        focusTask(targetTask._id, 'stale_task');
-      } else {
-        resolvedTaskId = await createTask({
-          columnId: todayColumn._id,
-          title: suggestion.title,
-          description: suggestion.description,
-          priority: suggestion.priority,
-          dueDate: suggestion.dueDate,
-          tags: [],
-          origin: `A Quiet Current suggestion you accepted on ${originDate(new Date())}. Source: ${originQuote(suggestion.source, 120)}. Evidence: ${originQuote(suggestion.reason)}`,
-        });
-        focusTask(resolvedTaskId, source);
-      }
-
-      try {
-        await resolveSuggestion(suggestion.id, {
-          state: 'accepted',
-          resolvedTaskId,
-          source,
-        });
-      } catch (resolutionError) {
-        try {
-          await rollBackTaskMutation();
-        } catch {
-          throw new Error(
-            "Cove couldn't accept that proposal or fully restore the task. Open All Work to check the task before trying again.",
-          );
-        } finally {
-          setFocusedTaskId(commitments[0]?._id ?? null);
-          await loadSuggestions();
-        }
-        throw resolutionError;
-      }
-
+      const accepted = await acceptSuggestion(suggestion.id, {
+        source: source === 'began_work' ? 'focus' : 'explicit_accept',
+        expectedUpdatedAt: suggestion.updatedAt,
+      });
+      await retry();
       await loadSuggestions();
+      if (source === 'began_work') {
+        if (hasLoadedTask(accepted.taskId)) {
+          setSuggestionDetailTaskId(accepted.taskId);
+          setDetailTaskId(accepted.taskId);
+        } else {
+          setSurfaceError('The task was saved to All Work, but its details could not load. Refresh All Work to open it.');
+        }
+      }
       showUndo({
-        message:
-          suggestion.kind === 'returned_work'
-            ? 'Review moved to your current'
-            : suggestion.kind === 'observed_progress'
-              ? source === 'explicit_accept'
-                ? 'Marked task done'
-                : 'Opened task'
-              : suggestion.kind === 'stale_task'
-                ? 'Kept task'
-              : 'Added to your current',
+        message: suggestion.kind === 'observed_progress' && source === 'explicit_accept'
+          ? 'Marked task done' : suggestion.kind === 'create_task' ? 'Added to All Work' : 'Suggestion reviewed',
         run: async () => {
-          await reopenSuggestion(
-            suggestion.id,
-            suggestion.state === 'refined' ? 'refined' : 'proposed',
-          );
-          try {
-            await rollBackTaskMutation();
-          } catch (rollbackError) {
-            await loadSuggestions();
-            throw rollbackError;
-          }
+          await undoSuggestionAcceptance(suggestion.id, accepted.acceptanceId);
+          await retry();
           await loadSuggestions();
           setUndo(null);
         },
       });
+      return true;
     } catch (nextError) {
       setSurfaceError(proposalCommitError(nextError));
+      return false;
     }
   }
 
@@ -1624,8 +1563,10 @@ function TodayExperience({
           setUndo(null);
         },
       });
+      return true;
     } catch {
       setSurfaceError("Cove couldn't finish setting that aside. Refresh the current to confirm it, then try again.");
+      return false;
     }
   }
 
@@ -1648,8 +1589,10 @@ function TodayExperience({
           setUndo(null);
         },
       });
+      return true;
     } catch {
       setSurfaceError("Cove couldn't finish dismissing that suggestion. Refresh the current to confirm it, then try again.");
+      return false;
     }
   }
 
@@ -1708,6 +1651,7 @@ function TodayExperience({
       previousItemIds: string[];
       nextTaskIds: string[];
     },
+    requireReceipt = false,
   ) {
     if (!doneColumn) throw new Error('Cove needs a Done list to complete this task.');
     if (completingTaskId) throw new Error('Another task completion is still in progress.');
@@ -1715,14 +1659,21 @@ function TodayExperience({
     setSurfaceError(undefined);
     if (!today2Order) await new Promise((resolve) => window.setTimeout(resolve, 230));
     try {
-      const completed = today2Order
-        ? await dayRitual.completeItem(today2Order.itemId, task.title)
+      const completionItemId = today2Order?.itemId ?? (requireReceipt
+        ? dayRitual.plan?.items.find(item => item.taskId === task._id && ['pending', 'preselected', 'accepted'].includes(item.decision))?.id
+        : undefined);
+      const completed = completionItemId
+        ? await dayRitual.completeItem(completionItemId, task.title)
         : undefined;
-      await updateTask(task._id, {
-        columnId: doneColumn._id,
-        status: 'done',
-        position: tasks.filter((candidate) => candidate.columnId === doneColumn._id).length,
-      });
+      if (completionItemId) {
+        await retry();
+      } else {
+        await updateTask(task._id, {
+          columnId: doneColumn._id,
+          status: 'done',
+          position: tasks.filter((candidate) => candidate.columnId === doneColumn._id).length,
+        });
+      }
       await recordDecision({
         eventType: 'task_complete',
         entityId: task._id,
@@ -1741,18 +1692,23 @@ function TodayExperience({
       setFocusedTaskId(nextTask?._id ?? null);
       if (nextTask) writeLocalValue(FOCUS_KEY, nextTask._id);
       else removeLocalValue(FOCUS_KEY);
-      showUndo({
+      const completionUndo: UndoAction = {
         message: 'Completed',
+        completionPlanId: completionItemId ? completed?.plan.id : undefined,
         run: async () => {
           const restore = async () => {
-            const reopened = today2Order
-              ? await dayRitual.reopenItem(today2Order.itemId, task.title)
+            const reopened = completionItemId
+              ? await dayRitual.reopenItem(completionItemId, task.title)
               : undefined;
-            await updateTask(task._id, {
-              columnId: task.columnId,
-              status: task.status ?? 'open',
-              position: task.position,
-            });
+            if (completionItemId) {
+              await retry();
+            } else {
+              await updateTask(task._id, {
+                columnId: task.columnId,
+                status: task.status ?? 'open',
+                position: task.position,
+              });
+            }
             await recordDecision({
               eventType: 'task_undo',
               entityId: task._id,
@@ -1771,10 +1727,12 @@ function TodayExperience({
             await restore();
           }
         },
-      });
+      };
+      if (requireReceipt) return completionUndo.run;
+      showUndo(completionUndo);
     } catch (nextError) {
       setSurfaceError("Cove couldn't finish completing that task. Refresh the current to confirm its state, then try again.");
-      if (today2Order) throw nextError;
+      if (today2Order || requireReceipt) throw nextError;
     } finally {
       setCompletingTaskId(null);
     }
@@ -2017,7 +1975,7 @@ function TodayExperience({
     () => arrivalPlanItems.map((item) => {
       const sourceTask = tasksById.get(item.taskId);
       const fullDescription = sourceTask?.description || item.outcome;
-      const title = sourceTask?.title || item.title;
+      const title = item.planningRef ? item.title : sourceTask?.title || item.title;
       const due = sourceTask?.dueAt ?? sourceTask?.dueDate ?? item.dueAt;
       return {
         item,
@@ -2204,12 +2162,14 @@ function TodayExperience({
         ? taskSessions.error
         : dayRitual.executionError,
     surfaceError,
+    closeoutDraftError,
   );
   const today2Tasks = useMemo<TodayRiverTaskV2[]>(
     () => today2PlanEntries.map(({ item, task }) => ({
       id: task._id,
       itemId: item.id,
-      title: task.title,
+      title: item.planningRef ? item.title : task.title,
+      planningState: item.planningStale && dayRitual.plan?.state === 'active' ? undefined : item.planningState,
       description: task.description || item.outcome,
       project: item.project,
       dueLabel: item.dueAt ? formatArrivalDueDate(item.dueAt) : undefined,
@@ -2217,7 +2177,7 @@ function TodayExperience({
       run: localMode ? taskSessions.latestByTaskId.get(task._id) : undefined,
       sessionBusy: taskSessions.launchingTaskIds.has(task._id),
     })),
-    [localMode, taskSessions.latestByTaskId, taskSessions.launchingTaskIds, today2PlanEntries],
+    [dayRitual.plan?.state, localMode, taskSessions.latestByTaskId, taskSessions.launchingTaskIds, today2PlanEntries],
   );
   // Count of pending email items (reply or action). Shown as a badge on the
   // Email needs you card and refreshed on the same bus the email card uses.
@@ -2275,6 +2235,7 @@ function TodayExperience({
   const launchToday2Session = useCallback(async (
     taskId: string,
     mode: NonNullable<LaunchTaskSessionInput['mode']>,
+    provider?: LaunchTaskSessionInput['provider'],
   ) => {
     const plan = dayRitual.plan;
     const entry = today2PlanEntries.find((candidate) => candidate.task._id === taskId);
@@ -2283,6 +2244,7 @@ function TodayExperience({
       ...taskSessionInput(plan.id, entry.item),
       owner: mode === 'planning' ? 'together' : 'claude',
       mode,
+      provider,
     }).catch(() => undefined);
   }, [dayRitual.plan, localMode, taskSessions, today2PlanEntries]);
 
@@ -2371,9 +2333,12 @@ function TodayExperience({
             doneTitles: doneToday.map((task) => task.title),
             focusCount,
             orderedTasks: today2Tasks,
+            notTodayCount: notTodayTasks.length,
             selectedTaskId: focusedTaskId ?? undefined,
             completingTaskId: completingTaskId ?? undefined,
             activeRunCount: taskSessions.activeRuns.length,
+            defaultProvider: taskSessions.defaultProvider,
+            connectedProviders: taskSessions.connectedProviders,
             localMode,
             reorderEnabled: dayRitual.plan?.state === 'active' && !dayRitual.busy,
             focusCountBusy: focusCountBusy || !localMode,
@@ -2384,6 +2349,7 @@ function TodayExperience({
             morningArrivalDisabled: Boolean(morningArrivalUnavailableReason),
             morningArrivalTitle: morningArrivalUnavailableReason,
             closeDayDisabled,
+            dayClosed: dayRitual.plan?.state === 'settled',
             weekendGate: !dayRitual.plan && dayRitual.weekendGate
               ? {
                   weekday: dayRitual.weekendGate.weekday,
@@ -2394,6 +2360,7 @@ function TodayExperience({
           }}
           callbacks={{
             onOpenMorningArrival: () => void openMorningArrival(),
+            onOpenDayPlan: () => void openMorningArrival('plan'),
             onOpenCloseDay: () => void openDaySettlement(),
             onPlanWeekend: () => void dayRitual.planWeekendAnyway(),
             onFocusTask: (taskId) => focusTask(taskId, 'today2_card'),
@@ -2419,8 +2386,8 @@ function TodayExperience({
                 nextTaskIds,
               });
             },
-            onStartSession: (taskId, owner) => void launchToday2Session(taskId, owner),
-            onRetrySession: (taskId, owner) => void launchToday2Session(taskId, owner),
+            onStartSession: (taskId, mode, provider) => void launchToday2Session(taskId, mode, provider),
+            onRetrySession: (taskId, mode, provider) => void launchToday2Session(taskId, mode, provider),
             onReorder: (orderedTaskIds) => {
               const startingPlanId = dayRitual.plan?.id;
               return persistToday2Order(orderedTaskIds).catch((nextError) => {
@@ -3066,8 +3033,8 @@ function TodayExperience({
             }
           }}
         >
-          <span>{undo.message}</span>
-          <button type="button" onClick={() => void runUndo()}>Undo</button>
+          <span>{completionUndoDisabled ? TODAY_CLOSED_MESSAGE : undo.message}</span>
+          <button type="button" disabled={completionUndoDisabled} title={completionUndoDisabled ? TODAY_CLOSED_MESSAGE : undefined} onClick={() => void runUndo()}>Undo</button>
           {!undoPaused && <span className="quiet-undo-timer" aria-hidden="true" />}
         </div>
       )}
@@ -3117,13 +3084,35 @@ function TodayExperience({
         </div>
       )}
 
+      {notificationQuery && (
+        <NotificationTaskSheet query={notificationQuery}
+          onClose={() => setNotificationQuery(null)}
+          onAction={async (action, task) => {
+            if (action === 'complete') {
+              const current = tasks.find(candidate => candidate._id === task.id);
+              if (!current) throw new Error('Refresh Cove to load this task before completing it.');
+              return completeTask(current, undefined, true);
+            }
+            let plan = dayRitual.plan;
+            let item = plan?.items.find(candidate => candidate.taskId === task.id && ['pending', 'preselected', 'accepted'].includes(candidate.decision));
+            if (!item) {
+              const result = await dayRitual.addTask(task.id, task.title);
+              plan = result.plan;
+              item = plan.items.find(candidate => candidate.taskId === task.id && ['pending', 'preselected', 'accepted'].includes(candidate.decision));
+            }
+            if (!item) throw new Error('Cove could not add this task to today.');
+            if (action === 'priority') await dayRitual.reorder(item.id, 0, task.title);
+            await retry();
+          }} />
+      )}
       {detailTask && (
         <TaskDetail
           taskId={detailTask._id}
+          returnFocusId={suggestionDetailTaskId === detailTask._id ? "quiet-current-review-trigger" : undefined}
           task={detailTask}
           columns={columns}
-          onClose={() => setDetailTaskId(null)}
-          onDeleted={() => setDetailTaskId(null)}
+          onClose={() => { setDetailTaskId(null); setSuggestionDetailTaskId(null); }}
+          onDeleted={() => { setDetailTaskId(null); setSuggestionDetailTaskId(null); }}
           onSaveTask={saveDetail}
           onDeleteTask={deleteDetail}
           onConfirmRecurrence={localMode
@@ -3162,6 +3151,8 @@ function TodayExperience({
           >
             {ritualView === 'arrival' ? (
               <MorningArrival
+                key={`${dayRitual.plan.id}:${arrivalEntry?.planId === dayRitual.plan.id ? arrivalEntry.step : 'brief'}`}
+                initialStep={arrivalEntry?.planId === dayRitual.plan.id ? arrivalEntry.step : 'brief'}
                 localDate={dayRitual.plan.localDate}
                 plan={dayRitual.plan}
                 focusCount={focusCount}
@@ -3184,7 +3175,7 @@ function TodayExperience({
                   : 'Using the latest verified task evidence'}
                 busy={dayRitual.busy || focusCountBusy}
                 completingTaskId={completingTaskId}
-                error={combineSurfaceErrors(dayRitual.error, surfaceError)}
+                error={combineSurfaceErrors(dayRitual.error, surfaceError, closeoutDraftError)}
                 titleId={RITUAL_TITLE_IDS.arrival}
                 descriptionId={RITUAL_DESCRIPTION_IDS.arrival}
                 escapeRef={arrivalEscapeRef}
@@ -3231,7 +3222,7 @@ function TodayExperience({
                 proposedTomorrowTitle={proposedTomorrow?.title}
                 savingItemIds={dayRitual.savingItemIds}
                 closing={dayRitual.busy}
-                error={combineSurfaceErrors(dayRitual.error, surfaceError)}
+                error={combineSurfaceErrors(dayRitual.error, surfaceError, closeoutDraftError)}
                 note={settlementNote}
                 canDefer={Boolean(notStartedColumn)}
                 titleId={RITUAL_TITLE_IDS.settlement}
