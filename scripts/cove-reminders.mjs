@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { executeNotificationDelivery } from "../src/lib/notifications/delivery-receipts.mjs";
+import { drainNotificationReminders } from "../src/lib/notifications/reminders.mjs";
+import { notificationUrl } from "../src/lib/attention/notification-links.mjs";
 /**
  * Cove reminder helper. Run every minute by the com.cove.reminders LaunchAgent.
  *
@@ -19,7 +22,9 @@
  * fire when it next wakes; for always-on delivery the user needs a Mac Mini/VPS.
  */
 import Database from "better-sqlite3";
-import { loadLocalEnv } from "./lib/load-local-env.mjs";
+import { unseenFloorCandidates, recordFloorNotice, releaseFloorNotice } from "../src/lib/attention/floor-state.mjs";
+import { localDateKey as dateInZone } from "../src/lib/local-time.mjs";
+import { loadCoveRuntimePaths } from "./lib/cove-runtime-paths.mjs";
 import { readAgentSettings } from "../src/lib/agent-settings.mjs";
 import { runFollowThrough } from "../src/lib/attention/follow-through.mjs";
 import { execFileSync } from "node:child_process";
@@ -37,18 +42,20 @@ import {
   localIMessageArgs,
   nativeNotificationCommand,
   remoteIMessageArgs,
+  REMOTE_IMESSAGE_TIMEOUT_MS,
+  textDeliveryUncertain,
 } from "../src/lib/intake/notification-transport.mjs";
 import {
   allocateAttention,
   finalizeAttentionDelivery,
   hasAttentionLedger,
 } from "../src/lib/attention/ledger.mjs";
-import { coveConfigPath, coveEnv } from "../src/lib/env-runtime.mjs";
+import { coveEnv } from "../src/lib/env-runtime.mjs";
+import { attentionReminderConfigPath } from "../src/lib/attention/transport.mjs";
 import { operatorTimezone } from "../src/lib/operator-runtime.mjs";
 
 const repoDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-loadLocalEnv(repoDir);
-const dbPath = coveEnv("DB_PATH") || path.join(coveEnv("DATA_DIR") || path.join(repoDir, "data"), "cove.db");
+const { dbPath, dataDir } = loadCoveRuntimePaths(repoDir);
 const DIRECT_AUTHOR_SOURCES = new Set([
   "chat",
   "imessage",
@@ -62,16 +69,16 @@ const nativeNotificationDependencies = {
   notificationAppPath: coveEnv("NOTIFICATION_APP"),
 };
 
-function floorText(count) {
-  return `Cove: ${count} ${count === 1 ? "thing needs" : "things need"} a look. Open the board.`;
+function floorText(candidate, count) {
+  const title = plainAttentionText(candidate.nextAction || candidate.title).slice(0, 180);
+  return `Cove: ${title}. ${count > 1 ? `${count - 1} other due or overdue items also need a next step. ` : ""}Open Today to review.`;
 }
 
 function loadReminderConfig() {
   let raw;
   try {
     raw = readFileSync(
-      coveEnv("REMINDER_CONFIG_PATH") ??
-        coveConfigPath(path.join(repoDir, "data"), "reminders.json"),
+      attentionReminderConfigPath({ repoDir }),
       "utf8",
     );
   } catch {
@@ -98,31 +105,46 @@ function telegramToken() {
   }
 }
 
-function notifyNative(taskTitle) {
-  const command = nativeNotificationCommand(`Here's your reminder: ${taskTitle}`, {
-    title: "Cove",
-    subtitle: "Your reminder",
-    sound: "Glass",
-  }, nativeNotificationDependencies);
-  execFileSync(command.executable, command.args);
+function recordedDelivery(channel, reference, content, send) {
+  return executeNotificationDelivery({ dataDir, channel, reference: String(reference || "unlinked"), content }, send);
 }
 
-function notifyAttentionBanner(message, subtitle = "Needs your attention") {
+function notifyNative(taskTitle, taskId) {
+  const message = `Here's your reminder: ${taskTitle}`;
+  const command = nativeNotificationCommand(message, {
+    title: "Cove",
+    subtitle: "Your reminder",
+    openUrl: notificationUrl({taskId, reminder: true}),
+    sound: "Glass",
+  }, nativeNotificationDependencies);
+  recordedDelivery("native", `task:${taskId ?? "unlinked"}`, message, () => execFileSync(command.executable, command.args));
+}
+
+function notifyAttentionBanner(message, subtitle = "Needs your attention", openUrl) {
   const command = nativeNotificationCommand(message, {
     title: "Cove",
     subtitle,
+    openUrl,
     sound: "Glass",
   }, nativeNotificationDependencies);
-  execFileSync(command.executable, command.args);
+  const url = openUrl ? new URL(openUrl) : null;
+  const reference = url?.searchParams.get("notice") ?? url?.searchParams.get("task") ?? "attention";
+  recordedDelivery("native", reference, message, () => execFileSync(command.executable, command.args));
 }
 
-function notifyTextFailure(taskTitle) {
-  const command = nativeNotificationCommand(`I couldn't deliver your text reminder: ${taskTitle}. Check it here in Cove.`, {
+function notifyTextFailure(input, uncertain = false) {
+  const title = input.bannerTitle ?? input.title;
+  const reminder = input.kind === "floor"
+    ? `${title}. Open Today to choose the next step.`
+    : `Here's your reminder: ${title}.`;
+  const message = `${reminder} ${uncertain ? "Text delivery is unconfirmed." : "The text reminder could not be sent."}`;
+  const command = nativeNotificationCommand(message, {
     title: "Cove",
-    subtitle: "Reminder delivery failed",
+    subtitle: "Your reminder",
+    openUrl: notificationUrl({ taskId: input.taskId ?? (input.kind === "task" ? input.id : undefined), reminder: true }),
     sound: "Glass",
   }, nativeNotificationDependencies);
-  execFileSync(command.executable, command.args);
+  recordedDelivery("native", `${input.kind}:${input.id}`, message, () => execFileSync(command.executable, command.args));
 }
 
 function notifyTelegram(token, chatId, message) {
@@ -149,7 +171,7 @@ function notifyRemoteIMessage(remoteHost, to, message) {
   execFileSync(
     "ssh",
     remoteIMessageArgs(remoteHost, to, message),
-    { timeout: 10_000 },
+    { timeout: REMOTE_IMESSAGE_TIMEOUT_MS },
   );
 }
 
@@ -181,10 +203,7 @@ function errorMessage(error) {
 }
 
 function localDateKey(now) {
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+  return dateInZone(now, operatorTimezone());
 }
 
 function attentionNow() {
@@ -300,7 +319,7 @@ async function surfaceSuppressionRows(rows, now) {
 function stillOpen(db, refKind, refId) {
   if (refKind === "task") {
     return Boolean(db.prepare(
-      "SELECT 1 FROM tasks WHERE id = ? AND status = 'open'",
+      "SELECT 1 FROM tasks WHERE id = ? AND status = 'open' AND archived_at IS NULL",
     ).get(refId));
   }
   return Boolean(db.prepare(
@@ -309,47 +328,55 @@ function stillOpen(db, refKind, refId) {
 }
 
 async function runDeterministicFloor(db, config, token, now = new Date()) {
-  if (!hasAttentionLedger(db) || now.getHours() < 12) return;
+  // Basic Mode opts out of unsolicited follow-through. Explicit task alarms
+  // and one-hour reminders have their own user-controlled delivery paths.
+  if (coveEnv("FOLLOW_THROUGH") === "0") return;
+  if (!hasAttentionLedger(db) || localHour(now) < 12) return;
+  if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE name='cove_floor_reminder_state'").get()) return;
   const today = localDateKey(now);
   const tasks = db.prepare(
-    `SELECT tasks.id, tasks.title, tasks.source_type,
+    `SELECT tasks.id, tasks.title, tasks.source_type, tasks.due_at,
+            (SELECT next_action FROM cove_responsibilities WHERE ref_kind='task' AND ref_id=tasks.id) AS next_action,
             inbound_events.source AS inbound_source
        FROM tasks
        LEFT JOIN inbound_events ON inbound_events.id = tasks.id
-      WHERE tasks.status = 'open'
+      WHERE tasks.status = 'open' AND tasks.archived_at IS NULL
         AND (tasks.notification_policy IS NULL OR tasks.notification_policy IN ('due','both'))
         AND tasks.due_at IS NOT NULL
-        AND CASE
-              WHEN length(tasks.due_at) = 10 THEN tasks.due_at
-              ELSE date(tasks.due_at, 'localtime')
-            END <= ?
       ORDER BY tasks.due_at, tasks.position, tasks.id`,
-  ).all(today);
+  ).all().filter(row => {
+    const day = /^\d{4}-\d{2}-\d{2}$/.test(row.due_at) ? row.due_at :
+      Number.isFinite(Date.parse(row.due_at)) ? localDateKey(new Date(row.due_at)) : null;
+    return day !== null && day <= today;
+  });
   const commitments = db.prepare(
-    `SELECT id, title, details, source_kind, source_ref
+    `SELECT id, title, details, source_kind, source_ref, due_at,
+            (SELECT next_action FROM cove_responsibilities WHERE ref_kind='commitment' AND ref_id=commitments.id) AS next_action
        FROM commitments
       WHERE status = 'open'
         AND kind IN ('promise','follow_up')
         AND due_at IS NOT NULL
-        AND CASE
-              WHEN length(due_at) = 10 THEN due_at
-              ELSE date(due_at, 'localtime')
-            END <= ?
         AND counterparty IS NOT NULL
         AND trim(counterparty) <> ''
       ORDER BY due_at, id`,
-  ).all(today);
+  ).all().filter(row => {
+    const day = /^\d{4}-\d{2}-\d{2}$/.test(row.due_at) ? row.due_at :
+      Number.isFinite(Date.parse(row.due_at)) ? localDateKey(new Date(row.due_at)) : null;
+    return day !== null && day <= today;
+  });
   const candidates = [
     ...tasks.map((task) => ({
       refKind: "task",
       refId: task.id,
       title: task.title || "Task",
+      dueAt: task.due_at, nextAction: task.next_action,
       provenance: taskProvenance(task),
     })),
     ...commitments.map((commitment) => ({
       refKind: "commitment",
       refId: commitment.id,
       title: commitment.title || "Commitment",
+      dueAt: commitment.due_at, nextAction: commitment.next_action,
       provenance: commitmentProvenance(commitment),
     })),
   ];
@@ -357,9 +384,10 @@ async function runDeterministicFloor(db, config, token, now = new Date()) {
   // The day's one text goes out first, then each item gets at most a banner.
   // Six things due must not cost six interruptions, and a heavy day must not
   // spend the banner budget and leave the off-machine signal unsent.
-  const open = candidates.filter((candidate) =>
-    stillOpen(db, candidate.refKind, candidate.refId));
-  const directCount = open.filter((candidate) => candidate.provenance.direct).length;
+  const open = unseenFloorCandidates(db, candidates.filter((candidate) =>
+    stillOpen(db, candidate.refKind, candidate.refId)));
+  const direct = open.filter((candidate) => candidate.provenance.direct);
+  const directCount = direct.length;
   // Only items the owner authored are counted, so the text stays true to the
   // rule that email and meeting content never reaches the phone.
   if (directCount > 0 && configuredChannelExpected(config)) {
@@ -369,30 +397,41 @@ async function runDeterministicFloor(db, config, token, now = new Date()) {
       refId: `__floor_daily__:${today}`,
       requestedLevel: "text",
       maximumLevel: "text",
-      reason: `Due today, not done: ${directCount} of your own items.`,
+      reason: floorText(direct[0], directCount),
       now,
     });
     await surfaceSuppressionRows(summary.suppressionRows, now);
     if (summary.row) {
-      if (summary.finalLevel === "text") {
+      if (!stillOpen(db, direct[0].refKind, direct[0].refId)) {
+        finalizeAttentionDelivery(db, { id: summary.row.id, level: "suppressed", suppressedReason: "completed_since_snapshot", now });
+      } else if (summary.finalLevel === "text") {
+        recordFloorNotice(db, direct[0], now);
         const outcome = deliverTextReminder(db, config, token, {
           kind: "floor",
           id: `daily:${today}`,
-          title: `${directCount} due today`,
-          message: floorText(directCount),
+          title: plainAttentionText(direct[0].nextAction || direct[0].title),
+          message: floorText(direct[0], directCount),
         });
+        if (outcome === "none") releaseFloorNotice(db, direct[0]);
         // A fallback banner is a real interruption, so it starts the cooldown
         // that stops this lane retrying a broken channel every minute.
-        finalizeAttentionDelivery(db, {
-          id: summary.row.id,
-          level: outcome === "text"
-            ? "text"
-            : outcome === "fallback_banner"
-              ? "banner"
-              : "suppressed",
-          suppressedReason: outcome === "none" ? "delivery_failed" : undefined,
-          now,
-        });
+        if (outcome === "uncertain") {
+          // Keep the original reservation: Messages may have accepted the text
+          // even if the connection and fallback both timed out. No blind replay.
+          db.prepare("UPDATE cove_attention_ledger SET suppressed_reason='delivery_uncertain' WHERE id=?")
+            .run(summary.row.id);
+        } else {
+          finalizeAttentionDelivery(db, {
+            id: summary.row.id,
+            level: outcome === "text"
+              ? "text"
+              : outcome === "fallback_banner"
+                ? "banner"
+                : "suppressed",
+            suppressedReason: outcome === "none" ? "delivery_failed" : undefined,
+            now,
+          });
+        }
       } else {
         // The per-item banners below still carry the day.
         finalizeAttentionDelivery(db, {
@@ -405,9 +444,11 @@ async function runDeterministicFloor(db, config, token, now = new Date()) {
     }
   }
 
-  for (const candidate of open) {
-    const title = plainAttentionText(candidate.title) || "Item";
-    const reason = `Due today and still open in Cove: ${title}. Check the next step.`;
+  for (const candidate of unseenFloorCandidates(db, open)) {
+    const title = plainAttentionText(candidate.nextAction || candidate.title) || "Item";
+    const dueDay = /^\d{4}-\d{2}-\d{2}$/.test(candidate.dueAt) ? candidate.dueAt : localDateKey(new Date(candidate.dueAt));
+    const dueLabel = dueDay < today ? "Overdue and still open in Cove" : "Due today and still open in Cove";
+    const reason = `${dueLabel}: ${title}. Choose the next step or a new date in Cove.`;
     const allocation = allocateAttention(db, {
       kind: "floor_nudge",
       refKind: candidate.refKind,
@@ -418,7 +459,7 @@ async function runDeterministicFloor(db, config, token, now = new Date()) {
       now,
     });
     await surfaceSuppressionRows(allocation.suppressionRows, now);
-    if (!allocation.row) continue;
+    if (!allocation.row || allocation.finalLevel !== "banner") continue;
 
     // The snapshot only nominates candidates. Re-read immediately before any
     // external delivery so a completion during this tick wins.
@@ -433,14 +474,24 @@ async function runDeterministicFloor(db, config, token, now = new Date()) {
     }
 
     const banner = candidate.provenance.direct
-      ? `Due today and still open in Cove: ${title}. Check the next step.`
-      : `Due today and still open in Cove. ${sanitizedNonDirectText(title, candidate.provenance.prefix)}`;
+      ? reason
+      : `${dueLabel}. ${sanitizedNonDirectText(title, candidate.provenance.prefix)}`;
     let bannerDelivered = false;
+    let bannerUncertain = false;
+    // Claim before transport. A crash or uncertain handoff must not cause a
+    // repeat of the unchanged item on the next day.
+    recordFloorNotice(db, candidate, now);
     try {
-      notifyAttentionBanner(banner);
+      notifyAttentionBanner(banner, "Needs your attention", notificationUrl({ taskId: candidate.refKind === "task" ? candidate.refId : undefined, attentionId: allocation.row.id }));
       bannerDelivered = true;
     } catch (error) {
+      bannerUncertain = error?.deliveryUncertain === true || textDeliveryUncertain(error);
+      if (!bannerUncertain) releaseFloorNotice(db, candidate);
       console.error(`Floor nudge ${candidate.refId} banner failed:`, errorMessage(error));
+    }
+    if (bannerUncertain) {
+      db.prepare("UPDATE cove_attention_ledger SET suppressed_reason='delivery_uncertain' WHERE id=?").run(allocation.row.id);
+      continue;
     }
     finalizeAttentionDelivery(db, {
       id: allocation.row.id,
@@ -495,19 +546,24 @@ function recordDeliveryFailure(db, input) {
 }
 
 /**
- * Returns "text" when the phone got it, "fallback_banner" when only the screen
- * did, "none" when nothing landed. Callers must record a successful fallback as
+ * Returns "text" when the configured transport accepted it, "fallback_banner"
+ * when macOS accepted the reminder, "uncertain" when a timed-out send has no confirmed fallback, and "none"
+ * for a known failure of both paths. Callers must record a successful fallback as
  * a real delivery: a suppressed row starts no cooldown, so an every-minute lane
  * would retry a broken channel forever and banner on each pass.
  */
 function deliverTextReminder(db, config, token, input) {
   try {
-    if (!notifyConfigured(config, token, input.message)) {
+    if (!recordedDelivery(config?.channel, `${input.kind}:${input.id}`, input.message, () => {
+      if (!notifyConfigured(config, token, input.message)) throw new Error("Configured text channel is unavailable.");
+      return true;
+    })) {
       throw new Error("Configured text channel is unavailable.");
     }
     return "text";
   } catch (error) {
     const failure = errorMessage(error);
+    const uncertain = error?.deliveryUncertain === true || textDeliveryUncertain(failure);
     console.error(
       `${input.kind === "scheduled" ? "Scheduled reminder" : "Reminder for task"} ${input.id} configured channel failed:`,
       failure,
@@ -524,16 +580,19 @@ function deliverTextReminder(db, config, token, input) {
         errorMessage(recordError),
       );
     }
+    let fallbackUncertain = false;
     try {
-      notifyTextFailure(input.bannerTitle ?? input.title);
+      if (input.nativeDelivered) return "fallback_banner";
+      notifyTextFailure(input, uncertain);
       return "fallback_banner";
     } catch (fallbackError) {
+      fallbackUncertain = fallbackError?.deliveryUncertain === true || textDeliveryUncertain(fallbackError);
       console.error(
         `Reminder ${input.id} fallback native notification failed:`,
         errorMessage(fallbackError),
       );
     }
-    return "none";
+    return uncertain || fallbackUncertain ? "uncertain" : "none";
   }
 }
 
@@ -580,7 +639,7 @@ function fireScheduledReminders(db, config, token) {
     try {
       let nativeFailure = null;
       try {
-        notifyNative(title);
+        notifyNative(title, entry.task_id ?? entry.id);
       } catch (error) {
         nativeFailure = errorMessage(error);
         console.error(
@@ -596,6 +655,8 @@ function fireScheduledReminders(db, config, token) {
         deliverTextReminder(db, config, token, {
           kind: "scheduled",
           id: entry.id ?? name,
+          taskId: entry.task_id,
+          nativeDelivered: nativeFailure === null,
           title,
           message: directAuthor
             ? `Cove reminder: ${title}`
@@ -748,7 +809,7 @@ async function firePredeadlineNudges(db, dueTaskIds, now) {
       : `This is your advance reminder. ${sanitizedNonDirectText(title, provenance.prefix)}`;
     let delivered = false;
     try {
-      notifyAttentionBanner(banner, "Upcoming task");
+      notifyAttentionBanner(banner, "Upcoming task", notificationUrl({ taskId: task.id, attentionId: allocation.row.id }));
       delivered = true;
     } catch (error) {
       console.error(`Nudge for task ${task.id} native notification failed:`, errorMessage(error));
@@ -783,7 +844,10 @@ async function main() {
   fireScheduledReminders(db, config, token);
   if (!db) return;
   const now = attentionNow();
-  await runDeterministicFloor(db, config, token, now);
+  try { drainNotificationReminders({db, dataDir:path.dirname(dbPath), now,
+    notify:task=>notifyNative(sanitizedNonDirectText(plainAttentionText(task.title), "your requested reminder"),task.id),
+    onFailure:failure=>recordNativeOnlyFailure(db,{kind:"notification-repeat",...failure}),
+  }); } catch (error) { console.error("Requested reminder check failed:", errorMessage(error)); }
   // Only explicit new agent settings activate the additional native checks.
   // Existing installs keep their reminder behavior until their setup is changed.
   try {
@@ -795,8 +859,8 @@ async function main() {
       },
       notify: ({ id, message, taskId }) => {
         const command = nativeNotificationCommand(message, { title: "Cove", subtitle: "On your radar", group: `follow-through-${id}`,
-          openUrl: `${coveEnv("BUDDY_APP_URL") ?? "http://127.0.0.1:3200"}/tasks${taskId ? `?task=${encodeURIComponent(taskId)}` : ""}` }, nativeNotificationDependencies);
-        execFileSync(command.executable, command.args, { timeout: 10_000, maxBuffer: 64_000 });
+          openUrl: notificationUrl({ taskId, followThroughId: id }, coveEnv("BUDDY_APP_URL") ?? "http://127.0.0.1:3200") }, nativeNotificationDependencies);
+        recordedDelivery("native", `follow-through:${id}`, message, () => execFileSync(command.executable, command.args, { timeout: 10_000, maxBuffer: 64_000 }));
       },
     });
   }
@@ -804,6 +868,9 @@ async function main() {
   } catch (error) {
     console.error("Follow-through check failed; explicit reminders will continue:", errorMessage(error));
   }
+
+  // Refresh known meetings before the optional floor spends shared capacity.
+  await runDeterministicFloor(db, config, token, now);
 
   const due = db
     .prepare(
@@ -855,7 +922,7 @@ async function main() {
         // sanitized and labelled before it borrows Cove's credibility.
         notifyNative(provenance.direct
           ? title
-          : sanitizedNonDirectText(title, provenance.prefix));
+          : sanitizedNonDirectText(title, provenance.prefix), task.id);
       } catch (error) {
         nativeFailure = errorMessage(error);
         console.error(`Reminder for task ${task.id} native notification failed:`, nativeFailure);
@@ -865,6 +932,7 @@ async function main() {
       deliverTextReminder(db, config, token, {
         kind: "task",
         id: task.id,
+        nativeDelivered: Boolean(task.remind_native) && nativeFailure === null,
         title,
         bannerTitle: provenance.direct
           ? title

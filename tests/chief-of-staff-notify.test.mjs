@@ -7,11 +7,13 @@ import { applyChiefOfStaffActions } from "../src/lib/chief-of-staff/driver.ts";
 import { buildChiefOfStaffSnapshot } from "../src/lib/chief-of-staff/snapshot.ts";
 import { enqueueChiefOfStaffWake } from "../src/lib/chief-of-staff/storage.ts";
 import { openLocalDatabase } from "../src/lib/local/database.ts";
-import { getQuietCurrentSnapshot } from "../src/lib/quiet-current/store.ts";
+import { getQuietCurrentSnapshot, setQuietCurrentNowForTests } from "../src/lib/quiet-current/store.ts";
 
 process.env.COVE_SALES_PIPELINE = "1";
 
 function fixture(t) {
+  setQuietCurrentNowForTests(new Date("2026-09-03T18:30:00.000Z"));
+  t.after(() => setQuietCurrentNowForTests(undefined));
   const dataDir = mkdtempSync(path.join(os.tmpdir(), "cove-cos-notify-"));
   const dbPath = path.join(dataDir, "cove.db");
   const db = openLocalDatabase(dbPath);
@@ -727,9 +729,9 @@ test("attention budget preserves suppressions ahead of bounded reminder detail",
   for (let index = 0; index < 3; index += 1) {
     assert.match(section, new RegExp(`suppressed-ref-${index}`));
   }
-  for (let index = 0; index < 8; index += 1) {
-    assert.match(section, new RegExp(`task reminder-${index}`));
-  }
+  assert.match(section, /task reminder-0/);
+  assert.match(section, /Coverage: included \d+\/\d+ records; omitted \d+\./);
+  assert.ok(section.length <= 1600);
   assert.doesNotMatch(section, /\[section truncated\]/);
 });
 

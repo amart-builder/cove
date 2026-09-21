@@ -2,6 +2,9 @@ import { existsSync } from "node:fs";
 
 export const COVE_NOTIFICATION_ICON_RELATIVE_PATH =
   "public/cove-notification-icon.png";
+// The SSH connection gets 10 seconds. Leave a separate bounded window for
+// Messages to handle the AppleScript instead of killing it at that same limit.
+export const REMOTE_IMESSAGE_TIMEOUT_MS = 30_000;
 
 export function appleScriptLiteral(value) {
   return `"${String(value)
@@ -108,4 +111,12 @@ export function nativeNotificationCommand(
     executable: osascriptPath,
     args: nativeNotificationArgs(message, { title, subtitle, sound }),
   };
+}
+
+/** An SSH connection failure occurs before the remote Messages command runs.
+ * A generic command timeout can happen after handoff and remains uncertain. */
+export function textDeliveryUncertain(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/^ssh: connect to host [^\n]+ port \d+:[^\n]*(?:timed out|refused|unreachable)/im.test(message)) return false;
+  return /\b(?:ETIMEDOUT|timeout)\b|timed? out/i.test(message);
 }

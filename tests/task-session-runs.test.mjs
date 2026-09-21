@@ -47,6 +47,17 @@ import {
   LOCAL_START_DAY_RECEIPT,
 } from '../src/components/tasks/useDayRitual.ts';
 
+// Every path that falls back to coveDataDir() must land in a scratch directory,
+// never in <cwd>/data: a fresh checkout's verify run must not mint a database
+// or a token the setup playbook would then treat as an existing install.
+import { mkdtempSync as isolatedMkdtemp, rmSync as isolatedRm } from 'node:fs';
+import isolatedOs from 'node:os';
+import isolatedPath from 'node:path';
+const ISOLATED_DATA_DIR = isolatedMkdtemp(isolatedPath.join(isolatedOs.tmpdir(), 'cove-test-data-'));
+process.env.COVE_DATA_DIR = ISOLATED_DATA_DIR;
+delete process.env.COVE_DB_PATH;
+test.after(() => isolatedRm(ISOLATED_DATA_DIR, { recursive: true, force: true }));
+
 test('source guard: local Start my day does not launch task sessions', () => {
   const source = readFileSync(
     new URL('../src/components/tasks/useDayRitual.ts', import.meta.url),
@@ -500,7 +511,7 @@ test('task sessions fall back to Cove outputs when no Atlas project resolves', a
   assert.equal((await response.json()).runs[0].resumeCommand, run.resumeCommand);
 });
 
-test('task sessions resolve a project from the title and launch from that workspace', (t) => {
+test('task sessions keep title-only project mentions in their own output folder', (t) => {
   const projectDir = '/Users/example/Atlas/Projects/newsletter';
   const hints = [];
   const { manager, spawnCalls } = fixture(t, {
@@ -519,17 +530,9 @@ test('task sessions resolve a project from the title and launch from that worksp
     },
   });
 
-  assert.deepEqual(hints, ['Finish newsletter issues 2 and 3']);
-  assert.equal(run.workspacePath, projectDir);
-  assert.equal(spawnCalls[0].options.cwd, projectDir);
-  assert.match(
-    run.resumeCommand,
-    new RegExp(`^cd '${projectDir}' && claude --resume '${run.claudeSessionId}' --permission-mode plan --safe-mode`),
-  );
-  assert.match(run.resumeCommand, /--tools 'Glob,Grep,Read,Skill,WebFetch,WebSearch'/);
-  assert.match(run.resumeCommand, /--strict-mcp-config/);
-  assert.match(run.resumeCommand, /--no-chrome$/);
-  assert.notEqual(run.outputDir, run.workspacePath);
+  assert.deepEqual(hints, []);
+  assert.equal(run.workspacePath, undefined);
+  assert.equal(spawnCalls[0].options.cwd, run.outputDir);
 });
 
 test('task session run payload omits resumeCommand without a Claude session id', async (t) => {
@@ -1722,7 +1725,7 @@ test('selected Claude task model bypasses the router and survives persistence', 
 
 test('Codex task execution captures native session, refuses false success, and resumes with approvals', async t => {
   const opened = [];
-  const f = fixture(t, { env: { COVE_CODEX_BIN: '/fake/codex', COVE_MODEL_ROUTER: '0' }, openTerminal: async command => opened.push(command) });
+  const f = fixture(t, { env: { COVE_CODEX_BIN: '/fake/codex', COVE_MODEL_ROUTER: '0' }, openDesktop: async url => opened.push(url) });
   const auth = path.join(f.dir, 'operator-auth'); mkdirSync(auth); writeFileSync(path.join(auth, 'auth.json'), '{}');
   const settings = { version: 1, provider: 'codex', model: 'gpt-6-astra', effort: 'low' };
   writeFileSync(path.join(f.dir, 'agent-settings.json'), JSON.stringify(settings));
@@ -1730,7 +1733,7 @@ test('Codex task execution captures native session, refuses false success, and r
   const env = { COVE_CODEX_BIN: '/fake/codex', COVE_MODEL_ROUTER: '0', CODEX_HOME: auth };
   f.manager.close();
   const commands = []; const child = fakeChild(47000);
-  const manager = createTaskSessionManager({ dbPath: f.dbPath, dataDir: f.dir, env, spawnImpl: (exe, args, options) => { commands.push({ exe, args, options }); return child; }, routeModel: () => { throw new Error('unexpected router'); }, markSession: () => { throw new Error('unexpected Claude marker'); }, resolveProjectDirectory: () => null, openTerminal: async command => opened.push(command) });
+  const manager = createTaskSessionManager({ dbPath: f.dbPath, dataDir: f.dir, env, spawnImpl: (exe, args, options) => { commands.push({ exe, args, options }); return child; }, routeModel: () => { throw new Error('unexpected router'); }, markSession: () => { throw new Error('unexpected Claude marker'); }, resolveProjectDirectory: () => null, openDesktop: async url => opened.push(url) });
   t.after(() => manager.close());
   const run = manager.launch({ taskId: 'codex-task', owner: 'together', promptSnapshot: SNAPSHOT });
   assert.equal(run.provider, 'codex'); assert.equal(run.claudeSessionId, undefined);
@@ -1749,5 +1752,39 @@ test('Codex task execution captures native session, refuses false success, and r
   assert.equal(done.status, 'output_ready'); assert.equal(done.providerSessionId, 'native-codex-session');
   assert.equal(done.resultSummary, 'A verified plan.'); assert.doesNotMatch(done.hint, /Claude/);
   await manager.resume(run.id);
-  assert.match(opened[0], /native-codex-session/); assert.match(opened[0], /on-request/); assert.doesNotMatch(opened[0], /never|bypass/);
+  assert.equal(opened[0], 'codex://threads/native-codex-session');
+});
+
+test('single-provider setup rejects an unconnected override before spawning', t => {
+  const f = fixture(t);
+  writeFileSync(path.join(f.dir, 'agent-settings.json'), JSON.stringify({ version: 1, provider: 'claude', model: 'claude-fable-5-1', effort: 'low' }));
+  assert.throws(() => f.manager.launch({ taskId: 'unconnected', provider: 'codex', owner: 'together', promptSnapshot: SNAPSHOT }), /Connect and verify codex/);
+  assert.equal(f.spawnCalls.length, 0);
+});
+
+test('task sessions preserve the persisted explicit project over a stale browser project', (t) => {
+  const hints=[];
+  const {manager,spawnCalls,dbPath}=fixture(t,{resolveProjectDirectory:hint=>{hints.push(hint);return `/work/${hint}`;}});
+  const db=new Database(dbPath);
+  db.prepare("INSERT INTO tasks(id,title,project,status,created_at,updated_at) VALUES('assigned','Prepare proposals','catalyst','open',?,?)").run(new Date().toISOString(),new Date().toISOString());db.close();
+  const run=manager.launch({taskId:'assigned',owner:'together',mode:'planning',promptSnapshot:{...SNAPSHOT,project:'Radius EHR'}});
+  assert.deepEqual(hints,['catalyst']);
+  assert.equal(run.promptSnapshot.project,'catalyst');
+  assert.equal(run.workspacePath,'/work/catalyst');
+  assert.equal(spawnCalls[0].options.cwd,'/work/catalyst');
+});
+test('task sessions do not turn partial project matches into a workspace', (t) => {
+  const {manager,spawnCalls,dbPath}=fixture(t,{resolveProjectDirectory:()=>'/work/atlas-system'});
+  const db=new Database(dbPath);db.prepare("INSERT INTO tasks(id,title,project,status,created_at,updated_at) VALUES('ambiguous','Draft a plan','Atlas','open',?,?)").run(new Date().toISOString(),new Date().toISOString());db.close();
+  const run=manager.launch({taskId:'ambiguous',owner:'together',mode:'planning',promptSnapshot:{...SNAPSHOT,project:'Atlas'}});
+  assert.equal(run.workspacePath,undefined);
+  assert.equal(spawnCalls[0].options.cwd,run.outputDir);
+});
+test('persisted unassigned work ignores stale project snapshots and title hints', (t) => {
+  const {manager,spawnCalls,dbPath}=fixture(t,{resolveProjectDirectory:()=>{throw new Error('No project should be inferred');}});
+  const db=new Database(dbPath);db.prepare("INSERT INTO tasks(id,title,project,status,created_at,updated_at) VALUES('unassigned','Review Radius EHR notes','','open',?,?)").run(new Date().toISOString(),new Date().toISOString());db.close();
+  const run=manager.launch({taskId:'unassigned',owner:'together',mode:'planning',promptSnapshot:{...SNAPSHOT,title:'Review Radius EHR notes',project:'Radius EHR'}});
+  assert.equal(run.promptSnapshot.project,undefined);
+  assert.equal(run.workspacePath,undefined);
+  assert.equal(spawnCalls[0].options.cwd,run.outputDir);
 });

@@ -368,6 +368,7 @@ test("analyst validation rejects task and waiting-on due dates at or before proc
 test("meeting research enables Codex web search without changing the read-only sandbox", () => {
   const attempt = createCodexJobAttempt({
     executable: process.execPath,
+    codexConfigProbe: () => ({ status: 1, stderr: "Error: No MCP server named '1password' found." }),
     prompt: "Research the attendee.",
     webSearch: true,
   });
@@ -906,4 +907,30 @@ test("short Gmail claim persists the envelope before completing ingestion", asyn
   assert.equal(db.prepare("SELECT status FROM cove_message_ingestion WHERE message_id = 'claimed'").get().status, "processed");
   assert.match(db.prepare("SELECT envelope_json FROM meeting_analysis_members WHERE gmail_message_id = 'claimed'").get().envelope_json, /pat@example.com/);
   db.close();
+});
+
+test("allowance waits preserve attempts, honor retry time, and resume even on the fifth claim", async () => {
+ const dbPath=databasePath();const at='2026-09-10T12:00:00.000Z';const retryAt='2026-09-10T13:00:00.000Z';
+ enqueueMeetingEnvelope(envelope('allowance',at),{dbPath,now:new Date(at)});
+ const db=new Database(dbPath);db.prepare('UPDATE meeting_analysis_jobs SET attempts=4').run();db.close();
+ let calls=0;let fallbacks=0;
+ const options={dbPath,dataDir:path.dirname(dbPath),baseUrl:'http://127.0.0.1:3200',maxJobs:1,
+  legacyFallback:async()=>{fallbacks++;},executeActionImpl:async()=>null,
+  runJobImpl:async(input)=>{calls++;return {ok:false,error:{code:'usage_denied',lane:input.lane,message:`background_usage_limit: routine cove_budget_retry_at=${retryAt}`}};}};
+ const paused=await runMeetingAnalysisSweep({...options,now:()=>new Date(at)});
+ assert.deepEqual(paused,{processed:0,failed:0,dead:0});assert.equal(fallbacks,0);
+ const check=new Database(dbPath);const row=check.prepare('SELECT * FROM meeting_analysis_jobs').get();
+ assert.equal(row.status,'pending');assert.equal(row.attempts,4);assert.equal(row.not_before,retryAt);assert.equal(row.lease,null);
+ assert.equal(check.prepare('SELECT count(*) FROM cove_failure_inbox').pluck().get(),0);check.close();
+ await runMeetingAnalysisSweep({...options,now:()=>new Date('2026-09-10T12:59:00.000Z')});assert.equal(calls,1);
+ const finished=await runMeetingAnalysisSweep({...options,now:()=>new Date(retryAt),runJobImpl:async(input)=>({ok:true,lane:input.lane,text:JSON.stringify(artifact()),value:artifact()})});
+ assert.equal(finished.processed,1);assert.equal(fallbacks,0);
+});
+
+test('invalid or unbounded retry times remain real failures',async()=>{
+ for(const retryAt of ['not-a-date','2026-10-20T13:00:00Z','2026-09-09T13:00:00Z']) {
+  const dbPath=databasePath();const at='2026-09-10T12:00:00.000Z';enqueueMeetingEnvelope(envelope(`invalid-${retryAt}`,at),{dbPath,now:new Date(at)});
+  const result=await runMeetingAnalysisSweep({dbPath,dataDir:path.dirname(dbPath),baseUrl:'http://127.0.0.1:3200',now:()=>new Date(at),maxJobs:1,legacyFallback:async()=>{},runJobImpl:async(input)=>({ok:false,error:{code:'usage_denied',lane:input.lane,message:`background_usage_limit: cove_budget_retry_at=${retryAt}`}})});
+  assert.equal(result.failed,1);
+ }
 });

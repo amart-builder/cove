@@ -6,14 +6,21 @@ import {
   localIMessageArgs,
   nativeNotificationCommand,
   remoteIMessageArgs,
+  REMOTE_IMESSAGE_TIMEOUT_MS,
 } from "../intake/notification-transport.mjs";
 import { coveConfigPath, coveEnv } from "../env-runtime.mjs";
 
-function reminderConfig(repoDir) {
+export function attentionReminderConfigPath({ dataDir, repoDir = process.cwd(), env = process.env } = {}) {
+  return coveEnv("REMINDER_CONFIG_PATH", env) ?? coveConfigPath(
+    dataDir ?? coveEnv("DATA_DIR", env) ?? path.join(repoDir, "data"),
+    "reminders.json",
+  );
+}
+
+function reminderConfig(input) {
   try {
     return JSON.parse(readFileSync(
-      coveEnv("REMINDER_CONFIG_PATH") ??
-        coveConfigPath(path.join(repoDir, "data"), "reminders.json"),
+      attentionReminderConfigPath(input),
       "utf8",
     ));
   } catch {
@@ -36,13 +43,14 @@ function telegramToken() {
 export function createAttentionTransport(input = {}) {
   const repoDir = input.repoDir ?? process.cwd();
   const execute = input.execFileSyncImpl ?? execFileSync;
-  const config = input.config ?? reminderConfig(repoDir);
+  const config = input.config ?? reminderConfig({ ...input, repoDir });
   const token = input.telegramToken ?? telegramToken();
   return {
-    banner(message, subtitle = "Needs your attention") {
+    banner(message, subtitle = "Needs your attention", openUrl) {
       const command = nativeNotificationCommand(message, {
         title: "Cove",
         subtitle,
+        openUrl,
         sound: "Glass",
       }, {
         notificationAppPath: input.notificationAppPath ??
@@ -74,7 +82,7 @@ export function createAttentionTransport(input = {}) {
             config.remote_host,
             config.imessage_to,
             message,
-          ), { timeout: 10_000 });
+          ), { timeout: REMOTE_IMESSAGE_TIMEOUT_MS });
         } else {
           execute("osascript", localIMessageArgs(config.imessage_to, message));
         }

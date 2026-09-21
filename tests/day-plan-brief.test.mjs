@@ -1,3 +1,4 @@
+import { openLocalDatabase } from "../src/lib/local/database.ts";
 import assert from 'node:assert/strict';
 import {
   chmodSync,
@@ -67,6 +68,7 @@ import {
 } from '../src/lib/claude-execution/morning-brief-writer.ts';
 import {
   enqueueDueMorningBrief,
+  watchMorningBriefQueue,
   runOneMorningBrief,
 } from '../src/lib/claude-execution/worker.ts';
 import { writeMorningBriefInput } from '../src/lib/claude-execution/brief-inputs.ts';
@@ -76,6 +78,14 @@ import {
   parseBacktestArgs,
 } from '../scripts/brief-backtest.mjs';
 import { checkLatestBriefWriter } from '../scripts/cove-check-brief-writer.mjs';
+
+// Every path that falls back to coveDataDir() must land in a scratch directory,
+// never in <cwd>/data: a fresh checkout's verify run must not mint a database,
+// a CSRF token or relay files the setup playbook would then treat as existing.
+const ISOLATED_DATA_DIR = mkdtempSync(path.join(os.tmpdir(), 'cove-test-data-'));
+process.env.COVE_DATA_DIR = ISOLATED_DATA_DIR;
+delete process.env.COVE_DB_PATH;
+test.after(() => rmSync(ISOLATED_DATA_DIR, { recursive: true, force: true }));
 
 const CLOCK = '2026-07-14T13:00:00.000Z';
 const ArrivalStepBriefComponent = ArrivalStepBrief.default ?? ArrivalStepBrief;
@@ -179,19 +189,61 @@ function briefFixture(t) {
   return { dir, store, setNow: (value) => { nowIso = value; } };
 }
 
+function currentPlanningFixture(output, input) {
+  if (!input.includes("CURRENT_WORKING_VIEW=")) return output;
+  try {
+    const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/.exec(output.trim());
+    const raw = JSON.parse(fenced?.[1] ?? output);
+    const wire = raw.structured_output ?? raw;
+    if (!Array.isArray(wire.existing_task_candidates)) return output;
+    const view = JSON.parse(input.split("\n").find(line => line.startsWith("CURRENT_WORKING_VIEW=")).slice("CURRENT_WORKING_VIEW=".length));
+    const references = JSON.parse(input.split("\n").find(line => line.startsWith("SOURCE_REFERENCES=")).slice("SOURCE_REFERENCES=".length));
+    const actions = wire.existing_task_candidates.flatMap((candidate) => {
+      const record = view.records.find(
+        (row) =>
+          row.source.kind === "task" && row.source.id === candidate.task_id,
+      );
+      if (!record) return [];
+      return [
+        {
+          source: references.find(ref => ref.source.kind === record.source.kind && ref.source.id === record.source.id).key,
+          proposal: null,
+          supportingSources: [],
+          nextAction: record.title,
+          rationale: candidate.why_today,
+          assumptions: [],
+          owner: candidate.suggested_owner,
+          state: "ready",
+          plannedFor: null,
+          nextCheckAt: new Date(Date.parse(view.now) + 3600000).toISOString(),
+        },
+      ];
+    });
+    const result = { actions, watches: [], questions: [], narrativeParagraphs: wire.narrative_paragraphs };
+    return JSON.stringify(
+      raw.structured_output ? { ...raw, structured_output: result } : result,
+    );
+  } catch {
+    return output;
+  }
+}
+
 function fakeClaude(dir, output) {
   const executable = path.join(dir, 'fake-claude');
   const capture = path.join(dir, 'capture.json');
-  writeFileSync(executable, `#!/usr/bin/env node
+  writeFileSync(executable,
+    `#!/usr/bin/env node
 const fs = require('node:fs');
+${currentPlanningFixture.toString()}
 let input = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', chunk => input += chunk);
 process.stdin.on('end', () => {
   fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ args: process.argv.slice(2), input }));
-  process.stdout.write(${JSON.stringify(output)});
+  process.stdout.write(currentPlanningFixture(${JSON.stringify(output)},input));
 });
-`);
+`,
+  );
   chmodSync(executable, 0o700);
   return { executable, capture };
 }
@@ -200,8 +252,11 @@ function fakeCodex(dir, outputs, exitCodes = [], stdoutBytes = 0) {
   const executable = path.join(dir, `fake-codex-${Math.random()}`);
   const capture = path.join(dir, `codex-capture-${Math.random()}.jsonl`);
   const state = path.join(dir, `codex-state-${Math.random()}`);
-  writeFileSync(executable, `#!/usr/bin/env node
+  writeFileSync(executable,
+    `#!/usr/bin/env node
 const fs = require('node:fs');
+if (process.argv[2] === 'mcp') { console.log('{"name":"1password"}'); process.exit(0); }
+${currentPlanningFixture.toString()}
 let input = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', chunk => input += chunk);
@@ -215,14 +270,23 @@ process.stdin.on('end', () => {
   if (exitCode !== 0) process.exit(exitCode);
   process.stdout.write('x'.repeat(${JSON.stringify(stdoutBytes)}));
   const outputPath = args[args.indexOf('--output-last-message') + 1];
-  fs.writeFileSync(outputPath, ${JSON.stringify(outputs)}[index] ?? '');
+  fs.writeFileSync(outputPath, currentPlanningFixture(${JSON.stringify(outputs)}[index] ?? '',input));
 });
-`);
+`,
+  );
   chmodSync(executable, 0o700);
   return { executable, capture };
 }
 
 function briefWorkerOptions(dir, store, claudePath, collectBriefSources) {
+  const modelDb = openLocalDatabase(path.join(dir, "cove.db"));
+  for (const id of ["task-a", "task-b", "task-c"])
+    modelDb
+      .prepare(
+        "INSERT OR IGNORE INTO tasks(id,title,status,created_at,updated_at) VALUES(?,?,'open',?,?)",
+      )
+      .run(id, `Task ${id}`, CLOCK, CLOCK);
+  modelDb.close();
   const emptyMcpConfigPath = path.join(dir, 'empty-mcp.json');
   writeFileSync(emptyMcpConfigPath, '{"mcpServers":{}}');
   return {
@@ -475,7 +539,8 @@ test('the collector marks the whole eligible board candidate_ok', async (t) => {
     targetTimezone: 'America/Los_Angeles',
     fetchImpl: async (url) => ({
       ok: true,
-      json: async () => (String(url).includes('task_columns') ? columns : tasks),
+      json: async () =>
+        String(url).includes('task_columns') ? columns : tasks,
     }),
   });
   assert.deepEqual([...collected.knownTaskIds].sort(), ['t1', 't4', 't5']);
@@ -1688,7 +1753,7 @@ test('ensure keeps at most three items from a larger deterministic pool', (t) =>
 // ---------------------------------------------------------------------------
 
 test('the brief command is the exact bounded toolless invocation', () => {
-  assert.equal(MORNING_BRIEF_PROMPT_VERSION, 18);
+  assert.equal(MORNING_BRIEF_PROMPT_VERSION, 29);
   const repoCwd = process.cwd();
   const ownerPrompt = readFileSync(path.join(repoCwd, 'prompts', 'chief-of-staff.md'), 'utf8').trimEnd();
   assert.ok(ownerPrompt.includes(
@@ -1885,12 +1950,14 @@ test('the Codex writer command uses a private read-only temp workspace', () => {
   const attempt = createCodexMorningBriefAttempt({
     prompt: 'STRICT JSON PROMPT',
     executable: '/bin/echo',
+    codexConfigProbe: () => ({ status: 0, stdout: '{"name":"1password"}' }),
   });
   try {
     assert.notEqual(attempt.command.cwd, process.cwd());
     assert.equal(attempt.command.stdin, 'STRICT JSON PROMPT');
     assert.deepEqual(attempt.command.args, [
       'exec', '--sandbox', 'read-only', '--skip-git-repo-check',
+      '-c', 'mcp_servers.1password.enabled=false',
       '-m', 'gpt-5.6-sol', '-c', 'model_reasoning_effort=high',
       '--output-last-message', attempt.outputPath, '-',
     ]);
@@ -1923,7 +1990,7 @@ test('morning arrival always computes exactly brief then plan', () => {
   assert.equal(morningArrivalSteps().includes('extras'), false);
 });
 
-test('arrival brief presentation suppresses fallback body only for a real stalled hole', () => {
+test('arrival brief presentation suppresses task fallbacks even with an unreadable attached artifact', () => {
   const stalled = morningBriefArrivalPresentation({
     paragraphs: ['Deterministic fallback sentence.'],
     hasBriefContent: false,
@@ -1942,7 +2009,7 @@ test('arrival brief presentation suppresses fallback body only for a real stalle
     briefAttached: true,
     generationState: 'succeeded',
   });
-  assert.equal(attachedBeforeContent.stalled, false);
+  assert.equal(attachedBeforeContent.stalled, true);
   assert.equal(attachedBeforeContent.failed, false);
 
   const failed = morningBriefArrivalPresentation({
@@ -1975,13 +2042,15 @@ test('the preferred Codex writer retries invalid JSON once and records its prove
 
   assert.equal(await runOneMorningBrief(options), true);
   const artifact = store.latestEligibleMorningBrief('2026-07-14');
+  assert.ok(artifact, JSON.stringify(store.listMorningBriefs('2026-07-14')));
   assert.equal(artifact.writer, 'codex');
   const captures = readFileSync(fake.capture, 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(captures.length, 2);
   assert.equal(captures[0].cwd.includes('cove-morning-brief-'), true);
   assert.match(captures[1].input, /CORRECTION: Your previous output failed validation:/);
-  assert.deepEqual(captures[0].args.slice(0, 9), [
+  assert.deepEqual(captures[0].args.slice(0, 11), [
     'exec', '--sandbox', 'read-only', '--skip-git-repo-check',
+    '-c', 'mcp_servers.1password.enabled=false',
     '-m', 'gpt-5.6-sol', '-c', 'model_reasoning_effort=high',
     '--output-last-message',
   ]);
@@ -2142,11 +2211,14 @@ test('the brief worker validates, filters unknown tasks, and stores the artifact
   assert.equal(artifact.status, 'succeeded');
   assert.equal(artifact.writer, 'claude');
   const brief = morningBriefFromArtifact(artifact);
-  assert.equal(brief.headline, 'Protect client delivery first.');
+  assert.equal(brief.headline, brief.dailyDecision.actions[0].nextAction);
   assert.equal(brief.lensNarrative.includes('Today is'), false);
-  assert.equal(warnings.length, 1);
-  assert.match(warnings[0][0], /date contradicted target/);
-  assert.deepEqual(brief.existingTaskCandidates.map((candidate) => candidate.taskId), ['task-c', 'task-a']);
+  assert.equal(warnings.length, 0);
+  assert.deepEqual(
+    brief.dailyDecision.actions.map((action) => action.source.id),
+    ["task-c", "task-a"],
+  );
+  assert.deepEqual(brief.existingTaskCandidates, []);
   assert.equal(typeof artifact.inputHash, 'string');
   assert.equal(artifact.sourceManifest.coverage.calendar, 'missing');
   const storedInput = JSON.parse(
@@ -2165,9 +2237,12 @@ test('the brief worker validates, filters unknown tasks, and stores the artifact
   assert.equal(storedInput.artifact_id, artifact.id);
   assert.equal(storedInput.target_local_date, '2026-07-14');
   assert.equal(storedInput.target_timezone, 'America/Los_Angeles');
-  assert.equal(storedInput.prompt_version, 18);
-  assert.equal(storedInput.schema_version, 7);
-  assert.deepEqual(storedInput.sections, assembleMorningBriefContext(collectedSources().sources, {
+  assert.equal(storedInput.prompt_version, MORNING_BRIEF_PROMPT_VERSION);
+  assert.equal(storedInput.schema_version, MORNING_BRIEF_SCHEMA_VERSION);
+  assert.ok(
+    storedInput.sections.some((section) => section.id === "working_view"),
+  );
+  assert.deepEqual(storedInput.sections.filter((section) => section.id !== "working_view"), assembleMorningBriefContext(collectedSources().sources, {
     now: new Date(CLOCK),
   }).sections);
   assert.deepEqual(storedInput.manifest, artifact.sourceManifest);
@@ -2177,8 +2252,8 @@ test('the brief worker validates, filters unknown tasks, and stores the artifact
     '-p', '--no-session-persistence', '--permission-mode', 'plan', '--tools', '',
     '--strict-mcp-config', '--mcp-config',
   ]);
-  assert.match(captured.input, /^# The morning brief: chief of staff mandate \(v15\)/);
-  assert.match(captured.input, /\n\/cove-morning-brief\n/);
+  assert.match(captured.input, /Cove\'s purpose is to carry remembering/);
+  assert.match(captured.input, /Produce one ordered daily decision/);
   // Empty queue afterwards.
   assert.equal(
     await runOneMorningBrief(briefWorkerOptions(dir, store, fake.executable, async () => collectedSources())),
@@ -2335,6 +2410,8 @@ function triggerStore({ pending = [], plans = {}, eligible } = {}) {
   const enqueued = [];
   return {
     enqueued,
+    getReadModel: () => ({ pendingReconciliations: [] }),
+    listMorningBriefs: () => [],
     listPendingReconciliations: () => pending,
     getPlan: (id) => plans[id],
     latestEligibleMorningBrief: () => eligible,
@@ -2345,11 +2422,11 @@ function triggerStore({ pending = [], plans = {}, eligible } = {}) {
   };
 }
 
-// 04:30 UTC Jul 15 is the evening of Jul 14 in Los Angeles.
-const TRIGGER_NOW = new Date('2026-07-15T04:30:00.000Z');
-const LA_PLAN = { id: 'plan-1', localDate: '2026-07-14', timezone: 'America/Los_Angeles', briefId: undefined };
+// 08:30 Pacific: yesterday is being closed this morning.
+const TRIGGER_NOW = new Date('2026-07-15T15:30:00.000Z');
+const LA_PLAN = { state: 'proposed', id: 'plan-1', localDate: '2026-07-14', timezone: 'America/Los_Angeles', briefId: undefined };
 
-test('a commit with no defers or drops enqueues the next brief exactly once', () => {
+test('a late closeout with no defers or drops enqueues today immediately', () => {
   const store = triggerStore();
   maybeQueueMorningBrief(
     store,
@@ -2441,7 +2518,7 @@ test('ensure and arrival triggers regenerate only for today and never for a cons
   maybeQueueMorningBrief(
     fresh,
     'ensure',
-    { plan: { id: 'p', localDate: today, timezone: 'America/Los_Angeles' }, replayed: false },
+    { plan: { state: 'proposed', id: 'p', localDate: today, timezone: 'America/Los_Angeles' }, replayed: false },
     TRIGGER_NOW,
   );
   assert.deepEqual(fresh.enqueued, [today]);
@@ -2450,14 +2527,14 @@ test('ensure and arrival triggers regenerate only for today and never for a cons
   maybeQueueMorningBrief(
     consumed,
     'arrival_open',
-    { plan: { id: 'p', localDate: today, timezone: 'America/Los_Angeles', briefId: 'b1' }, replayed: false },
+    { plan: { state: 'proposed', id: 'p', localDate: today, timezone: 'America/Los_Angeles', briefId: 'b1' }, replayed: false },
     TRIGGER_NOW,
   );
   // Stale plan: settlement owns the right target.
   maybeQueueMorningBrief(
     consumed,
     'ensure',
-    { plan: { id: 'p', localDate: '2026-07-01', timezone: 'America/Los_Angeles' }, replayed: false },
+    { plan: { state: 'proposed', id: 'p', localDate: '2026-07-01', timezone: 'America/Los_Angeles' }, replayed: false },
     TRIGGER_NOW,
   );
   // Eligible artifact already exists: nothing to do.
@@ -2465,7 +2542,7 @@ test('ensure and arrival triggers regenerate only for today and never for a cons
   maybeQueueMorningBrief(
     covered,
     'ensure',
-    { plan: { id: 'p', localDate: today, timezone: 'America/Los_Angeles' }, replayed: false },
+    { plan: { state: 'proposed', id: 'p', localDate: today, timezone: 'America/Los_Angeles' }, replayed: false },
     TRIGGER_NOW,
   );
   assert.deepEqual(consumed.enqueued, []);
@@ -2487,6 +2564,7 @@ function dueStore({ plan, snapshot, eligible } = {}) {
       pendingTaskMutations: [],
     }),
     latestEligibleMorningBrief: () => eligible,
+    listMorningBriefs: () => [],
     enqueueMorningBrief: (date) => {
       enqueued.push(date);
       return { created: true, brief: { id: 'queued' } };
@@ -2500,7 +2578,7 @@ test('the scheduled lane resolves timezone as plan, then snapshot, then system, 
   // whether the developer running it happens to have closed yesterday.
   const dataDir = mkdtempSync(path.join(os.tmpdir(), 'cove-due-lane-'));
   t.after(() => rmSync(dataDir, { recursive: true, force: true }));
-  const relay = { relay: { dataDir } };
+  const relay = { relay: { dataDir, requireSourceCheckpoint: true } };
 
   // 16:00 UTC Jul 14 is already Jul 15 in Tokyo but still Jul 14 in LA.
   const now = new Date('2026-07-14T16:00:00.000Z');
@@ -2542,7 +2620,7 @@ test('the scheduled lane holds the brief when the ritual machine says yesterday 
     now,
   });
   const blocked = dueStore({ plan: { timezone: 'America/Los_Angeles' } });
-  assert.equal(enqueueDueMorningBrief(blocked, now, { relay: { dataDir } }), undefined);
+  assert.equal(enqueueDueMorningBrief(blocked, now, { relay: { dataDir, requireSourceCheckpoint: true } }), undefined);
   assert.deepEqual(blocked.enqueued, []);
 
   // Close it, and the same lane queues normally.
@@ -2552,7 +2630,7 @@ test('the scheduled lane holds the brief when the ritual machine says yesterday 
     now,
   });
   const allowed = dueStore({ plan: { timezone: 'America/Los_Angeles' } });
-  enqueueDueMorningBrief(allowed, now, { relay: { dataDir } });
+  enqueueDueMorningBrief(allowed, now, { relay: { dataDir, requireSourceCheckpoint: true } });
   assert.deepEqual(allowed.enqueued, ['2026-07-14']);
 });
 
@@ -2605,7 +2683,7 @@ test('the client brief state is keyed to plan.briefId', () => {
 });
 
 
-test('brief capacity deferral survives restart, keeps one queue row and resumes only when due', t => {
+test('brief capacity deferral survives restart, keeps one queue row and resumes only when due', (t) => {
   const fixture = briefFixture(t);
   const { store, setNow } = fixture;
   setNow('2026-07-14T13:00:00.000Z');
@@ -2640,11 +2718,11 @@ test('brief failures explain only a safe category and deferred UI promises an au
 });
 
 
-test('the brief worker defers an exhausted planning pool without spawning and resumes automatically', async t => {
+test('the brief worker defers an exhausted planning pool without spawning and resumes automatically', async (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: new Date(CLOCK) });
   const { dir, store, setNow } = briefFixture(t);
   const keys = ['COVE_DATA_DIR', 'COVE_DB_PATH'];
-  const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   t.after(() => { for (const key of keys) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; } });
   process.env.COVE_DATA_DIR = dir;
   process.env.COVE_DB_PATH = path.join(dir, 'cove.db');
@@ -2675,4 +2753,176 @@ test('deferred briefs keep polling only for a visible untouched arrival without 
   for (const change of [{ view: 'today' }, { documentVisible: false }, { briefAttached: true }, { arrivalInteracted: true }]) {
     assert.equal(shouldPollBriefGeneration({ ...base, ...change }), false);
   }
+});
+
+
+test('evening and early-morning closeouts wait until 08:00, including Friday to Monday', () => {
+  for (const [localDate, instant] of [
+    ['2026-07-14', '2026-07-15T04:30:00Z'],
+    ['2026-07-14', '2026-07-15T14:59:59Z'],
+    ['2026-07-17', '2026-07-18T01:00:00Z'],
+  ]) {
+    const store = triggerStore();
+    maybeQueueMorningBrief(store, 'settlement_commit', {
+      plan: { ...LA_PLAN, localDate }, snapshot: { id: 'snap-1' }, replayed: false,
+    }, new Date(instant));
+    assert.deepEqual(store.enqueued, []);
+  }
+  const store = triggerStore();
+  maybeQueueMorningBrief(store, 'ensure', { plan: LA_PLAN }, new Date('2026-07-14T14:59:59Z'));
+  assert.deepEqual(store.enqueued, []);
+});
+
+test('the local schedule starts at 08:00 across DST and catches up after sleep, without a browser', (t) => {
+  const { store, dir, setNow } = briefFixture(t);
+  store.ensureDayPlan({ localDate: '2026-07-14', timezone: 'America/Los_Angeles', mutationId: 'schedule-plan', candidates: candidatePool() });
+  const options = { relay: { dataDir: dir } };
+  assert.equal(enqueueDueMorningBrief(store, new Date('2026-07-14T14:59:59Z'), options), undefined);
+  setNow('2026-07-14T15:00:00Z');
+  const brief = enqueueDueMorningBrief(store, new Date('2026-07-14T15:00:00Z'), options);
+  assert.equal(brief.targetLocalDate, '2026-07-14');
+  assert.equal(enqueueDueMorningBrief(store, new Date('2026-07-14T15:30:00Z'), options), undefined);
+  store.claimNextMorningBrief();
+  store.failMorningBrief(brief.id, 'runner_failed');
+  assert.equal(enqueueDueMorningBrief(store, new Date('2026-07-14T16:00:00Z'), options), undefined);
+  assert.equal(store.listMorningBriefs('2026-07-14').length, 1, 'failed attempts are not retried by the timer');
+  for (const [before, due] of [
+    ['2026-03-09T14:59:59Z', '2026-03-09T15:00:00Z'],
+    ['2026-11-02T15:59:59Z', '2026-11-02T16:00:00Z'],
+    ['2026-07-14T14:59:59Z', '2026-07-14T17:30:00Z'],
+  ]) {
+    const fake = dueStore({ snapshot: { timezone: 'America/Los_Angeles' } });
+    assert.equal(enqueueDueMorningBrief(fake, new Date(before)), undefined);
+    assert.ok(enqueueDueMorningBrief(fake, new Date(due)));
+    assert.equal(fake.enqueued.length, 1);
+  }
+});
+
+test('the local timer holds an unfinished day even with a missing or misleading closure relay', (t) => {
+  const { store, dir } = briefFixture(t);
+  store.ensureDayPlan({ localDate: '2026-07-13', timezone: 'America/Los_Angeles', mutationId: 'old-plan', candidates: candidatePool() });
+  const now = new Date('2026-07-14T15:30:00Z');
+  assert.equal(enqueueDueMorningBrief(store, now, { relay: { dataDir: dir } }), undefined);
+  writeDayClosureRelay({ store: { dayClosureFacts: () => ({ latestLocalDate: '2026-07-13', openLocalDate: null }) }, dataDir: dir, now });
+  assert.equal(enqueueDueMorningBrief(store, now, { relay: { dataDir: dir } }), undefined);
+  assert.deepEqual(store.listMorningBriefs('2026-07-14'), []);
+});
+
+test('the local timer waits for closeout reconciliation and skips closed days and weekends', () => {
+  const now = new Date('2026-07-14T15:30:00Z');
+  const fake = dueStore();
+  const model = { latestSnapshot: { id: 's', localDate: '2026-07-13', timezone: 'America/Los_Angeles' }, pendingReconciliations: [{ snapshotId: 's', state: 'pending', action: 'defer' }] };
+  fake.getReadModel = () => model;
+  assert.equal(enqueueDueMorningBrief(fake, now), undefined);
+  model.pendingReconciliations = [];
+  assert.ok(enqueueDueMorningBrief(fake, now));
+  model.latestSnapshot.localDate = '2026-07-14';
+  assert.equal(enqueueDueMorningBrief(fake, now), undefined);
+  assert.equal(enqueueDueMorningBrief(fake, new Date('2026-07-18T15:30:00Z')), undefined);
+});
+
+test('the installed watch loop writes the scheduled brief without an arrival request', async (t) => {
+  const { dir, store, setNow } = briefFixture(t);
+  const now = new Date('2026-07-14T15:00:00Z');
+  setNow(now.toISOString());
+  store.ensureDayPlan({ localDate: '2026-07-14', timezone: 'America/Los_Angeles', mutationId: 'watch-plan', candidates: candidatePool() });
+  const fake = fakeClaude(dir, JSON.stringify(WIRE_BRIEF));
+  const controller = new AbortController();
+  const options = briefWorkerOptions(dir, store, fake.executable, async () => {
+    return collectedSources();
+  });
+  const complete = store.completeDailyPlanning;
+  store.completeDailyPlanning = (...args) => {
+    const result = complete(...args);
+    controller.abort();
+    return result;
+  };
+  const timeout = setTimeout(() => controller.abort(), 20000);
+  try {
+    await watchMorningBriefQueue({ ...options, now: () => now, abortSignal: controller.signal }, 10);
+    assert.equal(store.latestEligibleMorningBrief('2026-07-14')?.status, 'succeeded');
+    assert.equal(store.listMorningBriefs('2026-07-14').length, 1);
+  } finally { clearTimeout(timeout); }
+});
+
+
+test('opening Cove after a scheduled failure or during closeout reconciliation does not bypass the timer', () => {
+  for (const action of ['ensure', 'arrival_open']) {
+    const failed = triggerStore();
+    failed.listMorningBriefs = () => [{ status: 'failed' }];
+    const plan = { ...LA_PLAN, localDate: '2026-07-15' };
+    maybeQueueMorningBrief(failed, action, { plan }, TRIGGER_NOW);
+    assert.deepEqual(failed.enqueued, []);
+    const reconciling = triggerStore();
+    reconciling.getReadModel = () => ({ latestSnapshot: { id: 's' }, pendingReconciliations: [{ snapshotId: 's', state: 'pending', action: 'defer' }] });
+    maybeQueueMorningBrief(reconciling, action, { plan }, TRIGGER_NOW);
+    assert.deepEqual(reconciling.enqueued, []);
+  }
+});
+
+test('a populated fallback cannot hide writer failure or retry in Arrival', () => {
+  const html = renderToStaticMarkup(createElement(ArrivalStepBriefComponent, {
+    headline: 'Carried task', paragraphs: ['Generic task rationale.'], watchItems: [],
+    briefWriting: false, briefAttached: false, hasBriefContent: true,
+    briefGeneration: { state: 'failed', failureMessage: 'The brief could not load its sources.' },
+    onForceBrief: () => {},
+  }));
+  assert.match(html, /Cove couldn&#x27;t finish your brief\.|Cove couldn&#39;t finish your brief\.|Cove couldn't finish your brief\./);
+  assert.match(html, /The brief could not load its sources\./);
+  assert.match(html, /Try writing my brief again/);
+  assert.doesNotMatch(html, /Generic task rationale/);
+  const writing = morningBriefArrivalPresentation({ headline: 'Carried task', paragraphs: ['Fallback.'], hasBriefContent: true, briefAttached: false, briefWriting: true, generationState: 'running' });
+  assert.equal(writing.leadHeadline, 'Your brief is on the way.');
+  assert.deepEqual(writing.body, []);
+});
+
+test('large bounded brief sources retain the required closeout through the worker', async (t) => {
+  const { dir, store } = briefFixture(t);
+  const fake = fakeClaude(dir, JSON.stringify(WIRE_BRIEF));
+  store.enqueueMorningBrief('2026-07-14', { modelAlias: 'opus', effort: 'high', budgetUsd: 1.5 });
+  const collected = collectedSources();
+  collected.sources.push({ id: 'large_context', label: 'LARGE_CONTEXT', required: false, priority: 1, maxChars: 100000, content: 'x'.repeat(100000) });
+  const settlement = collected.sources.find(s => s.id === 'settlement_summary');
+  settlement.content = 'The saved closeout is present and must reach the writer.';
+  assert.equal(await runOneMorningBrief(briefWorkerOptions(dir, store, fake.executable, async () => collected)), true);
+  const artifact = store.latestEligibleMorningBrief('2026-07-14');
+  assert.equal(artifact?.status, 'succeeded');
+  const manifest = artifact.sourceManifest;
+  assert.equal(manifest.coverage.settlement_summary, 'included');
+  assert.equal(manifest.sources.find(s => s.id === 'settlement_summary').chars, settlement.content.length);
+});
+
+test('date correction reaches the nested decision used by the Arrival projection', () => {
+  const paragraphs = ['Today is Sunday. Protect the delivery block.', 'Keep the rest of the work parked.'];
+  const result = stripMorningBriefDateClaim({
+    headline: 'Protect the delivery block', narrativeParagraphs: paragraphs, lensNarrative: paragraphs.join('\n\n'),
+    dailyDecision: { version: 1, basePlanId: null, basePlanVersion: null, actions: [], watches: [], questions: [], narrativeParagraphs: paragraphs },
+  }, '2026-09-15', 'America/Los_Angeles');
+  assert.equal(result.contradicted, true);
+  assert.deepEqual(result.brief.dailyDecision.narrativeParagraphs, result.brief.narrativeParagraphs);
+  assert.doesNotMatch(result.brief.dailyDecision.narrativeParagraphs.join(' '), /Today is Sunday/);
+});
+
+
+test('automatic arrival backfill does not regenerate a started or closing day', () => {
+  for (const state of ['active', 'settling', 'settled', 'abandoned']) {
+    for (const action of ['ensure', 'arrival_open']) {
+      const store = triggerStore();
+      maybeQueueMorningBrief(store, action, { plan: { ...LA_PLAN, state, localDate: '2026-07-15' }, replayed: false }, TRIGGER_NOW);
+      assert.deepEqual(store.enqueued, [], `${state} ${action}`);
+    }
+  }
+});
+
+
+test('timer and arrival backfill preserve a touched morning with no attached brief', () => {
+  const plan = { ...LA_PLAN, localDate: '2026-07-15', arrivalInteractedAt: '2026-07-15T15:05:00Z' };
+  for (const action of ['ensure', 'arrival_open']) {
+    const store = triggerStore();
+    maybeQueueMorningBrief(store, action, { plan, replayed: false }, TRIGGER_NOW);
+    assert.deepEqual(store.enqueued, []);
+  }
+  const timer = dueStore({ plan });
+  assert.equal(enqueueDueMorningBrief(timer, TRIGGER_NOW), undefined);
+  assert.deepEqual(timer.enqueued, []);
 });

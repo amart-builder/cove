@@ -107,3 +107,49 @@ test('an approaching deadline is handled before older overdue work in the same c
  const messages=[];await run(db,instant,{notify:x=>messages.push(x)});
  assert.equal(messages[0].taskId,'soon');assert.equal(messages[1].taskId,'old');
 });
+
+test('routine holds are informational and older real issues stay visible behind newer history', async t => {
+ const db=fixture(t);
+ for(let i=0;i<6;i++)task(db,`routine-${i}`,'2026-08-01');
+ let status=await run(db);
+ assert.equal(status.protection,'current');assert.equal(status.unresolved,0);assert.equal(status.held,3);
+ db.prepare("INSERT INTO cove_follow_through_notices(id,ref_kind,ref_id,title,stage,due_at,status,updated_at,error) VALUES('missed','meeting','meeting','Client meeting','meeting',?,'missed',?,'Missed')").run(instant.toISOString(),instant.toISOString());
+ for(let i=0;i<150;i++)db.prepare("INSERT INTO cove_follow_through_notices(id,ref_kind,ref_id,title,stage,due_at,status,updated_at) VALUES(?,'task',?,'History','advance',?,'expired',?)").run(`history-${i}`,`history-${i}`,instant.toISOString(),new Date(+instant+60000).toISOString());
+ status=followThroughStatus(db,new Date(+instant+60000));
+ assert.equal(status.unresolved,1);assert.equal(status.notices[0].id,'missed');assert.equal(status.notices[0].needsAttention,1);
+});
+
+test('pending transport failures stay actionable even after the alert policy holds a retry',async t=>{
+ const db=fixture(t);task(db,'failure','2026-08-01');
+ await run(db,instant,{notify:()=>{throw Object.assign(Error('offline'),{deliveryNotAttempted:true});}});
+ const status=followThroughStatus(db,instant);assert.equal(status.unresolved,1);assert.equal(status.notices[0].needsAttention,1);
+});
+
+test('unacknowledged delivery problems remain visible after a day and acknowledgement clears them',async t=>{
+ const db=fixture(t);task(db,'uncertain','2026-09-04');
+ await run(db,instant,{notify:()=>{throw Error('timeout');}});
+ const later=new Date(+instant+25*3600000);const status=followThroughStatus(db,later);
+ assert.equal(status.unresolved,1);assert.equal(status.notices[0].needsAttention,1);
+ const {acknowledgeFollowThrough}=await import('../src/lib/attention/follow-through.mjs');acknowledgeFollowThrough(db,status.notices[0].id,later);
+ assert.equal(followThroughStatus(db,later).unresolved,0);
+});
+
+test('quiet-hour meetings do not generate false misses, while an eligible evening prep window still counts',async t=>{
+ const db=fixture(t);const quiet=new Date('2026-09-04T01:45:00Z');const due='2026-09-04T02:00:00Z';
+ const calendar=async()=>({listEvents:async()=>[{id:'dinner',summary:'Dinner',start:due}]});
+ let s=await run(db,quiet,{calendar});assert.equal(s.notices.length,0);
+ s=await run(db,new Date(+quiet+16*60000),{calendar:async()=>({listEvents:async()=>[]})});assert.equal(s.unresolved,0);
+
+ const prep=new Date('2026-09-05T00:55:00Z');
+ for(let i=0;i<6;i++)db.prepare("INSERT INTO cove_attention_ledger(id,kind,ref_kind,ref_id,level,reason,delivered_at,created_at) VALUES(?,'chief_of_staff','task',?,'banner','Earlier reminder',?,?)").run(`cap-${i}`,`cap-${i}`,prep.toISOString(),prep.toISOString());
+ await run(db,prep,{calendar:async()=>({listEvents:async()=>[{id:'evening',summary:'Evening call',start:'2026-09-05T01:10:00Z'}]})});
+ s=await run(db,new Date(+prep+16*60000),{calendar:async()=>({listEvents:async()=>[]})});assert.equal(s.unresolved,1);assert.equal(s.notices.find(x=>x.refId==='evening').status,'missed');
+});
+
+
+test('changing timezone preserves historical missed reminders without original-zone evidence',async t=>{
+ const db=fixture(t);const due='2026-09-10T00:30:00Z';
+ db.prepare("INSERT INTO cove_follow_through_notices(id,ref_kind,ref_id,title,stage,due_at,status,updated_at,error) VALUES('historical','meeting','old','Call','meeting',?,'missed',?,'Missed')").run(due,due);
+ await run(db,new Date('2026-09-10T16:00:00Z'),{timezone:'America/New_York'});
+ assert.equal(db.prepare("SELECT status FROM cove_follow_through_notices WHERE id='historical'").pluck().get(),'missed');
+});

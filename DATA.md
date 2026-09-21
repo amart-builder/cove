@@ -56,7 +56,7 @@ Schema ownership and code ownership are mapped in `CODEBASE_GUIDE.md`.
 
 ### Sales pipeline
 
-`pipeline_deals` stores one Edge AI consulting deal per contact. Deleting a
+`pipeline_deals` stores one consulting deal per contact. Deleting a
 contact deletes its deal. Stage changes and real touches are retained in
 `contact_activities`; administrative deal removal does not delete that history.
 Follow-up dates are calendar dates in `YYYY-MM-DD` form, never timestamps.
@@ -103,8 +103,12 @@ pending or failed actions resume after a crash with deterministic target IDs.
 Kinds are `task`, `commitment`, `crm_note`, and `research_note`. Research is
 cached permanently by CRM activity `source_ref=research:<contact_id>`, not by
 age. A job retries with backoff and becomes `dead` after five attempts, at which
-point a visible failure-inbox item records that legacy extraction ran as a
-degraded fallback.
+point a visible failure-inbox item records the degraded fallback outcome.
+A failed fallback is explicit. Temporary AI allowance waits honor their bounded
+retry time without consuming execution attempts. Completed analysis resolves
+its matching failure. A legacy aggregate warning clears only when every
+analysis job has succeeded and a later success exists; resetting a failed job
+to pending does not count as recovery.
 
 Meeting job artifacts, membership, and action rows are durable audit and replay
 state in Phase 2 and have no automatic age-based deletion. A future retention
@@ -133,6 +137,12 @@ durable review evidence. The Email card reads the last seven days of `fyi` and
 query filters and sorts on `actioned_at`, which is set when Gmail confirms the
 archive. Accepted and tentative calendar responses use deterministic summaries.
 Other calendar notices keep the model context after a deterministic event line.
+
+Outgoing charge notices have a review floor in `email/charge-notice.ts`.
+Recognized charges, card spending, ACH debits, payment confirmations and
+subscription renewals cannot become passive FYI or noise. They remain open
+reply/action items until reviewed. This is review-list placement, not an
+immediate native notification or urgency escalation.
 
 Resolved rows remain durable review evidence after `reviewed_at` is set. Weekly
 markdown digests under `data/voice-reviews/` are also retained until the
@@ -250,6 +260,13 @@ runtime state. They must never be included in a client export or commit.
 
 Jobs, receipts, failure records, brief inputs, relays, and backups have bounded cleanup paths. Any new operational table or file collection must define retention before it ships.
 
+Jev attempts (`cove_jev_attempts`, migration 37) keep answer detail for 30
+days and the attempt row (status, hashes, token counts) for 90 days;
+`pruneJevLedger` in `src/lib/jev/ledger.ts` enforces both. `cove_jev_state`
+holds two small control values (breaker cooldown and a credential fingerprint)
+and is not a record store. Neither table is exposed through the REST table
+allowlist.
+
 
 Follow-through state lives in `cove_follow_through_state` and
 `cove_follow_through_notices` (migration 29). The first stores bounded calendar
@@ -284,3 +301,42 @@ reuse the existing artifact; revised drafts remain separate. Source changes make
 a draft visibly stale. Saving a draft never sends anything or completes work.
 These records persist until the user removes their database; they currently have
 no automatic deletion policy. Backups include them.
+
+## Shared daily planning
+
+Migrations 32 and 33 extend responsibility references to stored suggestions and
+calendar occurrences. `cove_calendar_occurrences` retains provider, calendar,
+event and recurrence identity, semantic source state and separate observation
+freshness. Responsibilities retain the parent source link through task acceptance.
+`cove_planning_questions` keeps decision keys, question lifecycle, answer source,
+review and expiry times. Question answers also create responsibility audit events.
+
+Day-plan migration 108 adds `day_plan_planning_retries`. Each failed generation
+can link to one retry; a retry cannot spawn another retry. Brief schema 8 stores
+one daily decision and its linked candidates. Public reads resolve current source
+state and return the same plan version as the brief projection.
+
+These records are included in database backups and retain their source/decision
+history until the database is removed. There is no automatic deletion of calendar
+occurrences, question decisions or retry links in this release. Expiry changes
+question or proposal lifecycle state; it does not delete audit evidence or resolve
+an accepted commitment. No new external storage is introduced.
+
+### Reminder attempt history
+
+`data/notification-deliveries/` retains private per-attempt JSON receipts for the
+reminder helper, including scheduled and one-hour repeats. A receipt records the
+rendered content, reference, channel and claim time before transport begins.
+`accepted` means the transport returned successfully, not that a banner was
+visible or a message was read. `failed`, `uncertain` and an interrupted `claimed`
+attempt remain distinct. Recipient credentials and raw transport errors are not
+copied into these receipts. They never authorize a retry. Receipts are retained for 90 days and pruned on
+the next reminder attempt; receipt cleanup never clears task delivery claims.
+
+`cove_floor_reminder_state` remembers the title, due date and next-action
+fingerprint claimed before the noon floor attempts delivery. An unchanged overdue item does not
+consume another interruption on the next day. A changed deadline or next action
+can qualify again, under the same shared caps. Reopening completed or archived
+work resets its eligibility. Uncertain attempts remain claimed; only a known
+transport rejection releases the claim. The task remains open and its
+deadline remains intact; explicit user reminders are separate.

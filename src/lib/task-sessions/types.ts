@@ -1,3 +1,4 @@
+export type TaskSessionProvider = "claude" | "codex";
 export type TaskSessionOwner = "claude" | "together";
 export type TaskSessionLaunchMode = "planning" | "auto";
 export type TaskSessionPermissionMode = "acceptEdits" | "plan";
@@ -17,6 +18,8 @@ export type TaskSessionPromptSnapshot = {
   definitionOfDone?: string;
   whyToday?: string;
   project?: string;
+  /** Canonical project directory chosen by the server, never inferred from prose. */
+  projectDirectory?: string;
   dueAt?: string;
   brief?: string;
 };
@@ -55,6 +58,7 @@ export type LaunchTaskSessionInput = {
   itemId?: string;
   owner: TaskSessionOwner;
   mode?: TaskSessionLaunchMode;
+  provider?: TaskSessionProvider;
   promptSnapshot: TaskSessionPromptSnapshot;
 };
 

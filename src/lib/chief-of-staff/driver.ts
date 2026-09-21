@@ -1,4 +1,15 @@
+import { createDayPlanStore } from "../day-plan/store";
+import { morningBriefModelConfig } from "../claude-execution/brief-commands";
+import { PLANNING_QUESTIONS } from "./planning-contract";
+import {
+  dailyPlanningSchema,
+  dailyPlanningPrompt,
+  validateDailyDecision,
+  decisionAsBrief,
+  type PlanningContext,
+} from "./daily-planning";
 import type Database from "better-sqlite3";
+import { queuePhoneReminder } from "../apple-reminders/queue.mjs";
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -86,7 +97,8 @@ function renderChiefOfStaffMandateForWake(input: {
     ? source.replace(SALES_PIPELINE_STATUS_PLACEHOLDER, status).trim()
     : status ? `${source}\n\n${status}` : source;
   const contract = readFileSync(path.join(input.repoDir, "prompts", "responsibility-contract.md"), "utf8");
-  const expected = `${rendered}\n\n${contract}\n`;
+  const phoneContract = readFileSync(path.join(input.repoDir, "prompts", "phone-reminder-contract.md"), "utf8");
+  const expected = `${rendered}\n\n${contract}\n\n${phoneContract}\n\n${PLANNING_QUESTIONS}\nUse replan_day only before the person starts their day. After Start Day, the chosen plan and written brief stay settled until the person explicitly changes tasks. Keep new source information for the next Morning Arrival; do not request a midday plan review or write a competing ranked plan in journal or watching.\n`;
   if (readFileSync(input.mandatePath, "utf8") === expected) return;
   atomicWrite(input.mandatePath, expected, 0o444);
 }
@@ -155,7 +167,7 @@ function safeProcessEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     "OPENAI_API_KEY",
   ];
   return Object.fromEntries(
-    allowed.flatMap((key) => env[key] === undefined ? [] : [[key, env[key]]]),
+    allowed.flatMap((key) => (env[key] === undefined ? [] : [[key, env[key]]])),
   ) as NodeJS.ProcessEnv;
 }
 
@@ -286,8 +298,10 @@ async function runCodexAttempt(input: {
 }
 
 export function resumeUnavailable(attempt: Pick<CodexAttempt, "exitCode" | "stderr">): boolean {
-  return attempt.exitCode !== null && attempt.exitCode !== 0 &&
-    /thread\/resume failed|no rollout found for thread id/i.test(attempt.stderr);
+  return (
+    attempt.exitCode !== null && attempt.exitCode !== 0 &&
+    /thread\/resume failed|no rollout found for thread id/i.test(attempt.stderr)
+  );
 }
 
 function parseWake(value: unknown): ChiefOfStaffWakePayload {
@@ -448,6 +462,7 @@ function applyDatabaseAction(input: {
   if (action.kind.startsWith("pipeline_") && !input.salesPipelineEnabled) {
     throw new Error("sales_pipeline_disabled");
   }
+  if (action.kind === "replan_day") return;
   if (action.kind === "plan_update") {
     prepareActionFields(action, ["ref_kind", "ref_id", "expected_version", "expected_revision", "next_action", "owner", "plan_state", "next_check_at"], ["planned_for", "estimate_minutes", "blocker", "goal", "completion_criterion"]);
     if (action.ref_kind !== "task" && action.ref_kind !== "commitment") throw new Error("Invalid plan source.");
@@ -609,7 +624,8 @@ function applyDatabaseAction(input: {
   throw new Error(`Unknown action kind: ${action.kind}.`);
 }
 
-type ChiefOfStaffActionCounts = { applied: number; rejected: number; skipped: number };
+type ChiefOfStaffActionCounts = { applied: number; rejected: number; skipped: number;
+};
 
 type ChiefOfStaffActionRejection = { kind: string; reason: string };
 type ChiefOfStaffActionDowngrade = { kind: string; reason: string };
@@ -654,7 +670,8 @@ function applyChiefOfStaffActionsWithDetails(input: {
       const existing = db.prepare(
         `SELECT status, payload_json
          FROM chief_of_staff_actions WHERE wake_job_id = ? AND content_hash = ?`,
-      ).get(input.wakeJobId, contentHash) as {
+      ).get(input.wakeJobId, contentHash) as
+        | {
         status: string;
         payload_json: string;
       } | undefined;
@@ -669,7 +686,16 @@ function applyChiefOfStaffActionsWithDetails(input: {
         continue;
       }
       try {
-        if (action.kind === "notify") {
+        if (action.kind === "phone_reminder") {
+          prepareActionFields(action, ["task_id", "expected_version", "remind_at", "level", "reason", "next_action"]);
+          const taskId = requiredActionText(action, "task_id", 200);
+          assertSourceVersion(db, "task", taskId, action.expected_version);
+          const task = db.prepare("SELECT * FROM tasks WHERE id = ? AND status = 'open'").get(taskId);
+          const queued = queuePhoneReminder({ dataDir: input.dataDir, task, action, intentKey: `${input.wakeJobId}:${contentHash}` });
+          action.phone_reminder_queued = queued.queued;
+          action.phone_reminder_delivered = false;
+          db.transaction(() => insertLedger(db, { wakeJobId: input.wakeJobId, contentHash, action, status: "applied", now: now.toISOString() }))();
+        } else if (action.kind === "notify") {
           // The flat schema carries both a generic `why` and a notify `reason`.
           // Models often fill only `why`; treat it as the reason when `reason`
           // is empty so a real interruption is not lost to a field name.
@@ -977,8 +1003,58 @@ export async function runWake(
       attention: options.attention,
     });
     const markDb=openLocalDatabase(options.dbPath);
-    try { if (actionResult.counts.rejected === 0) markResponsibilitiesReviewed(markDb,reviewed,now); }
-    finally { markDb.close(); }
+    try { if (actionResult.counts.rejected === 0) {
+        markResponsibilitiesReviewed(markDb,reviewed,now);
+        // Only defer questions actually delivered in this bounded snapshot.
+        const seenQuestions = markDb
+          .prepare(
+            "SELECT id,revision FROM cove_planning_questions WHERE state='open' AND next_check_at<=?",
+          )
+          .all(now.toISOString()) as { id: string; revision: number }[];
+        for (const question of seenQuestions) {
+          if (
+            !snapshot
+              .split("\n")
+              .some(
+                (line) =>
+                  line.includes(`"id":"${question.id}"`) &&
+                  line.includes(`"revision":${question.revision}`),
+              )
+          )
+            continue;
+          markDb
+            .prepare(
+              "UPDATE cove_planning_questions SET next_check_at=MIN(expires_at,?),revision=revision+1,updated_at=? WHERE id=? AND revision=?",
+            )
+            .run(
+              new Date(+now + 3 * 3600000).toISOString(),
+              now.toISOString(),
+              question.id,
+              question.revision,
+            );
+        }
+      }
+    }
+    finally { markDb.close();
+    }
+    if (
+      wake.reason !== "brief" &&
+      attempt.output.actions.some((a) => a.kind === "replan_day") &&
+      actionResult.counts.rejected === 0
+    ) {
+      const plans = createDayPlanStore({
+        dbPath: options.dbPath,
+        now: () => now,
+      });
+      try {
+        const current = plans.getReadModel().currentPlan;
+        if (current && ["draft", "proposed"].includes(current.state) &&
+            !current.arrivalInteractedAt)
+          plans.enqueueMorningBrief(current.localDate, morningBriefModelConfig());
+      } finally {
+        plans.close();
+      }
+    }
     options.afterActionsApplied?.();
     appendChiefOfStaffJournal({
       dataDir: options.dataDir,
@@ -995,7 +1071,7 @@ export async function runWake(
       maxCharsPerLine: 400,
       maxTotalCharsPerLine: 400,
     });
-    const sessionId = selection ? null : home.session.sessionId ?? attempt.sessionId ?? null;
+    const sessionId = selection ? null : (home.session.sessionId ?? attempt.sessionId ?? null);
     if (!sessionId && !selection) {
       appendChiefOfStaffJournal({
         dataDir: options.dataDir,
@@ -1022,3 +1098,23 @@ export async function runWake(
 }
 
 export type { PipelineStage };
+
+/** Morning and material-change planning share the chief's decision contract.
+ * The morning lane retains its reserved budget and existing durable lease. */
+export async function planDay(input: {
+  context: PlanningContext;
+  sourcePrompt: string;
+  run: Omit<
+    import("../model-runner").RunJobRuntimeInput,
+    "prompt" | "schema" | "kind" | "validate"
+  >;
+}) {
+  return runJob<import("../day-plan/brief").MorningBrief>({
+    ...input.run,
+    kind: "structured",
+    prompt: dailyPlanningPrompt(input.context, input.sourcePrompt),
+    schema: dailyPlanningSchema(input.context),
+    validate: (_text, value) =>
+      decisionAsBrief(validateDailyDecision(value, input.context, { requireNarrative: true, sourcePrompt: input.sourcePrompt })),
+  });
+}

@@ -1,3 +1,4 @@
+import { notificationUrl } from "./notification-links.mjs";
 import type Database from "better-sqlite3";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -239,7 +240,7 @@ export function deliverAttentionNudge(input: {
   if (!current) throw new AttentionDeliveryRejected("no longer open");
 
   const shadow = input.shadow ?? readAttentionShadowSetting(input.dataDir);
-  const transport = input.transport ?? createAttentionTransport({ repoDir: input.repoDir });
+  const transport = input.transport ?? createAttentionTransport({ repoDir: input.repoDir, dataDir: input.dataDir, env: input.env });
   const surface = input.surface ?? surfaceAttentionSuggestion;
   const surfaceSuppression = input.surfaceSuppression ?? surfaceAttentionSuppression;
   const maximumLevel = input.allowText !== false && current.direct && transport.textConfigured
@@ -332,7 +333,7 @@ export function deliverAttentionNudge(input: {
   }
   if (allocation.finalLevel === "banner" || !textDelivered) {
     try {
-      transport.banner(banner);
+      transport.banner(banner, "Needs your attention", notificationUrl({ taskId: fresh.targetTaskId, attentionId: allocation.row.id }));
       bannerDelivered = true;
     } catch (error) {
       bannerDelivered = false;

@@ -221,7 +221,7 @@ test('empty email copy distinguishes checking, ready, stale, and unsupported run
     readinessState: 'ready',
     checking: false,
     notApplicable: false,
-  }), 'Inbox is clear. Nothing needs you right now.');
+  }), 'No replies or actions were recorded at the last inbox review.');
   assert.equal(emailEmptyStateMessage({
     readinessState: 'not_configured',
     checking: false,
@@ -240,5 +240,24 @@ test('empty email copy distinguishes checking, ready, stale, and unsupported run
   assert.equal(emailEmptyStateMessage({
     checking: false,
     notApplicable: true,
-  }), 'Inbox is clear. Nothing needs you right now.');
+  }), 'No open email is recorded in Cove.');
+});
+
+test('a partial inbox review does not imply there is no work left', () => {
+  assert.equal(emailEmptyStateMessage({ readinessState: 'ready', checking: false,
+    notApplicable: false, lastRunOutcome: 'partial' }),
+    'No open email is recorded, but the last inbox review was incomplete.');
+});
+
+
+test('writer readiness uses the saved selected model instead of a fixed Codex label', (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'cove-readiness-model-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const dbPath = path.join(dir, 'cove.db');
+  const db = openLocalDatabase(dbPath);
+  db.exec(`CREATE TABLE day_plan_briefs (id TEXT PRIMARY KEY, status TEXT, finished_at TEXT, updated_at TEXT, model_alias TEXT, brief_json TEXT)`);
+  db.prepare('INSERT INTO day_plan_briefs VALUES (?, ?, ?, ?, ?, ?)').run('brief-model', 'succeeded', '2026-09-15T17:00:00Z', '2026-09-15T17:00:00Z', 'gpt-6-astra', JSON.stringify({writer:'codex'}));
+  db.close();
+  const state = currentCoveReadiness({dbPath, dataDir:dir, now:new Date('2026-09-15T18:00:00Z'), workerAvailable:true});
+  assert.equal(state.writer.label, 'gpt-6-astra');
 });

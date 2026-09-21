@@ -2,7 +2,7 @@
 
 ## Install and start
 
-Follow `SETUP.md`. The installer renders absolute Node paths into LaunchAgents, creates a private empty `.env.local` when needed, starts the localhost app and background lanes, and reports a slow worker heartbeat as a warning with a retry command.
+Follow `SETUP.md`. The installer renders absolute Node paths into LaunchAgents, creates a private empty `.env.local` when needed, and starts the localhost app and background lanes. A missing fresh worker heartbeat fails installation with diagnostics and a retry command. A responding website alone does not prove the worker is healthy.
 
 The supported app URL is `http://127.0.0.1:3200` (or `http://localhost:3200`). Logs live in `~/Library/Logs/` with `cove` in the filename.
 
@@ -11,6 +11,16 @@ The supported app URL is `http://127.0.0.1:3200` (or `http://localhost:3200`). L
 The Current displays live readiness for email, the brief writer, and the background worker. Empty and unavailable are different states. `/api/health` exposes the same read model to trusted local requests, plus the latest periodic health snapshot.
 
 Failures that need attention are recorded in Cove's Issues surface. A partial receipt means useful work completed but the named remainder needs a later run or operator action.
+
+## Morning Brief schedule
+
+The existing Claude worker starts the Morning Brief at 08:00 on weekdays in
+Cove's brief timezone once the previous workday is closed. Closing an overdue
+day after 08:00 starts today's brief automatically after reconciliation.
+Evening closeout and closeout before 08:00 wait for the scheduled morning.
+An asleep Mac catches up when it wakes; the browser does not need to be open.
+A failed attempt stays in Issues and Morning Arrival for manual retry instead
+of repeatedly spending model capacity. Explicit Brief me anyway remains available.
 
 ## Recovery
 
@@ -31,7 +41,7 @@ The internal repository is not a client artifact. Build a sanitized tree with `n
 
 ## Reminder coverage and model usage
 
-Issues > On your radar reports the reminder worker's heartbeat and calendar
+Reminder coverage at the top of Your follow-through reports the reminder worker's heartbeat and calendar
 freshness. A disconnected calendar means no meeting coverage. A stale heartbeat
 means the reminder service needs attention, even if no job has failed. Sleeping
 or shut-down Macs cannot notify. Existing explicit reminders continue if the
@@ -46,6 +56,21 @@ warning preserves the noon check-in slot. The daily total remains six.
 Task reminder clicks open the matching task details in Today or All Work.
 One-hour snooze persists across restarts. A notification with an uncertain
 handoff is shown for review, never blindly retried.
+Routine overdue reminders held by alert policy are informational. Held imminent
+deadlines, missed meetings and delivery failures remain visible until reviewed,
+even when newer reminder history exists. Text timeouts remain unconfirmed;
+the noon text reservation is retained even if its fallback Mac banner fails.
+Meetings whose entire prep window falls in quiet hours are not failed reminders.
+Remote iMessage allows 10 seconds to connect plus a bounded Messages window,
+within a 30-second overall timeout. A responsive Mini alone does not prove text
+arrival on the phone.
+
+The responsibility total separates actual tasks and confirmed commitments from
+unconfirmed suggestions. Unestimated work is shown as unknown. Ambiguous source
+dates are preserved with a confirmation label, without inventing deadlines.
+Completed routine reviews supersede older warnings only for the same routine
+with no event-specific payload. Specific failed event reviews remain visible.
+
 
 Background AI shows the selected model and separate rolling usage for background
 reviews and daily planning. Defaults are 12 calls/hour, 96/day and 400/week per
@@ -107,3 +132,32 @@ the person an immediate fallback and directs repair to their setup agent. Raw
 provider diagnostics stay in stored job and failure details, not banner text.
 Chief reviews use their fifteen-minute driver timeout rather than the shared
 two-minute monitoring timeout; the scheduler renews its lease during execution.
+
+## Optional iCloud reminder bridge
+
+The personal phone beta is a 30-second deterministic sync helper. It has no
+installer and no LaunchAgent in `scripts/launchd/`, and it is not part of a
+standard install. It reads `data/apple-reminders.json`; receipts, queue entries and
+link state live under its configured `stateDir`. The helper needs its own full
+macOS Reminders permission through the standard app dialog. Running it as a
+child of an already-authorized terminal is not sufficient proof that launchd
+can use it. Rebuilding an ad-hoc signed helper can require permission again.
+
+Verify a fresh service tick, then actual iCloud arrival and a displayed phone
+alert. Verify completion and exact-time edits both ways using one labeled test
+task. A saved native record alone proves neither device synchronization nor
+notification presentation. Complete the Apple test item and recoverably archive
+its Cove task afterward. Do not change unrelated Apple reminders.
+
+The Mac must be awake for chat access and new synchronization. After a reminder
+has synced through iCloud, the iPhone can deliver that saved reminder without
+the Mac remaining awake. This does not make the Cove agent an always-on cloud
+service. Urgent alarm activation is not automated by this beta.
+
+To disconnect, disable the configuration, stop the dedicated sync LaunchAgent
+and restart the phone MCP process without its reminder connection. Existing
+Apple reminders remain scheduled until explicitly cancelled. Do not erase link
+state to recover from an error: uncertain saves and concurrent edits need their
+receipts to prevent duplicates. Queue errors and native conflicts are returned
+by `cove_reminders` and the chief snapshot. The standard Mac reminder service
+and other background lanes keep their existing configuration.
