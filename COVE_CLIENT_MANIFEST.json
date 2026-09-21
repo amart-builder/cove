@@ -1,10 +1,10 @@
 {
   "version": 1,
   "product": "Cove",
-  "source_sha": "dd9bce507523e105614f6705e1d33508f46b4ce2",
+  "source_sha": "4bc5ab23dfc8140fc07cf69caadc45b38f3749a2",
   "source_worktree_dirty": false,
   "allow_dirty": false,
-  "exported_at": "2026-09-21T17:02:20.341Z",
+  "exported_at": "2026-09-21T17:07:35.204Z",
   "file_count": 750,
   "files": [
     {
@@ -3429,8 +3429,8 @@
     },
     {
       "path": "tests/public-handoff.test.mjs",
-      "bytes": 7754,
-      "sha256": "a77d36130ece55ea9a6e8b0fdf9f93f97b268f6a28597cd60df770c9282bef0f"
+      "bytes": 7977,
+      "sha256": "a712aaced80a03f7769d09fb3508eb0813d50234d8705640eddf9d51505d1508"
     },
     {
       "path": "tests/publication-recovery.regression-1.test.mjs",
