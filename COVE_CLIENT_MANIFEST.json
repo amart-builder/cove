@@ -1,10 +1,10 @@
 {
   "version": 1,
   "product": "Cove",
-  "source_sha": "4bc5ab23dfc8140fc07cf69caadc45b38f3749a2",
-  "source_worktree_dirty": false,
-  "allow_dirty": false,
-  "exported_at": "2026-09-21T17:07:35.204Z",
+  "source_sha": "e40cff7606f473897ed9ea78b59d930a08eb7745",
+  "source_worktree_dirty": true,
+  "allow_dirty": true,
+  "exported_at": "2026-09-22T03:31:53.114Z",
   "file_count": 750,
   "files": [
     {
@@ -304,8 +304,8 @@
     },
     {
       "path": "prompts/chief-of-staff-output.schema.json",
-      "bytes": 6127,
-      "sha256": "545ef6052d0c9034a344ed35d01bdb21d2661a229d34c3cddc5a68b4c24902d8"
+      "bytes": 6066,
+      "sha256": "5f871b77a7df21fef10392b465c9f9e97631480f3cdc420b9d690790c553877c"
     },
     {
       "path": "prompts/chief-of-staff.md",
@@ -419,8 +419,8 @@
     },
     {
       "path": "scripts/cove-claude-worker.ts",
-      "bytes": 6735,
-      "sha256": "55dc79d3af2222e4127437c95ec039b10e1a528699b55009f1ca09b3fb06247b"
+      "bytes": 6964,
+      "sha256": "b2a131900418cad0fe0a3074a81cd6b326ed73c06e37ac4ba2641b58fac2743a"
     },
     {
       "path": "scripts/cove-contact-dedupe.mjs",
@@ -1679,8 +1679,8 @@
     },
     {
       "path": "src/lib/claude-execution/worker.ts",
-      "bytes": 62647,
-      "sha256": "ca92b4a7a46a76ff8991399ea7fb18f7acd67d5cb50c380e1e52bde0f7ce58b8"
+      "bytes": 63035,
+      "sha256": "d2fb483dfbe9c7a77d4c0758f4d9075db45a11675fcf52bad57559cc0b65a033"
     },
     {
       "path": "src/lib/crm/contact-context.ts",
