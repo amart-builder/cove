@@ -1,11 +1,11 @@
 {
   "version": 1,
   "product": "Cove",
-  "source_sha": "e40cff7606f473897ed9ea78b59d930a08eb7745",
-  "source_worktree_dirty": true,
-  "allow_dirty": true,
-  "exported_at": "2026-09-22T03:31:53.114Z",
-  "file_count": 750,
+  "source_sha": "5d2c6a80247e385028fea9aa5fcad6dbc4e7b6e5",
+  "source_worktree_dirty": false,
+  "allow_dirty": false,
+  "exported_at": "2026-09-26T02:15:44.453Z",
+  "file_count": 759,
   "files": [
     {
       "path": ".claude/skills/cove-morning-brief/SKILL.md",
@@ -84,8 +84,8 @@
     },
     {
       "path": "PLANNING_RELIABILITY.md",
-      "bytes": 14225,
-      "sha256": "d15bc6d592808a3c82e5f8213c37ceb2146c64189d250b6cf03457596685595d"
+      "bytes": 16645,
+      "sha256": "bde167ad00a58e604ca095de249d6aaea477481a390e09eb20febcb3fa43180b"
     },
     {
       "path": "README.md",
@@ -304,13 +304,13 @@
     },
     {
       "path": "prompts/chief-of-staff-output.schema.json",
-      "bytes": 6066,
-      "sha256": "5f871b77a7df21fef10392b465c9f9e97631480f3cdc420b9d690790c553877c"
+      "bytes": 6386,
+      "sha256": "aab294b77475e2f39ffe7d0b7460c2268438ff79034360719e48cb5ca523c9e2"
     },
     {
       "path": "prompts/chief-of-staff.md",
-      "bytes": 16086,
-      "sha256": "4ac09bde2f676962c628d3b75efd65881559da7bee2f6c7ff52b010cdce90265"
+      "bytes": 16549,
+      "sha256": "0c63f46121906749910cb8dbce52d9306328805b1eb8b618d13e9eef0022f0e9"
     },
     {
       "path": "prompts/operator-policy.template.md",
@@ -329,8 +329,8 @@
     },
     {
       "path": "prompts/triage.md",
-      "bytes": 3637,
-      "sha256": "1dc4cec6eaa9913e31b7c629e664e1ea3d281ec97903c5ecaec9bce66a6e0489"
+      "bytes": 4259,
+      "sha256": "abddfa1aa229e215e84777ea5200832e3b07927d623db06b0c45f84ddb5f0e35"
     },
     {
       "path": "public/cove-notification-icon.png",
@@ -439,8 +439,8 @@
     },
     {
       "path": "scripts/cove-email-runner.ts",
-      "bytes": 12481,
-      "sha256": "89d0891373d898b4dd65f728441eb91227e8e99d8f3e79a20c2248aaa943fde3"
+      "bytes": 13317,
+      "sha256": "3bb30bbab6bb2cbada3cf44fc9a674a0f5255933d9cc80fd8bdc503bcc007533"
     },
     {
       "path": "scripts/cove-email-triage.sh",
@@ -594,8 +594,8 @@
     },
     {
       "path": "scripts/install-cove-local.sh",
-      "bytes": 54400,
-      "sha256": "a776f4156dfc590db061ba30eff0d2ab1566903071ec8ccd720be0341c6a84ad"
+      "bytes": 55066,
+      "sha256": "5c684b52cddef8571545a0a82c8c67b1f665d99a396bdbc6742c6a7d5f483539"
     },
     {
       "path": "scripts/install-cove-voice.sh",
@@ -701,6 +701,11 @@
       "path": "scripts/lib/retarget-skill-base.mjs",
       "bytes": 2662,
       "sha256": "8cc190c6d6bac94b92d1bbda0619d377a14332624f88a4aedc2bfa85f6cb3677"
+    },
+    {
+      "path": "scripts/lib/seed-operator-policy.mjs",
+      "bytes": 2551,
+      "sha256": "6fcaf37dcff2d1f5d80bba71c1213aa5cf579362e8da9bf5f21eaef0f4c8b768"
     },
     {
       "path": "scripts/meeting-followups.mjs",
@@ -1509,8 +1514,8 @@
     },
     {
       "path": "src/lib/buddy/errors.ts",
-      "bytes": 2952,
-      "sha256": "35d78316720a4b38d199081d9397e0093f3f4516f70c184c1cbfdcea8341f782"
+      "bytes": 2490,
+      "sha256": "3a9c5adc55dd7da51132245ebc7d5509d379c86a1c0cda82b11447b1bbd7e875"
     },
     {
       "path": "src/lib/buddy/feedback.ts",
@@ -1569,8 +1574,8 @@
     },
     {
       "path": "src/lib/chief-of-staff/daily-planning.ts",
-      "bytes": 36737,
-      "sha256": "add2508fff1e15d95feb2282836b2bd82ec742681e4a9b27c17e17b61164e76b"
+      "bytes": 38828,
+      "sha256": "8102300b9e295ab389997a0b54d2547f2816ccf631e9b10a0d543a247a551094"
     },
     {
       "path": "src/lib/chief-of-staff/driver.ts",
@@ -1594,8 +1599,8 @@
     },
     {
       "path": "src/lib/chief-of-staff/planning-lessons.ts",
-      "bytes": 1658,
-      "sha256": "d6a5010b14997078d6b60910d2043a9f87048b80c68c24711c12ecd20f12f9df"
+      "bytes": 1733,
+      "sha256": "b4d4ddd2a59a94edbb7663fe43f625936b1be51f8312fdc31102fc940c47866d"
     },
     {
       "path": "src/lib/chief-of-staff/planning-time-text.ts",
@@ -1614,8 +1619,8 @@
     },
     {
       "path": "src/lib/chief-of-staff/snapshot.ts",
-      "bytes": 22523,
-      "sha256": "a06527123de98278a19a978f7145fb80e6ea7bc8d2f727c0cee80f319bb6d89a"
+      "bytes": 22663,
+      "sha256": "f9cee33a4ceb207f6d4db620270fdedad92910f8ccc7eb9156cb126d2b263231"
     },
     {
       "path": "src/lib/chief-of-staff/storage.ts",
@@ -1679,8 +1684,8 @@
     },
     {
       "path": "src/lib/claude-execution/worker.ts",
-      "bytes": 63035,
-      "sha256": "d2fb483dfbe9c7a77d4c0758f4d9075db45a11675fcf52bad57559cc0b65a033"
+      "bytes": 63351,
+      "sha256": "8de24abd9e625eba45d4634846105e6c41e05be544a8fd898972dad103bb1116"
     },
     {
       "path": "src/lib/crm/contact-context.ts",
@@ -1834,8 +1839,8 @@
     },
     {
       "path": "src/lib/day-plan/brief.ts",
-      "bytes": 60488,
-      "sha256": "2d86d7dcfcf4d53601b1981fda7bb6561e32474547fb9b547d2bfac6e3077a3d"
+      "bytes": 60640,
+      "sha256": "3ed1ea9d6a674d163d9b2c386386581a7e047da3512368922da7fb76e20b074d"
     },
     {
       "path": "src/lib/day-plan/candidates.ts",
@@ -1854,8 +1859,8 @@
     },
     {
       "path": "src/lib/day-plan/planning.ts",
-      "bytes": 21424,
-      "sha256": "92cfc763178ddb3ffdda2fa31a79820677dc47344fc8e08896588320277027ed"
+      "bytes": 21744,
+      "sha256": "d48ed7deb3e5023c6335b889ef0759a7cd1ea87edea624342537a7e2ed55bc5b"
     },
     {
       "path": "src/lib/day-plan/presentation.ts",
@@ -1879,8 +1884,8 @@
     },
     {
       "path": "src/lib/day-plan/store.ts",
-      "bytes": 218806,
-      "sha256": "577a26dbc8ce933b57fb192cdd5a2482aaa75cba1f67d992286e31fd51910730"
+      "bytes": 218861,
+      "sha256": "647f4a752171a4e8866f1518a76ef4db7d58fb83337173be4e5cf8bde4eba9db"
     },
     {
       "path": "src/lib/day-plan/types.ts",
@@ -2004,8 +2009,8 @@
     },
     {
       "path": "src/lib/intake/meeting-analysis.ts",
-      "bytes": 59598,
-      "sha256": "a28de2ec97749207ea7fb2523c8245a3fa09ada6fbfc3bd9768e12f64f19e872"
+      "bytes": 67871,
+      "sha256": "64d224f644f64258c4ae686294c6f780573ee7872ae1b5834db129ae8280f79c"
     },
     {
       "path": "src/lib/intake/meeting-detection.ts",
@@ -2034,13 +2039,18 @@
     },
     {
       "path": "src/lib/intake/run.ts",
-      "bytes": 23664,
-      "sha256": "66127d8c00a7347b83568ee6f96f7f751a35121fbf6f9080a01a85fac64f5c7e"
+      "bytes": 24788,
+      "sha256": "a04ed1d288a0904a21545a961fc992519a26e99fbc937779d72fa79dcbb53420"
+    },
+    {
+      "path": "src/lib/intake/sent-mail-reconciliation.ts",
+      "bytes": 8409,
+      "sha256": "400d4e6a819eb07249dbb4c4b776a4f64c8034a32ebc1e64bb37555480e982ff"
     },
     {
       "path": "src/lib/intake/task-writer.ts",
-      "bytes": 21818,
-      "sha256": "2ed60723ba88fcbd8091d3109fcac2ea1fe7ef063995caf9ae9271281a8ea1d7"
+      "bytes": 24647,
+      "sha256": "e86b3ed2c550f792660bed6be92134764879993566f4399dbcbe769c24288d8b"
     },
     {
       "path": "src/lib/jev/client.ts",
@@ -2094,8 +2104,8 @@
     },
     {
       "path": "src/lib/model-runner-runtime.mjs",
-      "bytes": 22151,
-      "sha256": "f55a5df1eefd0034f69ab5cb078622a896fbe8f7dadef7a04ab7037ba3e3550c"
+      "bytes": 23497,
+      "sha256": "030199a5829a6af58d3aaff18a67d53d7d16ad8a1dd20fc10e38ddf0e3d40810"
     },
     {
       "path": "src/lib/model-runner.ts",
@@ -2143,6 +2153,11 @@
       "sha256": "91b679f6f3aee56458f77a245f8fbcd64441a3bba5b9e8495267849083cf9f9c"
     },
     {
+      "path": "src/lib/provider-signin-runtime.mjs",
+      "bytes": 2805,
+      "sha256": "61e1eff6a970c628cbfc3b23308596551a2977821606114df66740cd52f28fc2"
+    },
+    {
       "path": "src/lib/quiet-current/arrival-cache.ts",
       "bytes": 4815,
       "sha256": "68157dc539398b9f8f74c12af084733c616fc147ea8239e4513084f3dad1c7b6"
@@ -2179,8 +2194,8 @@
     },
     {
       "path": "src/lib/reliability/job-failure-copy.ts",
-      "bytes": 8591,
-      "sha256": "d7fff90a8fcf52151cea854098def5109684596e7da73c7852edade4e9796499"
+      "bytes": 9434,
+      "sha256": "536253fd34095d11dd728892430b9afdd619af5a458a7a5c7af4162566a21024"
     },
     {
       "path": "src/lib/reliability/jobs.ts",
@@ -2199,8 +2214,8 @@
     },
     {
       "path": "src/lib/reliability/recoveries.ts",
-      "bytes": 3405,
-      "sha256": "9a99c8715d0d5ea29d3c6e1fac812f8732f8653cfc2e36a99c616f32fc8d968f"
+      "bytes": 4444,
+      "sha256": "33803de930a23eac4a646ba1ca47b0667f8530a3ac1301ad136bc569553c4cae"
     },
     {
       "path": "src/lib/reliability/route-failure.ts",
@@ -2334,8 +2349,8 @@
     },
     {
       "path": "src/lib/triage/protocol.ts",
-      "bytes": 6688,
-      "sha256": "30a25c04724f47a4eaa73eb38991c50f0e2521cfb7fe044506ec0c05c6e9a5e1"
+      "bytes": 7943,
+      "sha256": "d00e83990a83468a724552ea06f815228756dd64f363cb4f3752ca1eb628bdb9"
     },
     {
       "path": "src/lib/workspace/config.ts",
@@ -2401,6 +2416,11 @@
       "path": "tests/agent-settings-usage.test.mjs",
       "bytes": 19288,
       "sha256": "eb945d1ee37785ef6a09df8fec7f899f2f76e494fbdab82a1d69677c8183dd72"
+    },
+    {
+      "path": "tests/analyst-appends-to-existing-card.regression-1.test.mjs",
+      "bytes": 11072,
+      "sha256": "f1ee5f599551fe5c2f15c98ca7c2c940ea96aec62da54411de19217afc4501fc"
     },
     {
       "path": "tests/apple-reminders-api.test.mjs",
@@ -2663,6 +2683,11 @@
       "sha256": "83ea6d02749bb4db14b099a20e6fde2a29885e391d93488e1100fb3ab4bc9bb0"
     },
     {
+      "path": "tests/codex-signed-out-says-so.regression-1.test.mjs",
+      "bytes": 7388,
+      "sha256": "7aa66a2b0a394b8dd65b834a1ec2e0fa4e814233bf797402cdc803e2fba1e58d"
+    },
+    {
       "path": "tests/contact-context.test.mjs",
       "bytes": 3496,
       "sha256": "412f696f8f1395c9281e9d85d36a6000e0ce118c325538c2188f3f68edd8e13c"
@@ -2774,8 +2799,8 @@
     },
     {
       "path": "tests/day-plan-brief.test.mjs",
-      "bytes": 132923,
-      "sha256": "4755431c9f4bdc24dd93285db8fb2caf86b4c6cb8b83ae699a14a3a996e62e3e"
+      "bytes": 132946,
+      "sha256": "2dc872cb97975a8cd03c0454a600c7b9c0c19c84f6c234b298985d70cd5dbed5"
     },
     {
       "path": "tests/day-plan-candidates.test.mjs",
@@ -2815,7 +2840,7 @@
     {
       "path": "tests/day-plan-store.test.mjs",
       "bytes": 95583,
-      "sha256": "7fa81cc7912336febcbe7de3b47048b0f816dc7ca487dc79ab16e839f0e3b24e"
+      "sha256": "3e453997e7b476fd477a19636bca8558b9b288b76adee534a55265ef02a55264"
     },
     {
       "path": "tests/day-settlement-complete-controls.test.mjs",
@@ -3108,6 +3133,11 @@
       "sha256": "8fc1a9521a783066737087dd69c305a372ed9e953e458035e589b1804ceafc18"
     },
     {
+      "path": "tests/intake-appends-to-existing-card.regression-1.test.mjs",
+      "bytes": 7440,
+      "sha256": "9b4f023afc1d70eff024126073661a086a9b4402d5ce4daeadd00be01af6fdbb"
+    },
+    {
       "path": "tests/intake-database-guard.regression-1.test.mjs",
       "bytes": 2573,
       "sha256": "068c9e7b8e9ef692c6d7bc8699a91b2659d16b330f9e6b5d8ed7e22602703ea9"
@@ -3124,13 +3154,13 @@
     },
     {
       "path": "tests/intake-triage-retry.regression-1.test.mjs",
-      "bytes": 6888,
-      "sha256": "7469ad3a0628a3938bbace1bfa4aa96590ee7799b6e7af5dd664bd4747fe5bd4"
+      "bytes": 6916,
+      "sha256": "0fc28ee39486a754518e6e54a161ad6eba9847cd87b4ff213517056893a6a99c"
     },
     {
       "path": "tests/intake-triage.test.mjs",
-      "bytes": 27943,
-      "sha256": "d0dcbe406b2de57192176fd7582c6a7b93d955ed0d04d8a22de5d36df6878df8"
+      "bytes": 27971,
+      "sha256": "f3356ecf06f15a2da97b6993371a5bf58647f6cd7e538b91c3023d189eaebcf9"
     },
     {
       "path": "tests/intake-urgent-banner-provenance.regression-1.test.mjs",
@@ -3219,8 +3249,8 @@
     },
     {
       "path": "tests/meeting-consolidation.test.mjs",
-      "bytes": 11149,
-      "sha256": "a940aa42643bc57821e79af6f448e33b2535f9b41cdb1f2b60396a89e90c5a1d"
+      "bytes": 11177,
+      "sha256": "77b89c0f8345bcb5fa7fd1eefb4f73f3244e39062ed472f676e2610457d3f911"
     },
     {
       "path": "tests/meeting-detection.test.mjs",
@@ -3368,6 +3398,11 @@
       "sha256": "2635e6cc0e3d2c0b605370467de0c2fa9adc16a9919c0e6e884f63d61191b828"
     },
     {
+      "path": "tests/operator-policy-reaches-the-lanes.regression-1.test.mjs",
+      "bytes": 4175,
+      "sha256": "9d953e5ca71a377ae498e81f2d93c566a95f29f8cc48d968f4dacb77e436ef22"
+    },
+    {
       "path": "tests/operator-policy.test.mjs",
       "bytes": 3441,
       "sha256": "ac70fa22ce7c76c3cebceb414d93e34df89e3dfa7ef3272fc0ca8449ff638442"
@@ -3391,6 +3426,11 @@
       "path": "tests/pipeline.test.mjs",
       "bytes": 7100,
       "sha256": "903c6ead5314f07fb935f262ec51b5f12686cc88b382b305543315872c87d970"
+    },
+    {
+      "path": "tests/planner-today-selection.regression-1.test.mjs",
+      "bytes": 7883,
+      "sha256": "995fa3e0ed38c9e469a969c830ff031dc9c355bb8f9aef04095d0c3dbf14f623"
     },
     {
       "path": "tests/planning-local-dates.test.mjs",
@@ -3583,6 +3623,11 @@
       "sha256": "696977beee2b3188b91e82c6f5af198f78e4284cc4481c0003787f9abc7b2277"
     },
     {
+      "path": "tests/sent-mail-proposes-done.regression-1.test.mjs",
+      "bytes": 6700,
+      "sha256": "6cadccb149940cf177e60f3ae1ee2beca66cc7fb8aae0331716b0f27c75b223b"
+    },
+    {
       "path": "tests/settled-today-controls.test.mjs",
       "bytes": 3989,
       "sha256": "d2b49706046f740933ba38838c7127608104392a873cff7949b378571b84deaa"
@@ -3709,8 +3754,8 @@
     },
     {
       "path": "tests/triage-surface-delivery-asymmetry.regression-1.test.mjs",
-      "bytes": 11296,
-      "sha256": "6fb8cbf7e2926072cf58717a3e9642f2e737a1648c1b1fd289fde050ec74ceb6"
+      "bytes": 11324,
+      "sha256": "dd54892a061429de85910d974601b4999fb55e81bbf83b923786a64a185c6d4c"
     },
     {
       "path": "tests/urgent-email-silent-drop.regression-1.test.mjs",
