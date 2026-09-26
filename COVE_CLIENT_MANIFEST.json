@@ -1,11 +1,11 @@
 {
   "version": 1,
   "product": "Cove",
-  "source_sha": "5d2c6a80247e385028fea9aa5fcad6dbc4e7b6e5",
+  "source_sha": "9f116ad1ea1929e844275613ab4d8f899830e6cb",
   "source_worktree_dirty": false,
   "allow_dirty": false,
-  "exported_at": "2026-09-26T02:15:44.453Z",
-  "file_count": 759,
+  "exported_at": "2026-09-26T02:41:48.174Z",
+  "file_count": 764,
   "files": [
     {
       "path": ".claude/skills/cove-morning-brief/SKILL.md",
@@ -99,8 +99,8 @@
     },
     {
       "path": "SETUP.md",
-      "bytes": 58961,
-      "sha256": "ad961a79cac937e5e2850b14724d31fe05da4d9ce2673ad99ef712cf67144abd"
+      "bytes": 59008,
+      "sha256": "b6fb2e631c0018c62d9af926f2f1cfeaeb1830832022f109873f09b33ce5b67e"
     },
     {
       "path": "buddy/.gitignore",
@@ -289,8 +289,8 @@
     },
     {
       "path": "package.json",
-      "bytes": 3951,
-      "sha256": "8386c5719cbc50ceb432fe315f45dceec32c46b0ad7c6b953ba345e9cd657312"
+      "bytes": 3927,
+      "sha256": "4c97d8cd7f77fa82682b9fdd777faf8dfa5cf9fece6d24ddb05b4f880790cda7"
     },
     {
       "path": "postcss.config.mjs",
@@ -479,8 +479,8 @@
     },
     {
       "path": "scripts/cove-jobs.ts",
-      "bytes": 9211,
-      "sha256": "86864d8df5a0fd806a9389b3906daaa914a32051399af44ef40e12d1620dddbc"
+      "bytes": 9676,
+      "sha256": "bb0470211e9e02437bcabcf91177f7746ca375486cfd8f8ffa378441de4c6040"
     },
     {
       "path": "scripts/cove-meeting-watch.mjs",
@@ -584,8 +584,8 @@
     },
     {
       "path": "scripts/export-cove-client.mjs",
-      "bytes": 8028,
-      "sha256": "a6ae274859b785b9bcbb75aab3a088ad1848d778f89c476826de49ffb92b4701"
+      "bytes": 8283,
+      "sha256": "b909974227492ec922ee3bf0b2bcd9452e3c08d6aa78dbcf11eb432b4dc0c1ba"
     },
     {
       "path": "scripts/hooks/cove-orchestrator.sh",
@@ -594,8 +594,8 @@
     },
     {
       "path": "scripts/install-cove-local.sh",
-      "bytes": 55066,
-      "sha256": "5c684b52cddef8571545a0a82c8c67b1f665d99a396bdbc6742c6a7d5f483539"
+      "bytes": 55841,
+      "sha256": "935771b205de3bea235541f0b6cc56bd9cf67799f32b82c87d2e7e94bf091ee4"
     },
     {
       "path": "scripts/install-cove-voice.sh",
@@ -2019,8 +2019,8 @@
     },
     {
       "path": "src/lib/intake/meeting-followups.mjs",
-      "bytes": 10853,
-      "sha256": "7d6042564947cd86b4ee240221bdc5a5e242bddc026e081494f7a41820284bbf"
+      "bytes": 12004,
+      "sha256": "3cdfe1ad4e755a94e73268182a2779365f902a1fd0e57bdb70ed54a57d5f7172"
     },
     {
       "path": "src/lib/intake/meeting-pipeline.ts",
@@ -2104,8 +2104,8 @@
     },
     {
       "path": "src/lib/model-runner-runtime.mjs",
-      "bytes": 23497,
-      "sha256": "030199a5829a6af58d3aaff18a67d53d7d16ad8a1dd20fc10e38ddf0e3d40810"
+      "bytes": 27287,
+      "sha256": "f873829325204df2af5237d525265a4990f854398496be9f717464023b691d84"
     },
     {
       "path": "src/lib/model-runner.ts",
@@ -2139,8 +2139,8 @@
     },
     {
       "path": "src/lib/operator-runtime.mjs",
-      "bytes": 3211,
-      "sha256": "b9a92b86965a3b4cfa1550b69dc06a1a422ee40249a5406ad3e17046db340300"
+      "bytes": 4092,
+      "sha256": "65189536c6391f991e235025f4c7d2c901977cf97c3975315249fe09e9bfb5fa"
     },
     {
       "path": "src/lib/operator.ts",
@@ -2194,8 +2194,8 @@
     },
     {
       "path": "src/lib/reliability/job-failure-copy.ts",
-      "bytes": 9434,
-      "sha256": "536253fd34095d11dd728892430b9afdd619af5a458a7a5c7af4162566a21024"
+      "bytes": 10117,
+      "sha256": "835b3b71758e88e2c6ccc64f495f606bb7ede4b707a87467f8fc0826aee97af0"
     },
     {
       "path": "src/lib/reliability/jobs.ts",
@@ -2683,6 +2683,11 @@
       "sha256": "83ea6d02749bb4db14b099a20e6fde2a29885e391d93488e1100fb3ab4bc9bb0"
     },
     {
+      "path": "tests/codex-connector-check-answers-more-than-one-sentence.regression-1.test.mjs",
+      "bytes": 4275,
+      "sha256": "f12687d15447d7f70eb1379beef4e778a6409655ff546d06b1c0c95b11b68ed0"
+    },
+    {
       "path": "tests/codex-signed-out-says-so.regression-1.test.mjs",
       "bytes": 7388,
       "sha256": "7aa66a2b0a394b8dd65b834a1ec2e0fa4e814233bf797402cdc803e2fba1e58d"
@@ -2726,6 +2731,11 @@
       "path": "tests/cove-mobile.test.mjs",
       "bytes": 16670,
       "sha256": "207a1566518d5326e0145a31f8c3d2e6ae518dd1641f8ae9ed6cefebe6688ed3"
+    },
+    {
+      "path": "tests/cove-needs-node-24.regression-1.test.mjs",
+      "bytes": 3298,
+      "sha256": "0fa4525b3d980b83a61947faf122d976046e4a7c0ceb336e64e65cc5fc72cdf9"
     },
     {
       "path": "tests/cove-rest-route.test.mjs",
@@ -2963,9 +2973,19 @@
       "sha256": "42c4adb897336a751daff94f6315a2a0a6da0fe5503154b0eb6d2b59b9a1e22a"
     },
     {
+      "path": "tests/email-voice-reaches-the-lane-that-runs.regression-1.test.mjs",
+      "bytes": 3424,
+      "sha256": "c6729d8694ce3f8fbd235ed517f55df7d297862a463774cf83ea5fb5ebdc979f"
+    },
+    {
       "path": "tests/error-panel-copy.test.mjs",
       "bytes": 3595,
       "sha256": "778193ec1e6429e2c3fdf9aa4234cb129ef86d8fd14e6b111916bb7232e1139c"
+    },
+    {
+      "path": "tests/export-carries-the-node-it-needs.regression-1.test.mjs",
+      "bytes": 2517,
+      "sha256": "5fc33ce226db6b7290828e84463557c8de455b4c0d85d9668a5a3c49d2018027"
     },
     {
       "path": "tests/export-client-binary.regression-1.test.mjs",
@@ -2974,8 +2994,8 @@
     },
     {
       "path": "tests/export-client.test.mjs",
-      "bytes": 9048,
-      "sha256": "dee6134c62146002b26e00d6729c77b2d67df3a0b87e0ebcc69f780ddef8c80a"
+      "bytes": 9229,
+      "sha256": "0845ce225e6f8fc16cdf2f9fe7adc249d29c70e2ff649c77ad097c24df5d6513"
     },
     {
       "path": "tests/failed-reminder-report-says-whose-words.regression-1.test.mjs",
@@ -3661,6 +3681,11 @@
       "path": "tests/snapshot-attention-day-timezone.regression-1.test.mjs",
       "bytes": 3559,
       "sha256": "e21fdd64086b573d72e751fd927b0ba57c4c3a602b49e77158c611340f44459c"
+    },
+    {
+      "path": "tests/someone-elses-commitment-stays-theirs.regression-1.test.mjs",
+      "bytes": 2724,
+      "sha256": "f82dda7b293b2c56aaa47309966cbab3d4946319290afd74194b4e3269c8761b"
     },
     {
       "path": "tests/stop-reports-hand-started-cove.regression-1.test.mjs",
