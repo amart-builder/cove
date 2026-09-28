@@ -32,7 +32,8 @@ test('Arrival and closeout expose the shared task fields editor', () => {
 
   assert.match(taskSheet, /<TaskFieldsEditor/);
   assert.match(taskSheet, /task=\{taskRecord\}/);
-  assert.match(taskSheet, /today\?\.task \?\? \(task \? tasksById\.get\(task\.id\) : undefined\)/);
+  assert.match(taskSheet, /const boardTaskId = task\?\.id \?\? completed\?\.id;/);
+  assert.match(taskSheet, /today\?\.task \?\? \(boardTaskId \? tasksById\.get\(boardTaskId\) : undefined\)/);
   assert.match(taskSheet, /onSaveTask\(taskRecord\._id, patch\)/);
   assert.match(arrivalGrid, /tasksById=\{tasksById\}/);
   assert.match(settlement, /aria-label=\{`Edit \$\{item\.title\}`\}/);

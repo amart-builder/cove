@@ -11,7 +11,12 @@ import {
 import { ownerLabel } from '@/lib/day-plan/presentation';
 import type { DayPlanOwner } from '@/lib/day-plan/types';
 import TaskFieldsEditor, { type Task } from '../TaskFieldsEditor';
-import type { MorningArrivalBoardTask, MorningArrivalItem, MorningArrivalProps } from '../MorningArrival';
+import type {
+  MorningArrivalBoardTask,
+  MorningArrivalCompletedTask,
+  MorningArrivalItem,
+  MorningArrivalProps,
+} from '../MorningArrival';
 import ModalScrim from './ModalScrim';
 
 const OWNERS: DayPlanOwner[] = ['me', 'claude', 'together'];
@@ -27,7 +32,12 @@ type BenchSheetDetail = {
   task: MorningArrivalBoardTask;
 };
 
-export type TaskSheetDetail = TodaySheetDetail | BenchSheetDetail;
+type CompletedSheetDetail = {
+  kind: 'completed';
+  task: MorningArrivalCompletedTask;
+};
+
+export type TaskSheetDetail = TodaySheetDetail | BenchSheetDetail | CompletedSheetDetail;
 
 export default function TaskSheet({
   detail,
@@ -37,6 +47,7 @@ export default function TaskSheet({
   onOwnerChange,
   onRemove,
   onComplete,
+  onReopen,
   onAdd,
   onSaveTask,
   tasksById,
@@ -48,6 +59,7 @@ export default function TaskSheet({
   onOwnerChange: MorningArrivalProps['onOwnerChange'];
   onRemove: MorningArrivalProps['onRemove'];
   onComplete: MorningArrivalProps['onComplete'];
+  onReopen: (taskId: string, title: string) => Promise<void>;
   onAdd: (task: MorningArrivalBoardTask) => boolean | Promise<boolean>;
   onSaveTask: (taskId: string, patch: Partial<Task>) => Promise<void>;
   tasksById: ReadonlyMap<string, Task>;
@@ -56,23 +68,25 @@ export default function TaskSheet({
   const descriptionId = useId();
   const [addMessage, setAddMessage] = useState('');
   const [actionError, setActionError] = useState('');
-  const [pendingAction, setPendingAction] = useState<'remove' | 'complete' | 'add'>();
+  const [pendingAction, setPendingAction] = useState<'remove' | 'complete' | 'add' | 'reopen'>();
   const [savingTask, setSavingTask] = useState(false);
   const [taskError, setTaskError] = useState('');
   const today = detail.kind === 'today' ? detail.view : undefined;
   const task = detail.kind === 'bench' ? detail.task : undefined;
-  const title = today?.title ?? task?.title ?? '';
+  const completed = detail.kind === 'completed' ? detail.task : undefined;
+  const title = today?.title ?? task?.title ?? completed?.title ?? '';
   const description = today
     ? today.whyToday?.trim() || today.summary?.trim() || today.description?.trim()
-    : task?.description?.trim();
-  const project = today?.project ?? task?.project;
+    : (task ?? completed)?.description?.trim();
+  const project = today?.project ?? task?.project ?? completed?.project;
   const due = today?.deadline ?? task?.due;
-  const taskRecord = today?.task ?? (task ? tasksById.get(task.id) : undefined);
+  const boardTaskId = task?.id ?? completed?.id;
+  const taskRecord = today?.task ?? (boardTaskId ? tasksById.get(boardTaskId) : undefined);
   const origin = taskRecord?.origin?.trim();
   const actionBusy = busy || savingTask || pendingAction !== undefined;
 
   async function runTodayAction(
-    action: 'remove' | 'complete',
+    action: 'remove' | 'complete' | 'reopen',
     mutation: () => void | Promise<void>,
   ) {
     setActionError('');
@@ -85,7 +99,9 @@ export default function TaskSheet({
       setActionError(
         action === 'remove'
           ? "Cove couldn't move this task out of today. Try again."
-          : "Cove couldn't mark this task done. Try again.",
+          : action === 'reopen'
+            ? "Cove couldn't reopen this task. Try again."
+            : "Cove couldn't mark this task done. Try again.",
       );
       setPendingAction(undefined);
     }
@@ -141,7 +157,7 @@ export default function TaskSheet({
       <p className="text-[10.5px] font-semibold uppercase tracking-[0.24em] text-muted-foreground">
         {detail.kind === 'today'
           ? (detail.focusNumber ? `Focus ${detail.focusNumber}` : 'Today')
-          : 'Not today'}
+          : completed ? 'Already completed' : 'Not today'}
       </p>
       <h2 id={titleId} className="mt-2.5 text-xl font-semibold leading-[1.32] tracking-[-0.015em] text-foreground">
         {title}
@@ -244,6 +260,24 @@ export default function TaskSheet({
               onClick={() => void addBenchTask()}
             >
               {pendingAction === 'add' ? 'Adding…' : 'Add to today'}
+            </button>
+          </>
+        ) : completed ? (
+          <>
+            <button
+              type="button"
+              className="press-scale min-h-10 text-[13px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent-blue/40"
+              onClick={onClose}
+            >
+              Close
+            </button>
+            <button
+              type="button"
+              disabled={actionBusy}
+              className="press-scale min-h-10 rounded-xl border bg-foreground px-4 text-[13.5px] font-medium text-background outline-none hover:opacity-90 focus-visible:ring-2 focus-visible:ring-accent-blue/40 disabled:opacity-40"
+              onClick={() => void runTodayAction('reopen', () => onReopen(completed.id, completed.title))}
+            >
+              {pendingAction === 'reopen' ? 'Reopening…' : 'Reopen'}
             </button>
           </>
         ) : null}

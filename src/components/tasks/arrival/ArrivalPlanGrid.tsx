@@ -26,7 +26,13 @@ import {
   type ScreenReaderInstructions,
 } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
-import type { MorningArrivalBoardTask, MorningArrivalItem, MorningArrivalProps } from '../MorningArrival';
+import type {
+  MorningArrivalBoardTask,
+  MorningArrivalCompletedTask,
+  MorningArrivalItem,
+  MorningArrivalProps,
+} from '../MorningArrival';
+import type { DayPlanMutationResult } from '@/lib/day-plan/types';
 import type { Task } from '../TaskFieldsEditor';
 import TaskSheet, { type TaskSheetDetail } from './TaskSheet';
 import { arrivalDropOutcome, type ArrivalDropZone } from '@/lib/day-plan/presentation';
@@ -34,6 +40,7 @@ import { arrivalDropOutcome, type ArrivalDropZone } from '@/lib/day-plan/present
 export const INITIAL_PRIORITY_ZONE_ID = 'arrival-initial-priorities-zone';
 export const ALSO_TODAY_ZONE_ID = 'arrival-also-today-zone';
 export const NOT_TODAY_ZONE_ID = 'arrival-not-today-zone';
+export const ALREADY_COMPLETED_ZONE_ID = 'arrival-already-completed-zone';
 // Kept as an alias for older callers that treated all of Today as one zone.
 export const TODAY_ZONE_ID = ALSO_TODAY_ZONE_ID;
 const BOARD_TASK_LIMIT = 7;
@@ -41,11 +48,13 @@ const DROP_ZONES: Record<string, ArrivalDropZone> = {
   [INITIAL_PRIORITY_ZONE_ID]: 'priority',
   [ALSO_TODAY_ZONE_ID]: 'also-today',
   [NOT_TODAY_ZONE_ID]: 'not-today',
+  [ALREADY_COMPLETED_ZONE_ID]: 'completed',
 };
 const ZONE_LABELS: Record<ArrivalDropZone, string> = {
   priority: 'Initial priorities',
   'also-today': 'Also today',
   'not-today': 'Not today',
+  completed: 'Already completed',
 };
 const TODAY_TAG_CLASS = 'mb-2 inline-block rounded-full bg-muted px-2 py-[3px] text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground';
 const EXPANSION_KEY_PREFIX = 'cove.arrival.not-today-expanded.';
@@ -62,6 +71,12 @@ type OpenTaskSheet = {
 
 function firstPreview(...values: Array<string | undefined>) {
   return values.find((value) => value?.trim())?.trim();
+}
+
+// A proposal still awaiting acceptance, or one whose source already closed,
+// cannot be marked done from the plan.
+function isCompletable(view: MorningArrivalItem) {
+  return view.item.commitment !== 'pencil' && view.item.planningState !== 'resolved';
 }
 
 function cardKeyDown(event: React.KeyboardEvent<HTMLElement>, onOpen: (trigger: HTMLElement) => void) {
@@ -111,6 +126,53 @@ export async function persistArrivalPriorityDrag({
     if (moved) await onMoveToPosition(itemId, originalPosition, title);
     throw error;
   }
+}
+
+/**
+ * Puts a task that just arrived in Today (added from Not today, or reopened
+ * from Already completed) into the column it was dropped on. An added task
+ * lands at the end, which is Also today already; a reopened one comes back at
+ * its old spot, so it is moved to the end or into the last priority seat.
+ */
+export async function placeArrivingItem({
+  result,
+  taskId,
+  title,
+  zone,
+  focusCount,
+  onMoveToPosition,
+  onFocusCountChange,
+}: {
+  result: DayPlanMutationResult;
+  taskId: string;
+  title: string;
+  zone: 'priority' | 'also-today';
+  focusCount: 1 | 2 | 3;
+  onMoveToPosition: (itemId: string, position: number, title: string) => void | Promise<void>;
+  onFocusCountChange: (count: 1 | 2 | 3) => void | Promise<void>;
+}): Promise<string | undefined> {
+  const activeItems = result.plan.items
+    .filter((item) => item.decision === 'pending' || item.decision === 'preselected' || item.decision === 'accepted')
+    .sort((left, right) => left.position - right.position);
+  const originalPosition = activeItems.findIndex((item) => item.taskId === taskId);
+  if (originalPosition < 0) return undefined;
+  const itemId = activeItems[originalPosition].id;
+  // The saved focus count can be larger than the number of Today tasks, so
+  // count the seats other tasks really fill before choosing a spot.
+  const othersInFocus = Math.min(focusCount, activeItems.length - 1);
+  await persistArrivalPriorityDrag({
+    itemId,
+    title,
+    originalPosition,
+    nextPosition: zone === 'priority' ? othersInFocus : activeItems.length - 1,
+    focusCount,
+    nextFocusCount: (zone === 'priority'
+      ? Math.min(3, Math.max(focusCount, othersInFocus + 1))
+      : Math.max(1, othersInFocus)) as 1 | 2 | 3,
+    onMoveToPosition,
+    onFocusCountChange,
+  });
+  return itemId;
 }
 
 function ArrivalDropBucket({
@@ -293,7 +355,7 @@ function FocusCard({
           {preview ?? '\u00a0'}
         </p>
       </article>
-      <CompletionButton title={view.title} busy={busy || view.item.commitment === 'pencil' || view.item.planningState === 'resolved'} inverted onComplete={onComplete} />
+      <CompletionButton title={view.title} busy={busy || !isCompletable(view)} inverted onComplete={onComplete} />
       <KeyboardDragHandle
         title={view.title}
         disabled={busy}
@@ -376,7 +438,7 @@ function AlsoTodayCard({
           </p>
         )}
       </article>
-      <CompletionButton title={view.title} busy={busy || view.item.commitment === 'pencil' || view.item.planningState === 'resolved'} onComplete={onComplete} />
+      <CompletionButton title={view.title} busy={busy || !isCompletable(view)} onComplete={onComplete} />
       <KeyboardDragHandle
         title={view.title}
         disabled={busy}
@@ -460,10 +522,115 @@ function BenchCard({
   );
 }
 
+function ReopenButton({
+  title,
+  busy,
+  onReopen,
+}: {
+  title: string;
+  busy: boolean;
+  onReopen: () => unknown;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={`Reopen ${title}`}
+      title="Reopen"
+      disabled={busy}
+      className="press-scale absolute right-2.5 top-2.5 z-20 grid size-8 place-items-center rounded-full border border-border bg-card text-muted-foreground opacity-0 outline-none transition-[opacity,border-color,background-color,color] duration-150 hover:border-muted-foreground/50 hover:text-foreground focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-accent-blue/40 group-hover:opacity-100 disabled:opacity-0"
+      onClick={(event) => {
+        event.stopPropagation();
+        void Promise.resolve(onReopen()).catch(() => undefined);
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+      onTouchStart={(event) => event.stopPropagation()}
+    >
+      <svg aria-hidden="true" viewBox="0 0 16 16" className="size-3.5" fill="none">
+        <path d="M3.5 6.5a5 5 0 1 1 .9 5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+        <path d="M3.25 3v3.6h3.6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </button>
+  );
+}
+
+function CompletedCard({
+  task,
+  busy,
+  onOpen,
+  onReopen,
+}: {
+  task: MorningArrivalCompletedTask;
+  busy: boolean;
+  onOpen: (trigger: HTMLElement) => void;
+  onReopen: () => unknown;
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    setActivatorNodeRef,
+    transform,
+    isDragging,
+  } = useDraggable({ id: `completed:${task.id}`, disabled: busy });
+  const suppressClickRef = useRef(false);
+
+  useEffect(() => {
+    if (isDragging) {
+      suppressClickRef.current = true;
+      return;
+    }
+    if (!suppressClickRef.current) return;
+    const timeout = window.setTimeout(() => {
+      suppressClickRef.current = false;
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [isDragging]);
+
+  return (
+    <li
+      ref={setNodeRef}
+      style={{ transform: CSS.Translate.toString(transform) }}
+      className={isDragging ? 'group relative z-30 h-full opacity-75' : 'group relative h-full'}
+    >
+      <article
+        role="button"
+        tabIndex={busy ? -1 : 0}
+        aria-label={`Completed: ${task.title}`}
+        aria-haspopup="dialog"
+        aria-disabled={busy}
+        className="relative flex h-full min-h-24 cursor-pointer flex-col items-start rounded-[14px] border border-dashed bg-transparent px-[18px] py-4 text-left outline-none transition-[transform,box-shadow,background-color,border-color] duration-150 hover:-translate-y-0.5 hover:border-muted-foreground/40 hover:bg-card hover:shadow-lg focus-visible:ring-2 focus-visible:ring-accent-blue/40 active:translate-y-0 active:shadow-sm motion-reduce:transform-none dark:hover:bg-muted/70"
+        onPointerDown={(event) => listeners?.onPointerDown?.(event)}
+        onTouchStart={(event) => listeners?.onTouchStart?.(event)}
+        onClick={(event) => {
+          if (busy || suppressClickRef.current) return;
+          onOpen(event.currentTarget);
+        }}
+        onKeyDown={(event) => {
+          if (!busy) cardKeyDown(event, onOpen);
+        }}
+      >
+        <span className={TODAY_TAG_CLASS}>Done</span>
+        <h3 className="line-clamp-2 min-w-0 pr-6 text-[13.5px] font-medium leading-[1.4] tracking-[-0.004em] text-muted-foreground line-through decoration-muted-foreground/40">
+          {task.title}
+        </h3>
+      </article>
+      <ReopenButton title={task.title} busy={busy} onReopen={onReopen} />
+      <KeyboardDragHandle
+        title={task.title}
+        disabled={busy}
+        attributes={attributes}
+        setActivatorNodeRef={setActivatorNodeRef}
+        onKeyDown={(event) => listeners?.onKeyDown?.(event)}
+      />
+    </li>
+  );
+}
+
 export default function ArrivalPlanGrid({
   localDate,
   todayItems,
   notTodayTasks,
+  completedTasks,
   tasksById,
   focusCount,
   busy,
@@ -476,12 +643,14 @@ export default function ArrivalPlanGrid({
   onRemove,
   onComplete,
   onCompleteBoardTask,
+  onReopen,
   onAddTask,
   onSaveTask,
 }: {
   localDate: string;
   todayItems: MorningArrivalItem[];
   notTodayTasks: MorningArrivalBoardTask[];
+  completedTasks: MorningArrivalCompletedTask[];
   tasksById: ReadonlyMap<string, Task>;
   focusCount: 1 | 2 | 3;
   busy: boolean;
@@ -494,6 +663,7 @@ export default function ArrivalPlanGrid({
   onRemove: MorningArrivalProps['onRemove'];
   onComplete: MorningArrivalProps['onComplete'];
   onCompleteBoardTask: MorningArrivalProps['onCompleteBoardTask'];
+  onReopen: MorningArrivalProps['onReopen'];
   onAddTask: MorningArrivalProps['onAddTask'];
   onSaveTask: MorningArrivalProps['onSaveTask'];
 }) {
@@ -593,26 +763,41 @@ export default function ArrivalPlanGrid({
     }
     if (outcome.kind === 'unchanged') return;
 
+    if (activeId.startsWith('completed:')) {
+      const task = completedTasks.find((candidate) => candidate.id === activeId.slice(10));
+      if (!task || outcome.zone === 'completed') return;
+      const result = await onReopen(task.id, task.title, outcome.zone);
+      if (!result || outcome.zone === 'not-today') return;
+      await placeArrivingItem({
+        result,
+        taskId: task.id,
+        title: task.title,
+        zone: outcome.zone,
+        focusCount,
+        onMoveToPosition,
+        onFocusCountChange,
+      });
+      return;
+    }
+
     if (activeId.startsWith('not-today:')) {
       const task = notTodayTasks.find((candidate) => candidate.id === activeId.slice(10));
       if (!task) return;
+      if (outcome.zone === 'completed') {
+        await onCompleteBoardTask(task.id, task.title);
+        return;
+      }
       const result = await addTask(task);
       if (!result || overId !== INITIAL_PRIORITY_ZONE_ID || typeof result === 'boolean') return;
       const addedItem = result.plan.items.find((item) => item.taskId === task.id);
       if (!addedItem) return;
-      const originalPosition = result.plan.items
-        .filter((item) => item.decision === 'pending' || item.decision === 'preselected' || item.decision === 'accepted')
-        .sort((left, right) => left.position - right.position)
-        .findIndex((item) => item.id === addedItem.id);
-      if (originalPosition < 0) return;
       try {
-        await persistArrivalPriorityDrag({
-          itemId: addedItem.id,
+        await placeArrivingItem({
+          result,
+          taskId: task.id,
           title: task.title,
-          originalPosition,
-          nextPosition: focusCount,
+          zone: 'priority',
           focusCount,
-          nextFocusCount: (focusCount + 1) as 2 | 3,
           onMoveToPosition,
           onFocusCountChange,
         });
@@ -634,6 +819,11 @@ export default function ArrivalPlanGrid({
     const originalPosition = orderedToday.findIndex((view) => view.item.id === activeItemId);
     if (!activeView || originalPosition < 0) return;
     const startedInFocus = originalPosition < focusCount;
+
+    if (overId === ALREADY_COMPLETED_ZONE_ID) {
+      await onComplete(activeItemId, activeView.title);
+      return;
+    }
 
     if (overId === NOT_TODAY_ZONE_ID) {
       const nextFocusCount = startedInFocus && focusCount > 1
@@ -690,15 +880,19 @@ export default function ArrivalPlanGrid({
   // The one description of a drop, read by the spoken announcement and by the
   // handler that carries it out, so the two can never tell different stories.
   const readDrop = useCallback((activeId: string, overId: string | undefined) => {
-    const origin = activeId.startsWith('not-today:') ? 'not-today' as const : 'today' as const;
+    const origin = activeId.startsWith('not-today:')
+      ? 'not-today' as const
+      : activeId.startsWith('completed:') ? 'completed' as const : 'today' as const;
     const position = origin === 'today'
       ? orderedToday.findIndex((view) => view.item.id === activeId.slice(6))
       : -1;
+    const view = position >= 0 ? orderedToday[position] : undefined;
     return {
       origin,
       startedInFocus: position >= 0 && position < focusCount,
       over: overId ? DROP_ZONES[overId] : undefined,
       focusCount,
+      completable: !view || isCompletable(view),
     };
   }, [orderedToday, focusCount]);
 
@@ -711,17 +905,21 @@ export default function ArrivalPlanGrid({
       if (value.startsWith('not-today:')) {
         return notTodayTasks.find((task) => task.id === value.slice(10))?.title ?? 'Not today task';
       }
+      if (value.startsWith('completed:')) {
+        return completedTasks.find((task) => task.id === value.slice(10))?.title ?? 'Completed task';
+      }
       return 'Task';
     };
     const bucketLabel = (id: string | number | undefined) => {
       if (id === INITIAL_PRIORITY_ZONE_ID) return 'Initial priorities';
       if (id === ALSO_TODAY_ZONE_ID) return 'Also today';
       if (id === NOT_TODAY_ZONE_ID) return 'Not today';
+      if (id === ALREADY_COMPLETED_ZONE_ID) return 'Already completed';
       return undefined;
     };
     const announcements: Announcements = {
       onDragStart: ({ active }) =>
-        `Picked up ${itemLabel(active.id)}. Move to Initial priorities, Also today, or Not today.`,
+        `Picked up ${itemLabel(active.id)}. Move to Initial priorities, Also today, Not today, or Already completed.`,
       onDragOver: ({ active, over }) => {
         const bucket = bucketLabel(over?.id);
         return bucket ? `${itemLabel(active.id)} is over ${bucket}.` : undefined;
@@ -738,7 +936,7 @@ export default function ArrivalPlanGrid({
       draggable: 'Press Space to pick up a task. Use the arrow keys to choose a section, then press Space again to drop it. Press Escape to cancel.',
     };
     return { announcements, screenReaderInstructions };
-  }, [notTodayTasks, orderedToday, readDrop]);
+  }, [completedTasks, notTodayTasks, orderedToday, readDrop]);
 
   return (
     <section className="w-full px-6 pb-2 pt-10 sm:px-10 lg:px-16 lg:pt-11" aria-label="Plan your day">
@@ -875,6 +1073,40 @@ export default function ArrivalPlanGrid({
           </ul>
           </ArrivalDropBucket>
         </section>
+
+        <section className="mt-12" aria-labelledby="arrival-already-completed-title">
+          <h2
+            id="arrival-already-completed-title"
+            className="mb-[18px] text-[10.5px] font-semibold uppercase tracking-[0.24em] text-muted-foreground"
+          >
+            Already completed
+          </h2>
+          <ArrivalDropBucket
+            id={ALREADY_COMPLETED_ZONE_ID}
+            label="Already completed"
+            dragActive={Boolean(activeDragId)}
+          >
+            <ul className="grid min-h-24 grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-4">
+              {completedTasks.map((task) => (
+                <CompletedCard
+                  key={task.id}
+                  task={task}
+                  busy={busy}
+                  onOpen={(returnFocus) => {
+                    onInteract?.();
+                    setOpenSheet({ returnFocus, detail: { kind: 'completed', task } });
+                  }}
+                  onReopen={() => onReopen(task.id, task.title)}
+                />
+              ))}
+              {completedTasks.length === 0 && (
+                <li className="flex min-h-24 items-center px-2 text-[13px] leading-relaxed text-muted-foreground">
+                  Nothing finished yet today. Drop a task here to mark it done.
+                </li>
+              )}
+            </ul>
+          </ArrivalDropBucket>
+        </section>
       </DndContext>
 
       {/* Deliberately not a live region. dropNote is only ever set from the
@@ -898,6 +1130,9 @@ export default function ArrivalPlanGrid({
           onOwnerChange={onOwnerChange}
           onRemove={onRemove}
           onComplete={onComplete}
+          onReopen={async (taskId, title) => {
+            await onReopen(taskId, title);
+          }}
           onAdd={async (task) => Boolean(await addTask(task))}
           onSaveTask={onSaveTask}
           tasksById={tasksById}

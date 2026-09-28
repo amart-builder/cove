@@ -859,7 +859,8 @@ For Full Cove, guide the user through one five-minute website practice:
 3. Assign one owner.
    The agent chip opens a task-working session, while Together opens a planning session. Codex task sessions retain on-request approvals and can be resumed interactively when permission is needed. Explain the configured workspace and permission boundaries before assigning work; these sessions are distinct from the draft-only email gateway.
 4. Tap "Start my day."
-5. Open Focus Grid, switch one item into Focus, and have the user choose an
+5. Open Plan your day from the four-dot button, drag one item into Initial
+   priorities, and have the user choose an
    item to mark done and immediately undo. Confirm the original item, order,
    and owner return. Do not seed demo data or falsely leave real work completed.
 6. Tell Buddy: "New urgent thing, reshuffle my afternoon." Buddy now handles this directly. Review the proposed changes and tap Apply. Buddy never applies the preview by itself.

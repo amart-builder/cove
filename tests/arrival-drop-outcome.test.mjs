@@ -45,3 +45,24 @@ test('anything can be set down in Not today', () => {
   assert.deepEqual(drop('not-today', { startedInFocus: true, focusCount: 1 }), { kind: 'moved', zone: 'not-today' });
   assert.deepEqual(drop('not-today'), { kind: 'moved', zone: 'not-today' });
 });
+
+test('any open task can be dropped on Already completed, except a proposal not yet accepted', () => {
+  assert.deepEqual(drop('completed'), { kind: 'moved', zone: 'completed' });
+  assert.deepEqual(drop('completed', { startedInFocus: true, focusCount: 1 }), { kind: 'moved', zone: 'completed' });
+  assert.deepEqual(drop('completed', { origin: 'not-today' }), { kind: 'moved', zone: 'completed' });
+  assert.deepEqual(
+    drop('completed', { completable: false }),
+    { kind: 'refused', note: 'Accept this proposal before marking it done.' },
+  );
+});
+
+test('a completed task reopens into whichever column it is dragged to', () => {
+  assert.deepEqual(drop('completed', { origin: 'completed' }), { kind: 'unchanged' });
+  assert.deepEqual(drop('not-today', { origin: 'completed' }), { kind: 'moved', zone: 'not-today' });
+  assert.deepEqual(drop('also-today', { origin: 'completed' }), { kind: 'moved', zone: 'also-today' });
+  assert.deepEqual(drop('priority', { origin: 'completed' }), { kind: 'moved', zone: 'priority' });
+  assert.deepEqual(
+    drop('priority', { origin: 'completed', focusCount: 3 }),
+    { kind: 'refused', note: 'Initial priorities are full at three. Move one down first.' },
+  );
+});

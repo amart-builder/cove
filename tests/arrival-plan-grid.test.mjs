@@ -3,10 +3,12 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
   addNotTodayDropToToday,
+  ALREADY_COMPLETED_ZONE_ID,
   ALSO_TODAY_ZONE_ID,
   INITIAL_PRIORITY_ZONE_ID,
   NOT_TODAY_ZONE_ID,
   persistArrivalPriorityDrag,
+  placeArrivingItem,
   TODAY_ZONE_ID,
 } from '../src/components/tasks/arrival/ArrivalPlanGrid.tsx';
 
@@ -54,7 +56,7 @@ test('dragging announces human bucket names and rolls back a failed new-task pro
   );
 
   assert.match(source, /accessibility={dragAccessibility}/);
-  assert.match(source, /Move to Initial priorities, Also today, or Not today/);
+  assert.match(source, /Move to Initial priorities, Also today, Not today, or Already completed/);
   assert.match(source, /Use the arrow keys to choose a section/);
   assert.match(source, /await onRemove\(addedItem\.id, task\.title, true\)/);
 });
@@ -114,4 +116,110 @@ test('a failed focus-count save rolls the card back to its original position', a
   );
 
   assert.deepEqual(calls, ['move:0', 'focus:failed', 'move:2']);
+});
+
+const planWith = (items) => ({
+  plan: {
+    items: items.map(([id, taskId, decision], position) => ({ id, taskId, decision, position })),
+  },
+});
+
+test('Already completed is the last section, below Not today, and is its own drop zone', () => {
+  const source = readFileSync(
+    new URL('../src/components/tasks/arrival/ArrivalPlanGrid.tsx', import.meta.url),
+    'utf8',
+  );
+  const notToday = source.indexOf('id="arrival-not-today-title"');
+  const completed = source.indexOf('id="arrival-already-completed-title"');
+  assert.ok(notToday > 0 && completed > notToday);
+  assert.match(source, /id={ALREADY_COMPLETED_ZONE_ID}/);
+  assert.match(source, /useDraggable\({ id: `completed:\${task\.id}`/);
+  assert.match(source, /aria-label={`Reopen \${title}`}/);
+  assert.match(source, /detail: { kind: 'completed', task }/);
+  assert.notEqual(ALREADY_COMPLETED_ZONE_ID, NOT_TODAY_ZONE_ID);
+});
+
+test('dropping a Today card on Already completed completes it; a Not today card completes as a board task', () => {
+  const source = readFileSync(
+    new URL('../src/components/tasks/arrival/ArrivalPlanGrid.tsx', import.meta.url),
+    'utf8',
+  );
+  assert.match(source, /if \(overId === ALREADY_COMPLETED_ZONE_ID\) {\s*await onComplete\(activeItemId, activeView\.title\);/);
+  assert.match(source, /if \(outcome\.zone === 'completed'\) {\s*await onCompleteBoardTask\(task\.id, task\.title\);/);
+  assert.match(source, /await onReopen\(task\.id, task\.title, outcome\.zone\)/);
+});
+
+test('a task reopened into Initial priorities takes the next seat and widens the focus band', async () => {
+  const calls = [];
+  // Reopening restored C at its old spot, index 0, ahead of A and B.
+  const itemId = await placeArrivingItem({
+    result: planWith([['item-c', 'task-c', 'accepted'], ['item-a', 'task-a', 'accepted'], ['item-b', 'task-b', 'accepted'], ['item-x', 'task-x', 'completed']]),
+    taskId: 'task-c',
+    title: 'C',
+    zone: 'priority',
+    focusCount: 1,
+    onMoveToPosition: async (id, position) => calls.push(`move:${id}:${position}`),
+    onFocusCountChange: async (count) => calls.push(`focus:${count}`),
+  });
+  assert.equal(itemId, 'item-c');
+  assert.deepEqual(calls, ['move:item-c:1', 'focus:2']);
+});
+
+test('a task reopened into Also today goes to the end and leaves the focus band alone', async () => {
+  const calls = [];
+  await placeArrivingItem({
+    result: planWith([['item-a', 'task-a', 'accepted'], ['item-c', 'task-c', 'accepted'], ['item-b', 'task-b', 'accepted']]),
+    taskId: 'task-c',
+    title: 'C',
+    zone: 'also-today',
+    focusCount: 2,
+    onMoveToPosition: async (id, position) => calls.push(`move:${id}:${position}`),
+    onFocusCountChange: async (count) => calls.push(`focus:${count}`),
+  });
+  assert.deepEqual(calls, ['move:item-c:2']);
+});
+
+test('a task that already sits at the end of Also today is not moved again', async () => {
+  const calls = [];
+  await placeArrivingItem({
+    result: planWith([['item-a', 'task-a', 'accepted'], ['item-c', 'task-c', 'accepted']]),
+    taskId: 'task-c',
+    title: 'C',
+    zone: 'also-today',
+    focusCount: 1,
+    onMoveToPosition: async () => calls.push('move'),
+    onFocusCountChange: async () => calls.push('focus'),
+  });
+  assert.deepEqual(calls, []);
+});
+
+test('a task reopened into Also today stays out of empty focus seats', async () => {
+  // Focus is saved at three but only two other tasks are open, so the third
+  // seat is empty and the reopened task would land in it. Also today means
+  // below the band, so the band narrows to the seats that are filled.
+  const calls = [];
+  await placeArrivingItem({
+    result: planWith([['item-a', 'task-a', 'accepted'], ['item-b', 'task-b', 'accepted'], ['item-c', 'task-c', 'accepted']]),
+    taskId: 'task-c',
+    title: 'C',
+    zone: 'also-today',
+    focusCount: 3,
+    onMoveToPosition: async (id, position) => calls.push(`move:${id}:${position}`),
+    onFocusCountChange: async (count) => calls.push(`focus:${count}`),
+  });
+  assert.deepEqual(calls, ['focus:2']);
+});
+
+test('a task reopened into Initial priorities fills an empty seat without growing the band', async () => {
+  const calls = [];
+  await placeArrivingItem({
+    result: planWith([['item-c', 'task-c', 'accepted'], ['item-a', 'task-a', 'accepted'], ['item-b', 'task-b', 'accepted']]),
+    taskId: 'task-c',
+    title: 'C',
+    zone: 'priority',
+    focusCount: 3,
+    onMoveToPosition: async (id, position) => calls.push(`move:${id}:${position}`),
+    onFocusCountChange: async (count) => calls.push(`focus:${count}`),
+  });
+  assert.deepEqual(calls, ['move:item-c:2']);
 });

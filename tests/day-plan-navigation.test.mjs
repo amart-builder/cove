@@ -10,13 +10,32 @@ test('Today and Morning Arrival have no separate recommendation approval control
   assert.match(readComponent('MorningArrival'), /step === 'plan' && plan.state !== 'active' && <PlanningQuestion/);
 });
 
-test('the full-plan entry closes the grid and uses the planner task count', () => {
+test('the four-dot button and the done counter open Plan your day instead of a separate grid', () => {
   const stage = readComponent('TodayRiverStageV2');
-  const footer = stage.slice(stage.indexOf('<footer className="today2-grid-footer">'));
-  assert.match(footer, /disabled={model.morningArrivalDisabled}/);
-  assert.match(footer, /setGridOpen\(false\);\s*callbacks.onOpenDayPlan\(\)/);
-  assert.match(footer, /model.notTodayCount/);
-  assert.match(readComponent('TodayView'), /notTodayCount: notTodayTasks.length/);
+  const gridButton = stage.slice(stage.indexOf('className="today2-grid-button"') - 60);
+  assert.match(gridButton.slice(0, 700), /disabled={model.morningArrivalDisabled}/);
+  assert.match(gridButton.slice(0, 700), /onClick={openDayPlan}/);
+  assert.match(stage, /function openDayPlan\(\) {\s*if \(model.morningArrivalDisabled\) return;[\s\S]{0,120}callbacks.onOpenDayPlan\(\);/);
+  const marker = stage.slice(stage.indexOf('className="today2-done-marker"'));
+  assert.match(marker.slice(0, 600), /else callbacks.onOpenDayPlan\(\)/);
+  // The separate Focus Grid modal is gone; Plan your day is the one place to reorganize.
+  assert.doesNotMatch(stage, /Focus Grid|<DayRitualLayer|today2-grid-panel|onGridOpenChange/);
+  assert.doesNotMatch(readComponent('TodayView'), /onGridOpenChange|today2GridOpen/);
+  assert.match(readComponent('TodayView'), /onOpenDayPlan: \(\) => void openMorningArrival\('plan'\)/);
+});
+
+test('the done counter keeps its inline list when Plan your day cannot open', () => {
+  const stage = readComponent('TodayRiverStageV2');
+  assert.match(stage, /if \(model.morningArrivalDisabled\) setWakeOpen\(\(current\) => !current\);/);
+  assert.match(stage, /{wakeOpen && model.morningArrivalDisabled && \(/);
+});
+
+test('Plan your day lists what is already done, fed from the done-today list', () => {
+  const today = readComponent('TodayView');
+  assert.match(today, /completedTasks={arrivalCompletedTasks}/);
+  assert.match(today, /const arrivalCompletedTasks = useMemo<MorningArrivalCompletedTask\[\]>\(\s*\(\) => doneToday.map/);
+  assert.match(today, /onReopen={reopenArrivalTask}/);
+  assert.match(readComponent('MorningArrival'), /completedTasks={completedTasks}/);
 });
 
 test('full-plan entry starts at the plan while normal and new-day arrivals start at the brief', () => {
@@ -27,4 +46,13 @@ test('full-plan entry starts at the plan while normal and new-day arrivals start
   const arrival = readComponent('MorningArrival');
   assert.match(arrival, /initialStep = 'brief'/);
   assert.match(arrival, /useState<ArrivalStep>\(initialStep\)/);
+});
+
+test('after the day starts, Plan your day leads back to Today instead of starting the day again', () => {
+  const arrival = readComponent('MorningArrival');
+  assert.match(arrival, /const dayStarted = plan.state === 'active';/);
+  assert.match(arrival, /const backToToday = dayStarted && isFinalStep;/);
+  assert.match(arrival, /if \(backToToday\) void onBypass\(\);/);
+  assert.match(arrival, /backToToday \? 'Back to Today'/);
+  assert.match(arrival, /{!dayStarted && \(\s*<button[^>]*onClick={\(\) => void onSnooze\(\)}/);
 });

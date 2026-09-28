@@ -1,10 +1,10 @@
 {
   "version": 1,
   "product": "Cove",
-  "source_sha": "920531bdf703f5a11b6f1873f796dd6158874084",
+  "source_sha": "916ddfedacd26c75f5fe82fe0d942a6cd48cc41b",
   "source_worktree_dirty": false,
   "allow_dirty": false,
-  "exported_at": "2026-09-26T02:56:07.446Z",
+  "exported_at": "2026-09-28T22:03:33.049Z",
   "file_count": 766,
   "files": [
     {
@@ -99,8 +99,8 @@
     },
     {
       "path": "SETUP.md",
-      "bytes": 59008,
-      "sha256": "b6fb2e631c0018c62d9af926f2f1cfeaeb1830832022f109873f09b33ce5b67e"
+      "bytes": 59050,
+      "sha256": "e0875495fa4808287f4d222cfa3ccc4bfa24d7e7a19431e8da0f3ccedee65b0f"
     },
     {
       "path": "buddy/.gitignore",
@@ -1224,8 +1224,8 @@
     },
     {
       "path": "src/components/tasks/MorningArrival.tsx",
-      "bytes": 13440,
-      "sha256": "29f2230fb47d83309ecb914349bc1a54052f5937f4d3e1ceeb934c79c13d34d9"
+      "bytes": 14710,
+      "sha256": "5a897587fb77f372c947cd7d28b0f0fccb0eba063f37953982523f51c84092aa"
     },
     {
       "path": "src/components/tasks/NotificationTaskSheet.tsx",
@@ -1274,18 +1274,18 @@
     },
     {
       "path": "src/components/tasks/TodayRiverStageV2.tsx",
-      "bytes": 59649,
-      "sha256": "349ff8a85eb7cb9204089d66c88abab9f03c56337bb6c7810455a43e4e9cf255"
+      "bytes": 49338,
+      "sha256": "22e75241a8785183f4566eb00a79b5913817ce6e3a8e6b3d532d945b7e78f12c"
     },
     {
       "path": "src/components/tasks/TodayView.tsx",
-      "bytes": 136315,
-      "sha256": "01fa8868c967becc62cbdee7b3630b2246da8ddb1ab759a18c0e06e66b7e4598"
+      "bytes": 138298,
+      "sha256": "a8e9f7f177cdc4c6b3221f8b2ab46cfa3cb4a69e49984b26583a0d6d7b1caa53"
     },
     {
       "path": "src/components/tasks/arrival/ArrivalPlanGrid.tsx",
-      "bytes": 33568,
-      "sha256": "1f16ff1399886399b25adce93b5b64551fad2ac96955029a4133be51d7d925e6"
+      "bytes": 42081,
+      "sha256": "b28019201281aeef53e7bbb8411ec8933f1fc58472973ff53a0fc50760cad176"
     },
     {
       "path": "src/components/tasks/arrival/ArrivalStepBrief.tsx",
@@ -1319,8 +1319,8 @@
     },
     {
       "path": "src/components/tasks/arrival/TaskSheet.tsx",
-      "bytes": 11347,
-      "sha256": "a7c942ae534947d6830eb380c64341a116dcf56d2452ffbde0395a3e71efc2b5"
+      "bytes": 12804,
+      "sha256": "998dfcba1ef6c101a5ecf8e0a54ad41655313d477dd3566f5169314b25322aea"
     },
     {
       "path": "src/components/tasks/day-arc.ts",
@@ -1864,8 +1864,8 @@
     },
     {
       "path": "src/lib/day-plan/presentation.ts",
-      "bytes": 31973,
-      "sha256": "12d5ae2087e36d46d4a70e21700ee4f208f4c9c6b4c8b5bc6bb55a4059e55aa1"
+      "bytes": 32587,
+      "sha256": "fa6c57572352b248c76b9060ec7d7444379e0c478c981ae937f86b8373e93926"
     },
     {
       "path": "src/lib/day-plan/public-execution.ts",
@@ -2439,13 +2439,13 @@
     },
     {
       "path": "tests/arrival-card-editing.test.mjs",
-      "bytes": 6173,
-      "sha256": "8be11477eb9c994959d983c5a0d9def1aae3584f13fcc062c96eb894dec6aa16"
+      "bytes": 6266,
+      "sha256": "491b012c8581b1fb2d44630c99846426267eb489ec05c9c6d3f4e619df7ce4e2"
     },
     {
       "path": "tests/arrival-drop-outcome.test.mjs",
-      "bytes": 2173,
-      "sha256": "79af58f74a6a666e51d77ffb56e78249ea0031a7a948fc81e09ed5e20a2d1362"
+      "bytes": 3386,
+      "sha256": "08bb725aad75376bc402160541bcaa6689b14a6860a3030fb970edc5fe98fc4b"
     },
     {
       "path": "tests/arrival-edit-rules-are-written-down.regression-1.test.mjs",
@@ -2454,8 +2454,8 @@
     },
     {
       "path": "tests/arrival-plan-grid.test.mjs",
-      "bytes": 4220,
-      "sha256": "a818e8ebe817569d6e69941dfba5f971e3f02bb542e94d08e19edb92d7405911"
+      "bytes": 8882,
+      "sha256": "b9b0df707b423370ed77d402a01712e880c33ed96860f5cbf7f8c747a8768284"
     },
     {
       "path": "tests/arrival-saved-brief-recovery.test.mjs",
@@ -2839,8 +2839,8 @@
     },
     {
       "path": "tests/day-plan-navigation.test.mjs",
-      "bytes": 1695,
-      "sha256": "0e50292f7d1c43e93a207fbf9f7b108beed31afb458a6bf0765fb5be07ef2a31"
+      "bytes": 3571,
+      "sha256": "39e68a485d31c4f80b865975f11bfbf6c2131e7a60619a86c872132edc0b1040"
     },
     {
       "path": "tests/day-plan-next-routes.test.mjs",
@@ -3384,8 +3384,8 @@
     },
     {
       "path": "tests/new-user-practice-surface.regression-5.test.mjs",
-      "bytes": 1232,
-      "sha256": "4c5c9e179a5e4d3d4020669391fc20a16a039239d7784602a83cc4d0ffd38b0c"
+      "bytes": 1320,
+      "sha256": "97ad3ffae2307f7311228b6974481aa997cb1e55a74278957998b47b9549c443"
     },
     {
       "path": "tests/new-user-setup-order.regression-2.test.mjs",
@@ -3629,8 +3629,8 @@
     },
     {
       "path": "tests/round6-ui-source.test.mjs",
-      "bytes": 2129,
-      "sha256": "eb3d922dad4c3703dd72cc6fed455f7c9126a367a9358ad77d5d5bf85e4dcad3"
+      "bytes": 2131,
+      "sha256": "d5e225e29019e2a9a8586181805b990e7374486af742e4540624be6df4205801"
     },
     {
       "path": "tests/scheduled-reminder-banner-provenance.regression-1.test.mjs",
@@ -3834,8 +3834,8 @@
     },
     {
       "path": "tsconfig.json",
-      "bytes": 670,
-      "sha256": "5c51df4c59f4510d8c7dadf07a5c32132228826a3b331da5e286207b4df7ef9c"
+      "bytes": 692,
+      "sha256": "68d0e0f5d038b1756a34d1ac565a14bde815adb463a2721910be846386de7460"
     }
   ],
   "checks": {

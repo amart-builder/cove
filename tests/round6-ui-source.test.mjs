@@ -23,7 +23,7 @@ const css = readFileSync(new URL('../src/app/globals.css', import.meta.url), 'ut
 test('Today focus details use the inline card and shared rich-sheet scrim', () => {
   assert.match(stage, /today2-focus-detail-card/);
   assert.match(stage, /<ModalScrim/);
-  assert.match(stage, /aria-label="Close Focus Grid"/);
+  assert.match(stage, /aria-label="Open Plan your day"/);
   assert.doesNotMatch(stage, /today2-task-detail/);
   assert.match(css, /height:\s*158px/);
   assert.match(css, /-webkit-line-clamp:\s*3/);

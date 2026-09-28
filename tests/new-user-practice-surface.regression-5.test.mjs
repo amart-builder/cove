@@ -16,7 +16,8 @@ test('first-day practice requires only controls present in the shipped Today sur
     setup.indexOf('## Step 8: Leave the user a clear way back in'),
   );
 
-  assert.match(practice, /Open Focus Grid, switch one item into Focus/);
+  assert.match(practice, /Open Plan your day from the four-dot button, drag one item into Initial\s+priorities/);
+  assert.doesNotMatch(practice, /Focus Grid/);
   assert.match(practice, /user choose an\s+item to mark done and immediately undo/);
   assert.match(practice, /original item, order,\s+and owner return/);
   assert.match(practice, /Do not seed demo data/);

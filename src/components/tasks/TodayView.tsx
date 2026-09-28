@@ -70,7 +70,7 @@ import {
   shouldShowNeedsSetupToStart,
   shortArrivalSummary,
 } from '@/lib/day-plan/presentation';
-import type { DayPlan, DayPlanExecutionRun, DayPlanItem } from '@/lib/day-plan/types';
+import type { DayPlan, DayPlanExecutionRun, DayPlanItem, DayPlanMutationResult } from '@/lib/day-plan/types';
 import {
   planTaskReconciliation,
   reconciliationStateMatches,
@@ -78,6 +78,7 @@ import {
 } from '@/lib/day-plan/reconciliation';
 import MorningArrival, {
   type MorningArrivalBoardTask,
+  type MorningArrivalCompletedTask,
   type MorningArrivalItem,
 } from './MorningArrival';
 import DaySettlement from './DaySettlement';
@@ -740,7 +741,6 @@ function TodayExperience({
   const [now, setNow] = useState(() => new Date());
   const [focusCount, setFocusCount] = useState<1 | 2 | 3>(1);
   const [focusCountBusy, setFocusCountBusy] = useState(false);
-  const [today2GridOpen, setToday2GridOpen] = useState(false);
   // Must start false, matching the server, and never read document.hidden or the
   // reduced-motion query during the first render. CurrentCanvas renders the two
   // ambient glints conditionally on this, so a client-only true here gives the
@@ -1390,7 +1390,6 @@ function TodayExperience({
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (dayRitual.view === 'checking' || dayRitual.ritualOpen) return;
-      if (TODAY_RIVER_STAGE_V2 && today2GridOpen) return;
       const target = event.target as HTMLElement | null;
       const isTyping =
         target?.tagName === 'INPUT' ||
@@ -1445,7 +1444,7 @@ function TodayExperience({
     }
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [closeSearch, commitments, dayRitual.ritualOpen, dayRitual.view, dismissMenuId, focusTask, focusedTaskId, openSearch, searchOpen, today2FocusTasks, today2GridOpen]);
+  }, [closeSearch, commitments, dayRitual.ritualOpen, dayRitual.view, dismissMenuId, focusTask, focusedTaskId, openSearch, searchOpen, today2FocusTasks]);
 
   async function handleCapture(event: React.FormEvent) {
     event.preventDefault();
@@ -1804,6 +1803,46 @@ function TodayExperience({
     }
   }
 
+  // Reopens a task from Already completed. A task that was on today's plan is
+  // restored through the plan, which puts it back on its old list; any other
+  // task returns to Not Started. A zone moves it on from there, and a Today
+  // zone hands back the plan so Plan your day can seat it.
+  async function reopenArrivalTask(
+    taskId: string,
+    title: string,
+    zone?: 'priority' | 'also-today' | 'not-today',
+  ): Promise<DayPlanMutationResult | void> {
+    const task = tasks.find((candidate) => candidate._id === taskId);
+    if (!task) throw new Error('That task is no longer available.');
+    setSurfaceError(undefined);
+    const planItem = dayRitual.plan?.items.find(
+      (item) => item.taskId === taskId && item.decision === 'completed',
+    );
+    if (planItem) {
+      const reopened = await dayRitual.reopenItem(planItem.id, title);
+      if (zone === 'not-today') await dayRitual.laterItem(planItem.id, title);
+      await retry();
+      return zone === 'not-today' ? undefined : reopened;
+    }
+    const column = notStartedColumn ?? todayColumn;
+    if (!column) throw new Error('Cove needs a Not Started list to reopen this task.');
+    await updateTask(taskId, {
+      columnId: column._id,
+      status: 'open',
+      position: tasks.filter((candidate) => candidate.columnId === column._id).length,
+    });
+    await recordDecision({
+      eventType: 'task_undo',
+      entityId: taskId,
+      reason: 'completed_reopen',
+      before: { columnId: task.columnId, status: task.status },
+      after: { columnId: column._id, status: 'open' },
+      source: 'human',
+    });
+    await retry();
+    if (zone === 'priority' || zone === 'also-today') return dayRitual.addTask(taskId, title);
+  }
+
   async function saveRitualTask(taskId: string, patch: Partial<EditableTask>) {
     await updateTask(taskId, {
       _expected: patch._expected,
@@ -2000,6 +2039,17 @@ function TodayExperience({
       };
     }),
     [arrivalPlanItems, tasksById],
+  );
+  // Already completed, the last section of Plan your day: everything finished
+  // today, newest first, whether it was on the plan or not.
+  const arrivalCompletedTasks = useMemo<MorningArrivalCompletedTask[]>(
+    () => doneToday.map((task) => ({
+      id: task._id,
+      title: task.title,
+      description: task.description,
+      project: helpfulProjectLabel(task.project) ?? helpfulProjectLabel(task.tags[0]),
+    })),
+    [doneToday],
   );
   const recommendation = arrivalPlanItems[0]
     ? `Start with ${arrivalPlanItems[0].title}. ${arrivalPlanItems[0].whyToday}`
@@ -2347,7 +2397,6 @@ function TodayExperience({
             connectedProviders: taskSessions.connectedProviders,
             localMode,
             reorderEnabled: dayRitual.plan?.state === 'active' && !dayRitual.busy,
-            focusCountBusy: focusCountBusy || !localMode,
             rhythmCount: rhythmTemplates.filter((template) => template.active).length,
             secondCurrentItems: today2SecondCurrentItems,
             statusMessage: dayRitual.startReceipt ?? dayRitual.settlementReceipt,
@@ -2409,8 +2458,6 @@ function TodayExperience({
                 );
               });
             },
-            onFocusCountChange: (count) => void changeToday2FocusCount(count).catch(() => undefined),
-            onGridOpenChange: setToday2GridOpen,
             onOpenSecondCurrentItem: (item) => setDetailTaskId(item.id),
             onEditTask: (taskId) => setDetailTaskId(taskId),
             onMotionDataFailure: () => {
@@ -3176,6 +3223,7 @@ function TodayExperience({
                 focusCount={focusCount}
                 items={arrivalItems}
                 notTodayTasks={notTodayTasks}
+                completedTasks={arrivalCompletedTasks}
                 tasksById={tasksById}
                 recommendation={recommendation}
                 brief={dayRitual.morningBrief}
@@ -3222,6 +3270,7 @@ function TodayExperience({
                   if (!task) throw new Error('That task is no longer available.');
                   await completeTask(task);
                 }}
+                onReopen={reopenArrivalTask}
                 onAddTask={async (taskId, title) => {
                   return dayRitual.addTask(taskId, title);
                 }}

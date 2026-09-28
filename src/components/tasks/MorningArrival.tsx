@@ -13,6 +13,7 @@ import type {
 import type { ArrivalTask } from '@/lib/quiet-current/arrival-cache';
 import type { Task } from './TaskFieldsEditor';
 import {
+  type ArrivalDropZone,
   arrivalDateLabel,
   arrivalStartDayUnavailableReason,
   isMorningBriefWriting,
@@ -42,6 +43,14 @@ export type MorningArrivalBoardTask = {
   due?: string;
 };
 
+/** A task finished today, shown in Already completed at the bottom of the plan. */
+export type MorningArrivalCompletedTask = {
+  id: string;
+  title: string;
+  description?: string;
+  project?: string;
+};
+
 interface MorningArrivalProps {
   initialStep?: ArrivalStep;
   localDate: string;
@@ -49,6 +58,7 @@ interface MorningArrivalProps {
   focusCount: 1 | 2 | 3;
   items: MorningArrivalItem[];
   notTodayTasks: MorningArrivalBoardTask[];
+  completedTasks: MorningArrivalCompletedTask[];
   tasksById: ReadonlyMap<string, Task>;
   recommendation: string;
   brief?: PublicMorningBrief;
@@ -71,6 +81,16 @@ interface MorningArrivalProps {
   onRemove: (itemId: string, title: string, taskBacked: boolean) => void | Promise<void>;
   onComplete: (itemId: string, title: string) => void | Promise<void>;
   onCompleteBoardTask: (taskId: string, title: string) => void | Promise<void>;
+  /**
+   * Reopens a task finished today. With no zone it goes back where it came
+   * from; otherwise it lands in that column, and a Today landing resolves to
+   * the plan it now sits in so the grid can place it.
+   */
+  onReopen: (
+    taskId: string,
+    title: string,
+    zone?: Exclude<ArrivalDropZone, 'completed'>,
+  ) => DayPlanMutationResult | void | Promise<DayPlanMutationResult | void>;
   onAddTask: (
     taskId: string,
     title: string,
@@ -104,6 +124,7 @@ export default function MorningArrival({
   focusCount,
   items,
   notTodayTasks,
+  completedTasks,
   tasksById,
   brief,
   briefGeneration,
@@ -125,6 +146,7 @@ export default function MorningArrival({
   onRemove,
   onComplete,
   onCompleteBoardTask,
+  onReopen,
   onAddTask,
   onSaveTask,
   onSnooze,
@@ -157,7 +179,11 @@ export default function MorningArrival({
   const buddyActive = buddyBusy || Boolean(streamingTurn);
   const currentStepIndex = availableSteps.indexOf(step);
   const isFinalStep = step === 'plan';
-  const startDayUnavailableReason = arrivalStartDayUnavailableReason({
+  // Once the day has started, Plan your day is where tasks get reorganized
+  // during the day, so its way out is simply back to Today.
+  const dayStarted = plan.state === 'active';
+  const backToToday = dayStarted && isFinalStep;
+  const startDayUnavailableReason = backToToday ? undefined : arrivalStartDayUnavailableReason({
     finalStep: isFinalStep,
     busy,
     buddyActive,
@@ -278,6 +304,7 @@ export default function MorningArrival({
               localDate={localDate}
               todayItems={visibleItems}
               notTodayTasks={notTodayTasks}
+              completedTasks={completedTasks}
               tasksById={tasksById}
               focusCount={focusCount}
               busy={busy}
@@ -289,6 +316,7 @@ export default function MorningArrival({
               onRemove={onRemove}
               onComplete={onComplete}
               onCompleteBoardTask={onCompleteBoardTask}
+              onReopen={onReopen}
               onAddTask={onAddTask}
               onSaveTask={onSaveTask}
               escapeRef={escapeRef}
@@ -308,28 +336,33 @@ export default function MorningArrival({
                   Back
                 </button>
               )}
-              <button type="button" disabled={busy} className="press-scale min-h-8 text-[13px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent-blue/40 disabled:opacity-50" onClick={() => void onSnooze()}>
-                Snooze 15 minutes
-              </button>
-              <button type="button" disabled={busy} className="press-scale min-h-8 text-[13px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent-blue/40 disabled:opacity-50" onClick={() => void onBypass()}>
-                Continue to Today
-              </button>
+              {!dayStarted && (
+                <button type="button" disabled={busy} className="press-scale min-h-8 text-[13px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent-blue/40 disabled:opacity-50" onClick={() => void onSnooze()}>
+                  Snooze 15 minutes
+                </button>
+              )}
+              {!backToToday && (
+                <button type="button" disabled={busy} className="press-scale min-h-8 text-[13px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-accent-blue/40 disabled:opacity-50" onClick={() => void onBypass()}>
+                  Continue to Today
+                </button>
+              )}
             </div>
 
             <div className="flex flex-col items-stretch gap-1.5 sm:ml-auto sm:items-end">
               <button
                 type="button"
                 data-ritual-primary={isFinalStep ? '' : undefined}
-                disabled={Boolean(startDayUnavailableReason)}
+                disabled={backToToday ? busy : Boolean(startDayUnavailableReason)}
                 title={startDayUnavailableReason}
                 aria-describedby={startDayUnavailableReason ? 'arrival-start-day-availability' : undefined}
                 className="min-h-11 w-full rounded-[13px] bg-foreground px-6 text-[14.5px] font-semibold tracking-[-0.005em] text-background shadow-lg outline-none transition-[transform,box-shadow,opacity] duration-150 hover:-translate-y-px hover:shadow-xl focus-visible:ring-2 focus-visible:ring-accent-blue/40 active:translate-y-0 active:shadow-md disabled:opacity-40 motion-reduce:transform-none sm:w-auto"
                 onClick={() => {
-                  if (isFinalStep) void onStartDay();
+                  if (backToToday) void onBypass();
+                  else if (isFinalStep) void onStartDay();
                   else changeStep(availableSteps[currentStepIndex + 1]);
                 }}
               >
-                {isFinalStep ? busy ? 'Setting your day…' : plan.items.some(
+                {backToToday ? 'Back to Today' : isFinalStep ? busy ? 'Setting your day…' : plan.items.some(
                           (item) =>
                             item.commitment === 'pencil' &&
                             ['preselected', 'accepted'].includes(item.decision),

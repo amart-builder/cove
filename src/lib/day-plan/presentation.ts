@@ -815,7 +815,9 @@ export function shouldAttemptLateBriefAttach(input: {
 }
 
 /** Where a task was picked up from and which column it was dropped on. */
-export type ArrivalDropZone = 'priority' | 'also-today' | 'not-today';
+export type ArrivalDropZone = 'priority' | 'also-today' | 'not-today' | 'completed';
+
+const PRIORITIES_FULL_NOTE = 'Initial priorities are full at three. Move one down first.';
 
 /**
  * What a drop on the arrival plan grid actually does.
@@ -825,18 +827,30 @@ export type ArrivalDropZone = 'priority' | 'also-today' | 'not-today';
  * priorities." and then contradicted by the note beside it. Both now read this.
  */
 export function arrivalDropOutcome(input: {
-  origin: 'today' | 'not-today';
+  origin: 'today' | 'not-today' | 'completed';
   startedInFocus: boolean;
   over: ArrivalDropZone | undefined;
   focusCount: number;
+  /** False for a proposal still awaiting acceptance, which cannot be marked done. */
+  completable?: boolean;
 }): { kind: 'moved'; zone: ArrivalDropZone } | { kind: 'unchanged' } | { kind: 'refused'; note: string } {
-  const { origin, startedInFocus, over, focusCount } = input;
+  const { origin, startedInFocus, over, focusCount, completable = true } = input;
   if (!over) return { kind: 'unchanged' };
 
-  if (origin === 'not-today') {
-    if (over === 'not-today') return { kind: 'unchanged' };
+  // Dropping into Already completed marks the task done; dragging out of it
+  // reopens the task into whichever column it lands on.
+  if (over === 'completed') {
+    if (origin === 'completed') return { kind: 'unchanged' };
+    if (!completable) {
+      return { kind: 'refused', note: 'Accept this proposal before marking it done.' };
+    }
+    return { kind: 'moved', zone: over };
+  }
+
+  if (origin === 'not-today' || origin === 'completed') {
+    if (origin === 'not-today' && over === 'not-today') return { kind: 'unchanged' };
     if (over === 'priority' && focusCount >= 3) {
-      return { kind: 'refused', note: 'Initial priorities are full at three. Move one down first.' };
+      return { kind: 'refused', note: PRIORITIES_FULL_NOTE };
     }
     return { kind: 'moved', zone: over };
   }
@@ -845,7 +859,7 @@ export function arrivalDropOutcome(input: {
   if (over === 'priority') {
     if (startedInFocus) return { kind: 'unchanged' };
     if (focusCount >= 3) {
-      return { kind: 'refused', note: 'Initial priorities are full at three. Move one down first.' };
+      return { kind: 'refused', note: PRIORITIES_FULL_NOTE };
     }
     return { kind: 'moved', zone: over };
   }
